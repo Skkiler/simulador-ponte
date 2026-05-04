@@ -1,0 +1,181 @@
+truss_type,side_truss_type,top_profile,internal_truss_type,chord_truss_type,reinforcement_profile,center_height_mm,panel_mm,width_mm,min_fs_primary,mass_g,mass_margin_g,estimated_sticks,solver_status,feasible,score,error
+Parker,Parker,parker_plateau,Pratt,none,light,187.0,100.0,170.0,0.21900452266792506,843.6959999999999,156.3040000000001,603,regular,False,21.259255680037754,
+Parker,Parker,parker_plateau,Pratt,none,balanced,187.0,100.0,170.0,0.2213419494454239,892.08,107.91999999999996,638,regular,False,19.877858483362715,
+Parker,Parker,parker_plateau,Pratt,Pratt,light,187.0,100.0,170.0,0.2181207504189225,916.2719999999999,83.72800000000007,655,regular,False,19.05546251256768,
+Parker,Parker,parker_plateau,Pratt,none,strong,187.0,100.0,170.0,0.47615704624985816,1212.624,-212.62400000000002,867,regular,False,17.905991387495746,
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,187.0,100.0,170.0,0.2205801036627326,964.6560000000001,35.34399999999994,690,regular,False,17.677723109881974,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,187.0,100.0,170.0,0.4761571425418086,1285.2,-285.20000000000005,919,regular,False,15.728714276254255,
+Parker,Parker,parker_plateau,Pratt,none,strong_top,187.0,100.0,170.0,0.22347705612088792,1052.352,-52.35200000000009,752,regular,False,15.133751683626635,
+Parker,Parker,parker_plateau,Pratt,Pratt,light,220.0,100.0,170.0,0.16415714186407146,994.8960000000001,5.103999999999928,711,regular,False,15.077834255922141,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,220.0,100.0,170.0,0.5367807901155514,1388.016,-388.0160000000001,992,regular,False,14.462943703466538,
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,220.0,100.0,170.0,0.16600503325839752,1043.28,-43.27999999999997,746,regular,False,13.681750997751926,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,187.0,100.0,170.0,0.22301728363424644,1124.928,-124.92800000000011,804,regular,False,12.94267850902739,
+Parker,Parker,parker_plateau,Pratt,Pratt,light,252.99999999999997,100.0,170.0,0.12879172382189183,1037.232,-37.23199999999997,741,regular,False,12.746791714656755,
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,252.99999999999997,100.0,170.0,0.13021556469941117,1085.616,-85.61599999999999,776,regular,False,11.337986940982336,
+Parker,Parker,parker_plateau,Pratt,Pratt,light,286.0,100.0,170.0,0.10408875644320523,1061.424,-61.42399999999998,759,regular,False,11.279942693296157,
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,286.0,100.0,170.0,0.10520272231810655,1109.808,-109.80799999999999,793,regular,False,9.861841669543196,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,252.99999999999997,100.0,170.0,0.4164022881309512,1451.5200000000002,-451.5200000000002,1037,regular,False,8.946468643928531,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,220.0,100.0,170.0,0.16734406191127815,1227.744,-227.74399999999991,877,regular,False,8.188001857338346,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,252.99999999999997,100.0,170.0,0.13089132948809448,1270.08,-270.0799999999999,908,regular,False,5.824339884642837,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,286.0,100.0,170.0,0.33314892358516635,1481.76,-481.76,1059,regular,False,5.541667707554991,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,286.0,100.0,170.0,0.1054928559795049,1300.32,-300.31999999999994,929,regular,False,4.15518567938515,
+Parker,Parker,parker_plateau,Pratt,none,strong,187.0,100.0,153.0,0.9021929824559716,1212.624,-212.62400000000002,867,singular_lstsq_rank_174_of_180,False,-4.312930526320855,
+Parker,Parker,parker_plateau,Pratt,none,strong,187.0,100.0,187.00000000000003,0.9021929824561462,1218.672,-218.67200000000003,871,singular_lstsq_rank_174_of_180,False,-4.494370526315613,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,187.0,100.0,153.0,0.9021929824557146,1285.2,-285.20000000000005,919,singular_lstsq_rank_174_of_180,False,-6.490210526328568,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,187.0,100.0,187.00000000000003,0.9021929824562138,1291.248,-291.24800000000005,923,singular_lstsq_rank_174_of_180,False,-6.671650526313584,
+Parker,Parker,parker_plateau,Pratt,none,light,187.0,100.0,153.0,0.304637964901201,843.6959999999999,156.3040000000001,603,singular_lstsq_rank_174_of_180,False,-11.171741052963968,
+Parker,Parker,parker_plateau,Pratt,none,light,187.0,100.0,187.00000000000003,0.29122677436743094,849.744,150.25599999999997,607,singular_lstsq_rank_174_of_180,False,-11.755516768977072,
+Parker,Parker,parker_plateau,Pratt,none,balanced,187.0,100.0,153.0,0.30457441328755974,892.08,107.91999999999996,638,singular_lstsq_rank_174_of_180,False,-12.625167601373208,
+Parker,Parker,parker_plateau,Pratt,none,balanced,187.0,100.0,187.00000000000003,0.2912039489350619,898.128,101.87199999999996,642,singular_lstsq_rank_174_of_180,False,-13.207721531948144,
+Parker,Parker,parker_plateau,Pratt,Pratt,light,187.0,100.0,153.0,0.304556516214359,916.2719999999999,83.72800000000007,655,singular_lstsq_rank_174_of_180,False,-13.35146451356923,
+Parker,Parker,parker_plateau,Pratt,Pratt,light,187.0,100.0,187.00000000000003,0.29118214166636497,922.32,77.67999999999995,659,singular_lstsq_rank_174_of_180,False,-13.934135750009052,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,220.0,100.0,153.0,0.7338188758207799,1381.968,-381.9680000000001,988,singular_lstsq_rank_174_of_180,False,-14.444473725376607,
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,187.0,100.0,153.0,0.30448570290852245,964.6560000000001,35.34399999999994,690,singular_lstsq_rank_174_of_180,False,-14.805108912744327,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,220.0,100.0,187.00000000000003,0.7103813232507515,1388.016,-388.0160000000001,992,singular_lstsq_rank_174_of_180,False,-15.329040302477457,
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,187.0,100.0,187.00000000000003,0.29115660300178586,970.704,29.29600000000005,694,singular_lstsq_rank_174_of_180,False,-15.386421909946424,
+Parker,Parker,parker_plateau,Pratt,none,strong_top,187.0,100.0,153.0,0.30672840863538753,1052.352,-52.35200000000009,752,singular_lstsq_rank_174_of_180,False,-17.368707740938376,
+Parker,Parker,parker_plateau,Pratt,Pratt,light,220.0,100.0,153.0,0.22937151598113784,988.848,11.152000000000044,707,singular_lstsq_rank_174_of_180,False,-17.784294520565865,
+Parker,Parker,parker_plateau,Pratt,none,strong_top,187.0,100.0,187.00000000000003,0.29318848422686183,1058.3999999999999,-58.399999999999864,756,singular_lstsq_rank_174_of_180,False,-17.95634547319414,
+Parker,Parker,parker_plateau,Pratt,Pratt,light,220.0,100.0,187.00000000000003,0.21866036582635276,994.8960000000001,5.103999999999928,711,singular_lstsq_rank_174_of_180,False,-18.28706902520942,
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,220.0,100.0,153.0,0.22926816417181392,1037.232,-37.23199999999997,741,singular_lstsq_rank_174_of_180,False,-19.23891507484558,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,187.0,100.0,153.0,0.30667158498437,1124.928,-124.92800000000011,804,singular_lstsq_rank_174_of_180,False,-19.5476924504689,
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,220.0,100.0,187.00000000000003,0.21860231993688906,1043.28,-43.27999999999997,746,singular_lstsq_rank_174_of_180,False,-19.740330401893328,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,187.0,100.0,187.00000000000003,0.2931566556045988,1130.9759999999999,-130.97599999999989,808,singular_lstsq_rank_174_of_180,False,-20.134580331862033,
+Parker,Parker,parker_plateau,Pratt,Pratt,light,252.99999999999997,100.0,153.0,0.1796122591521381,1037.232,-37.23199999999997,741,singular_lstsq_rank_174_of_180,False,-20.728592225435854,
+Parker,Parker,parker_plateau,Pratt,Pratt,light,252.99999999999997,100.0,187.00000000000003,0.17129867513531766,1043.28,-43.27999999999997,746,singular_lstsq_rank_174_of_180,False,-21.159439745940468,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,252.99999999999997,100.0,153.0,0.5682143010997805,1451.5200000000002,-451.5200000000002,1037,singular_lstsq_rank_174_of_180,False,-21.49917096700659,
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,252.99999999999997,100.0,153.0,0.17949395703342272,1085.616,-85.61599999999999,776,singular_lstsq_rank_174_of_180,False,-22.183661288997317,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,252.99999999999997,100.0,187.00000000000003,0.5505046342867841,1457.568,-457.568,1042,singular_lstsq_rank_174_of_180,False,-22.211900971396478,
+Parker,Parker,parker_plateau,Pratt,Pratt,light,286.0,100.0,153.0,0.14464375350724853,1061.424,-61.42399999999998,759,singular_lstsq_rank_174_of_180,False,-22.503407394782542,
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,252.99999999999997,100.0,187.00000000000003,0.17122237326414658,1091.664,-91.66399999999999,780,singular_lstsq_rank_174_of_180,False,-22.613248802075603,
+Parker,Parker,parker_plateau,Pratt,Pratt,light,286.0,100.0,187.00000000000003,0.1382853082509757,1061.424,-61.42399999999998,759,singular_lstsq_rank_174_of_180,False,-22.69416075247073,
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,286.0,100.0,153.0,0.1445214251029743,1109.808,-109.80799999999999,793,singular_lstsq_rank_174_of_180,False,-23.95859724691077,
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,286.0,100.0,187.00000000000003,0.1381998793359772,1109.808,-109.80799999999999,793,singular_lstsq_rank_174_of_180,False,-24.148243619920684,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,220.0,100.0,153.0,0.2307628162840197,1221.6960000000001,-221.69600000000014,873,singular_lstsq_rank_174_of_180,False,-24.727995511479413,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,220.0,100.0,187.00000000000003,0.22012545696185362,1227.744,-227.74399999999991,877,singular_lstsq_rank_174_of_180,False,-25.22855629114439,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,286.0,100.0,153.0,0.4533276965946341,1481.76,-481.76,1059,singular_lstsq_rank_174_of_180,False,-25.852969102160976,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,286.0,100.0,187.00000000000003,0.4400362133637739,1481.76,-481.76,1059,singular_lstsq_rank_174_of_180,False,-26.251713599086784,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,252.99999999999997,100.0,153.0,0.1805078053258325,1270.08,-270.0799999999999,908,singular_lstsq_rank_174_of_180,False,-27.687165840225024,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,252.99999999999997,100.0,187.00000000000003,0.17235547439971105,1276.1280000000002,-276.12800000000016,912,singular_lstsq_rank_174_of_180,False,-28.113175768008674,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,286.0,100.0,153.0,0.14521314062717336,1300.32,-300.31999999999994,929,singular_lstsq_rank_174_of_180,False,-29.653205781184795,
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,286.0,100.0,187.00000000000003,0.1390355352154036,1300.32,-300.31999999999994,929,singular_lstsq_rank_174_of_180,False,-29.83853394353789,
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,light,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,Pratt,strong,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,light,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,strong,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,light,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,strong,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,light,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,strong,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,light,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,strong,,,,,,,,,False,-999,"KeyError((1200.0, -76.5, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,light,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,strong,,,,,,,,,False,-999,"KeyError((1200.0, -85.0, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,light,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,balanced,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,strong_top,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"
+Parker,Parker,parker_plateau,Pratt,none,strong,,,,,,,,,False,-999,"KeyError((1200.0, -93.50000000000001, 'bottom'))"

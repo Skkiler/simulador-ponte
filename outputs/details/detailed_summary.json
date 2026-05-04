@@ -1,0 +1,17 @@
+{
+  "total_members": 234,
+  "total_piece_instances": 952,
+  "total_cut_length_mm": 94861.36720232971,
+  "estimated_blank_sticks_needed": 866,
+  "waste_factor": 0.08,
+  "extra_sticks_for_waste": 70,
+  "estimated_total_sticks_with_waste": 936,
+  "estimated_piece_mass_g_without_waste_scaling": 1106.715950693846,
+  "estimated_glue_area_mm2": 76440.0,
+  "estimated_glue_mass_g": 18.816,
+  "estimated_total_mass_g": 1329.216,
+  "mass_limit_g": 1000.0,
+  "mass_margin_g": -329.2159999999999,
+  "glue_shear_strength_MPa": 3.5,
+  "glue_safety_factor": 2.0
+}

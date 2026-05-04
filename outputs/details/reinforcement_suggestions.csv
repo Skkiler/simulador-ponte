@@ -1,0 +1,137 @@
+member_id,group,role,N_N,FS_min,FS_min_label,governing_mode,report_mode,suggested_action,priority
+4,top_chord,primary,-228.18169367387904,1.1818777863286223,1.182,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+6,top_chord,primary,-335.9328135841853,0.802788129336514,0.803,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+8,top_chord,primary,-397.0048819690408,0.67929359876494,0.679,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+10,top_chord,primary,-435.37401429713947,0.6194280461027778,0.619,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+12,top_chord,primary,-465.3387140222075,0.5795410243625889,0.580,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+14,top_chord,primary,-481.4178898133914,0.5601845729175856,0.560,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+16,top_chord,primary,-474.86922839813644,0.5679097715169162,0.568,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+18,top_chord,primary,-451.01991559462294,0.5979400591312051,0.598,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+20,top_chord,primary,-412.68084549728275,0.6534901678681757,0.653,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+22,top_chord,primary,-365.7000686385654,0.7374427792807917,0.737,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+24,top_chord,primary,-299.30096996824335,0.9010424357415683,0.901,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+26,top_chord,primary,-196.0315777525748,1.3757113935000085,1.376,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+30,vertical,primary,-236.46498335506294,0.6842862004520784,0.684,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+31,vertical,primary,-151.78024778667293,1.066078935563628,1.066,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+32,vertical,primary,-108.86803802707443,1.3441325281994922,1.344,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+33,vertical,primary,-83.86406122416996,1.1167258560668991,1.117,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+34,vertical,primary,-67.58029935488204,0.9623650849620562,0.962,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+35,vertical,primary,-121.1609464208465,0.5367812191274881,0.537,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+36,vertical,primary,-76.86736683339021,0.8460927336224433,0.846,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+37,vertical,primary,-109.44113319203773,0.5942639539038869,0.594,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+38,vertical,primary,-60.53137224372144,1.0744332751710934,1.074,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+39,vertical,primary,-74.65172065685294,1.254534587277605,1.255,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+40,vertical,primary,-96.12942762576435,1.522250520029418,1.522,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+41,vertical,primary,-130.76504141906125,1.2374081271572437,1.237,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+42,vertical,primary,-198.34238016950218,0.8158101403326833,0.816,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+45,chord_lacing,secondary,0.057242766154129855,12334.812718498562,12334.813,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+47,chord_lacing,secondary,67.20181251780545,10.506841609561066,10.507,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+49,chord_lacing,secondary,39.59349997772477,17.83319990395491,17.833,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+51,chord_lacing,secondary,28.127722293993102,25.10259425274505,25.103,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+53,chord_lacing,secondary,22.01559772128785,32.071752442917386,32.072,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+55,chord_lacing,secondary,38.02263355872494,18.56996041343323,18.570,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+57,chord_lacing,secondary,13.670673766768688,51.64915877931118,51.649,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+59,chord_lacing,secondary,10.566762900987364,66.82072897973548,66.821,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+61,chord_lacing,secondary,34.68967887697784,20.35414632992168,20.354,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+63,chord_lacing,secondary,19.874078766594224,35.52762411241058,35.528,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+65,chord_lacing,secondary,25.283306295719434,27.926679831408837,27.927,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+67,chord_lacing,secondary,34.955776621575644,20.199202198934675,20.199,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+69,chord_lacing,secondary,57.170613328631745,12.350380009766084,12.350,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+71,chord_lacing,secondary,-0.055999668506070716,135.38250013831794,135.383,buckling_y,buckling_y,avaliar remoção/redução: baixa solicitação relativa,low
+75,top_chord,primary,-196.0261826280553,1.3757492564740834,1.376,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+77,top_chord,primary,-299.2976080713704,0.9010525568105826,0.901,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+79,top_chord,primary,-365.6979627619951,0.7374470258548199,0.737,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+81,top_chord,primary,-412.6794144137288,0.6534924340316896,0.653,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+83,top_chord,primary,-451.0187521935629,0.5979416015151864,0.598,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+85,top_chord,primary,-474.86815302944245,0.5679110575841865,0.568,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+87,top_chord,primary,-481.4168374593382,0.5601857974541203,0.560,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+89,top_chord,primary,-465.3376156388722,0.5795423923117551,0.580,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+91,top_chord,primary,-435.3727059045779,0.6194299076228891,0.619,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+93,top_chord,primary,-397.00304197777865,0.6792967470891441,0.679,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+95,top_chord,primary,-335.9299153531597,0.8027950553807782,0.803,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+97,top_chord,primary,-228.1767474788677,1.1819034059330533,1.182,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+101,vertical,primary,-198.3410644700119,0.8158155520258628,0.816,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+102,vertical,primary,-130.7672154174797,1.2373875553089955,1.237,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+103,vertical,primary,-96.13092765802388,1.5222267667489409,1.522,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+104,vertical,primary,-74.65268850539631,1.2545183226326573,1.255,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+105,vertical,primary,-60.53202089427555,1.0744217617319418,1.074,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+106,vertical,primary,-109.44123002763992,0.5942634280882704,0.594,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+107,vertical,primary,-76.86741746560035,0.8460921763050973,0.846,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+108,vertical,primary,-121.16104325645098,0.5367807901155514,0.537,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+109,vertical,primary,-67.58094800543958,0.9623558480592406,0.962,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+110,vertical,primary,-83.86502907271337,1.116712968436559,1.117,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+111,vertical,primary,-108.86953805933427,1.3441140083987317,1.344,buckling_y,buckling_y,"reforçar: aumentar inércia, usar seção caixa/espaçada ou reduzir comprimento livre",high
+112,vertical,primary,-151.78242178509103,1.0660636659830518,1.066,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+113,vertical,primary,-236.4636676555707,0.6842900078657729,0.684,compression_direct,compression_direct,reforçar: adicionar palitos contínuos ou aumentar sobreposição/talas,high
+116,chord_lacing,secondary,-0.05724276615429906,132.44250127314118,132.443,buckling_y,buckling_y,avaliar remoção/redução: baixa solicitação relativa,low
+118,chord_lacing,secondary,57.17152917321757,12.350182166034626,12.350,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+120,chord_lacing,secondary,34.95632943864057,20.198882758539963,20.199,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+122,chord_lacing,secondary,25.283636436940633,27.926315178634045,27.926,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+124,chord_lacing,secondary,19.874279200994426,35.52726581221978,35.527,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+126,chord_lacing,secondary,34.68971815758629,20.35412328207653,20.354,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+128,chord_lacing,secondary,10.566776805334586,66.82064105333801,66.821,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+130,chord_lacing,secondary,13.67068767111713,51.64910624735977,51.649,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+132,chord_lacing,secondary,38.02267283933385,18.569941229107194,18.570,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+134,chord_lacing,secondary,22.015798155688714,32.07146045793278,32.071,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+136,chord_lacing,secondary,28.12805243521469,25.102299621570324,25.102,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+138,chord_lacing,secondary,39.59405279478944,17.832950914611086,17.833,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+140,chord_lacing,secondary,67.20272836239094,10.50669842141628,10.507,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+142,chord_lacing,secondary,0.05599966850592971,12608.624637219675,12608.625,tension_capacity,tension_capacity,avaliar remoção/redução: baixa solicitação relativa,low
+173,bottom_bracing,stabilizer,-0.3641737294822922,8.229687641334818,8.230,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+174,top_bracing,stabilizer,0.3641737294826103,1938.8515503387405,1938.852,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+175,bottom_bracing,stabilizer,5.724443940456469,123.34452172898683,123.345,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+176,top_bracing,stabilizer,-5.822526506330321,0.4975355942273236,0.498,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+177,bottom_bracing,stabilizer,10.589138854867006,66.67952981610685,66.680,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+178,top_bracing,stabilizer,-10.77057305530366,0.2689656502357501,0.269,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+179,bottom_bracing,stabilizer,11.91749234530947,59.24726272451949,59.247,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+180,top_bracing,stabilizer,-12.121686541316882,0.2389860664485292,0.239,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+181,bottom_bracing,stabilizer,12.11982243359797,58.258180255400724,58.258,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+182,top_bracing,stabilizer,-12.327483351337298,0.23499639810238626,0.235,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+183,bottom_bracing,stabilizer,12.542199189802565,56.29625150380942,56.296,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+184,top_bracing,stabilizer,-12.542199189801837,0.2389561826809563,0.239,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+185,bottom_bracing,stabilizer,12.916024604946124,54.666882542915786,54.667,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+186,top_bracing,stabilizer,-12.916024604945587,0.2320401309603928,0.232,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+187,bottom_bracing,stabilizer,12.915979212979126,54.667074664417946,54.667,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+188,top_bracing,stabilizer,-12.915979212978288,0.23204094644312648,0.232,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+189,bottom_bracing,stabilizer,12.542070954801654,56.29682709853289,56.297,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+190,top_bracing,stabilizer,-12.542070954800922,0.23895862586170494,0.239,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+191,bottom_bracing,stabilizer,12.11959524011367,58.25927236109394,58.259,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+192,top_bracing,stabilizer,-12.327252265122073,0.2350008033361773,0.235,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+193,bottom_bracing,stabilizer,11.916999991242037,59.24971054115187,59.250,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+194,top_bracing,stabilizer,-12.121185751259402,0.23899594022230097,0.239,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+195,bottom_bracing,stabilizer,10.58828025998754,66.68493680397074,66.685,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+196,top_bracing,stabilizer,-10.769699749267668,0.26898746043764005,0.269,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+197,bottom_bracing,stabilizer,5.723612633644951,123.36243648801054,123.362,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+198,top_bracing,stabilizer,-5.821680955915745,0.49760785710657623,0.498,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+199,bottom_bracing,stabilizer,-0.3562652453693058,8.4123727469192,8.412,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+200,top_bracing,stabilizer,0.3562652453699574,1981.8907658724465,1981.891,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+201,cross_frame_bracing,stabilizer,0.14368292034006144,4914.145664139402,4914.146,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+202,cross_frame_bracing,stabilizer,-0.1981706677043741,17.162855076449127,17.163,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+203,cross_frame_bracing,stabilizer,-11.054325427452873,0.3076781548122946,0.308,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+204,cross_frame_bracing,stabilizer,-5.338878023664372,0.6370579052635693,0.637,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+205,cross_frame_bracing,stabilizer,-13.221491994360738,0.21506871675224687,0.215,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+206,cross_frame_bracing,stabilizer,-8.227213723135186,0.34562482663859506,0.346,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+207,cross_frame_bracing,stabilizer,-12.735467779126205,0.18159354032509978,0.182,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+208,cross_frame_bracing,stabilizer,-11.223292982135698,0.20606061744880871,0.206,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+209,cross_frame_bracing,stabilizer,-12.404073041746344,0.15035574732309034,0.150,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+210,cross_frame_bracing,stabilizer,-12.147586678569017,0.15353038602575086,0.154,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+211,cross_frame_bracing,stabilizer,-12.295549298078614,0.12266315687944651,0.123,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+212,cross_frame_bracing,stabilizer,-11.700140898797263,0.12890536152639193,0.129,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+213,cross_frame_bracing,stabilizer,-21.85960489021475,0.06899534095167119,0.069,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+214,cross_frame_bracing,stabilizer,-21.33263746416224,0.07069969172836242,0.071,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+215,cross_frame_bracing,stabilizer,-14.397382124463405,0.10475591183389507,0.105,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+216,cross_frame_bracing,stabilizer,-14.397446111787904,0.10475544626170459,0.105,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+217,cross_frame_bracing,stabilizer,-21.33257907383066,0.07069988524356882,0.071,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+218,cross_frame_bracing,stabilizer,-21.8596632805468,0.06899515665510557,0.069,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+219,cross_frame_bracing,stabilizer,-11.70007114979801,0.12890612998496365,0.129,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+220,cross_frame_bracing,stabilizer,-12.295619047078524,0.12266246105173052,0.123,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+221,cross_frame_bracing,stabilizer,-12.14741861144115,0.15353251021458847,0.154,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+222,cross_frame_bracing,stabilizer,-12.40424110887423,0.15035371012803814,0.150,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+223,cross_frame_bracing,stabilizer,-11.22308452101082,0.2060644448839515,0.206,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+224,cross_frame_bracing,stabilizer,-12.735676240251147,0.18159056795103937,0.182,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+225,cross_frame_bracing,stabilizer,-8.227227730612292,0.345624238186202,0.346,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+226,cross_frame_bracing,stabilizer,-13.221477986883697,0.21506894460650908,0.215,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+227,cross_frame_bracing,stabilizer,-5.3429800890310055,0.6365688049625808,0.637,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+228,cross_frame_bracing,stabilizer,-11.050223362086259,0.3077923711373013,0.308,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+229,cross_frame_bracing,stabilizer,-0.16721490674015377,20.34013902539586,20.340,buckling_y,travamento: compressão deve ser interpretada com cautela,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation
+230,cross_frame_bracing,stabilizer,0.1672149067399956,4222.582865162196,4222.583,tension_capacity,tension_capacity,manter como travamento/tension-only; não dimensionar como coluna comprimida,interpretation

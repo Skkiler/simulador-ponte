@@ -1,0 +1,239 @@
+{
+  "units": "N-mm-MPa",
+  "project": {
+    "name": "Ponte Pratt-Parker em Caixa",
+    "author": "João",
+    "version": "4.0"
+  },
+  "bridge": {
+    "span_mm": 1200.0,
+    "left_support_overhang_mm": 100.0,
+    "right_support_overhang_mm": 100.0,
+    "panel_mm": 100.0,
+    "width_mm": 170.0,
+    "end_height_mm": 73.33333333333333,
+    "center_height_mm": 220.0,
+    "plateau_start_mm": 400.0,
+    "plateau_end_mm": 800.0,
+    "load_total_kgf": 90.0,
+    "load_distribution_x_mm": [
+      400.0,
+      500.0,
+      600.0,
+      700.0,
+      800.0
+    ],
+    "support_contact_x_left_mm": [
+      -100.0,
+      0.0
+    ],
+    "support_contact_x_right_mm": [
+      1200.0,
+      1300.0
+    ],
+    "support_contact_y_mm": [
+      -85.0,
+      85.0
+    ],
+    "include_top_x_bracing": true,
+    "include_bottom_x_bracing": true,
+    "include_cross_frame_bracing": true,
+    "include_support_pad_members": true,
+    "unilateral_supports": true,
+    "tension_only_bracing_interpretation": true,
+    "truss_type": "Parker",
+    "top_profile": "parker_plateau",
+    "side_truss_type": "Parker",
+    "internal_truss_type": "Pratt",
+    "chord_truss_type": "Pratt",
+    "cross_frame_truss_type": "Pratt",
+    "load_total_N": 882.5985
+  },
+  "material": {
+    "name": "Palito de picolé equivalente",
+    "E_MPa": 6000.0,
+    "G_MPa": 500.0,
+    "stick_length_mm": 120.0,
+    "stick_width_mm": 7.0,
+    "stick_thickness_mm": 1.5,
+    "stick_mass_g": 1.4,
+    "glue_reserved_g": 100.0,
+    "mass_limit_g": 1000.0,
+    "tension_capacity_per_stick_kgf": 72.0,
+    "compression_capacity_one_stick_kgf": 4.0,
+    "compression_capacity_two_sticks_kgf": 11.0,
+    "compression_capacity_model": "one_or_two_then_linear_by_two_stick_capacity",
+    "default_Ky": 1.0,
+    "default_Kz": 1.0,
+    "density_g_per_mm3": 0.0011111111111111111,
+    "tension_capacity_per_stick_N": 706.0788,
+    "compression_capacity_one_stick_N": 39.2266,
+    "compression_capacity_two_sticks_N": 107.87315
+  },
+  "member_sticks_by_group": {
+    "bottom_chord": 4,
+    "top_chord": 5,
+    "vertical": 3,
+    "diagonal": 3,
+    "top_transverse": 2,
+    "bottom_transverse": 2,
+    "top_bracing": 1,
+    "bottom_bracing": 1,
+    "cross_frame_bracing": 1,
+    "support_pad": 4,
+    "chord_lacing": 1
+  },
+  "effective_length_factor_by_group": {
+    "bottom_chord": {
+      "Ky": 1.0,
+      "Kz": 1.0
+    },
+    "top_chord": {
+      "Ky": 0.8,
+      "Kz": 0.8
+    },
+    "vertical": {
+      "Ky": 1.0,
+      "Kz": 1.0
+    },
+    "diagonal": {
+      "Ky": 1.0,
+      "Kz": 1.0
+    },
+    "top_transverse": {
+      "Ky": 1.0,
+      "Kz": 1.0
+    },
+    "bottom_transverse": {
+      "Ky": 1.0,
+      "Kz": 1.0
+    },
+    "top_bracing": {
+      "Ky": 1.0,
+      "Kz": 1.0
+    },
+    "bottom_bracing": {
+      "Ky": 1.0,
+      "Kz": 1.0
+    },
+    "cross_frame_bracing": {
+      "Ky": 1.0,
+      "Kz": 1.0
+    },
+    "support_pad": {
+      "Ky": 0.7,
+      "Kz": 0.7
+    },
+    "chord_lacing": {
+      "Ky": 1.0,
+      "Kz": 1.0
+    }
+  },
+  "support_check": {
+    "contact_length_per_support_node_mm": 50.0,
+    "n_contact_sticks_per_support_node": 4,
+    "allowable_reaction_per_support_node_kgf": 22.0,
+    "negative_reaction_means_uplift": true
+  },
+  "analysis": {
+    "frame3dd_path": "auto",
+    "run_frame3dd_if_available": true,
+    "frame3dd_include_geometric_stiffness": 1,
+    "frame3dd_include_shear_deformation": 1,
+    "frame3dd_internal_force_dx_mm": 25.0,
+    "deformed_scale": 30.0,
+    "primary_groups": [
+      "bottom_chord",
+      "top_chord",
+      "vertical",
+      "diagonal",
+      "top_transverse",
+      "bottom_transverse",
+      "support_pad"
+    ],
+    "stabilizer_groups": [
+      "top_bracing",
+      "bottom_bracing",
+      "cross_frame_bracing"
+    ],
+    "optimize_variants": true,
+    "max_optimizer_variants": 180
+  },
+  "detail_model": {
+    "enabled": true,
+    "splice_mode": "overlap",
+    "overlap_length_mm": 30.0,
+    "min_end_margin_mm": 15.0,
+    "reinforcement_length_mm": 55.0,
+    "reinforcement_sticks_per_splice": 2,
+    "glue_shear_strength_MPa": 3.5,
+    "glue_spread_g_per_m2": 160.0,
+    "glue_mass_efficiency": 0.65,
+    "default_joint_safety_factor": 2.0,
+    "construction_waste_factor": 0.08,
+    "saw_kerf_mm": 1.0,
+    "imperfection_eccentricity_mm": 2.0,
+    "allow_recommend_removal_if_fs_gt": 8.0,
+    "reinforce_if_fs_lt": 2.0,
+    "tension_only_stabilizers": true,
+    "generate_member_templates": true,
+    "generate_piece_views": true
+  },
+  "section_layout_by_group": {
+    "bottom_chord": {
+      "layout": "stacked",
+      "spacing_y_mm": 0,
+      "spacing_z_mm": 0
+    },
+    "top_chord": {
+      "layout": "box",
+      "spacing_y_mm": 12,
+      "spacing_z_mm": 12
+    },
+    "vertical": {
+      "layout": "stacked",
+      "spacing_y_mm": 0,
+      "spacing_z_mm": 0
+    },
+    "diagonal": {
+      "layout": "stacked",
+      "spacing_y_mm": 0,
+      "spacing_z_mm": 0
+    },
+    "top_transverse": {
+      "layout": "stacked",
+      "spacing_y_mm": 0,
+      "spacing_z_mm": 0
+    },
+    "bottom_transverse": {
+      "layout": "stacked",
+      "spacing_y_mm": 0,
+      "spacing_z_mm": 0
+    },
+    "top_bracing": {
+      "layout": "single",
+      "spacing_y_mm": 0,
+      "spacing_z_mm": 0
+    },
+    "bottom_bracing": {
+      "layout": "single",
+      "spacing_y_mm": 0,
+      "spacing_z_mm": 0
+    },
+    "cross_frame_bracing": {
+      "layout": "single",
+      "spacing_y_mm": 0,
+      "spacing_z_mm": 0
+    },
+    "support_pad": {
+      "layout": "side_by_side",
+      "spacing_y_mm": 0,
+      "spacing_z_mm": 0
+    },
+    "chord_lacing": {
+      "layout": "single",
+      "spacing_y_mm": 0.0,
+      "spacing_z_mm": 0.0
+    }
+  }
+}
