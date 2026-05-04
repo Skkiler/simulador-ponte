@@ -18,14 +18,39 @@ class GeometryService:
         left = -float(b["left_support_overhang_mm"])
         span = float(b["span_mm"])
         right = span + float(b["right_support_overhang_mm"])
-        p = float(b["panel_mm"])
+        p = max(1.0, float(b["panel_mm"]))
         xs = [left]
         x = 0.0
         while x <= span + 1e-9:
             xs.append(round(x, 6))
             x += p
+        if abs(xs[-1] - span) > 1e-6:
+            xs.append(round(span, 6))
         xs.append(right)
         return sorted(set(xs))
+
+    @staticmethod
+    def _snap_value(value: float, candidates: List[float]) -> float:
+        if not candidates:
+            return float(value)
+
+        return min(candidates, key=lambda c: abs(c - float(value)))
+
+    @classmethod
+    def _snap_many(
+        cls,
+        values: List[float],
+        candidates: List[float],
+    ) -> List[float]:
+        if not values:
+            return []
+
+        return list(
+            dict.fromkeys(
+                round(cls._snap_value(float(v), candidates), 6)
+                for v in values
+            )
+        )
 
     def top_height(self, cfg: Dict, x: float) -> float:
         b = cfg["bridge"]
@@ -47,8 +72,8 @@ class GeometryService:
         if x < p0: return end_h + (center_h-end_h)*(x/p0 if p0 else 1.0)
         return center_h + (end_h-center_h)*((x-p1)/(span-p1) if span != p1 else 1.0)
 
-    def _add_side_diagonal(self, cfg: Dict, idx: int, x0: float, x1: float, y: float, mid: float, nid, add_member) -> None:
-        typ = str(cfg["bridge"].get("side_truss_type", cfg["bridge"].get("truss_type", "Parker"))).lower()
+    def _add_side_diagonal(self, truss_type: str, idx: int, x0: float, x1: float, y: float, mid: float, nid, add_member) -> None:
+        typ = str(truss_type).lower()
         if typ == "parker": typ = "pratt"
         c = 0.5 * (x0 + x1)
         if typ == "howe":
@@ -82,6 +107,13 @@ class GeometryService:
         xs = self.x_stations(cfg)
         half_width = float(cfg["bridge"]["width_mm"]) / 2.0
         ys = [-half_width, half_width]
+        side_truss_type = str(
+            cfg["bridge"].get(
+                "side_truss_type",
+                cfg["bridge"].get("truss_type", "Parker"),
+            )
+        )
+        chord_truss_type = str(cfg["bridge"].get("chord_truss_type", "none"))
 
         def add_node(x: float, y: float, z: float, level: str) -> int:
             key = (round(float(x), 6), round(float(y), 6), level)
@@ -123,13 +155,19 @@ class GeometryService:
             for idx_panel, (x0, x1) in enumerate(zip(xs[:-1], xs[1:])):
                 if x1 < 0 or x0 > float(cfg["bridge"]["span_mm"]):
                     continue
-                self._add_side_diagonal(cfg, idx_panel, x0, x1, y, mid, nid, add_member)
-                chord_type = str(cfg["bridge"].get("chord_truss_type", "none")).lower()
+                self._add_side_diagonal(side_truss_type, idx_panel, x0, x1, y, mid, nid, add_member)
+                chord_type = chord_truss_type.lower()
                 if chord_type not in {"none", "sem", "nenhuma"}:
-                    old_type = cfg["bridge"].get("side_truss_type", cfg["bridge"].get("truss_type", "Parker"))
-                    cfg["bridge"]["side_truss_type"] = chord_type
-                    self._add_side_diagonal(cfg, idx_panel, x0, x1, y, mid, nid, lambda a,b,g: add_member(a,b,"chord_lacing"))
-                    cfg["bridge"]["side_truss_type"] = old_type
+                    self._add_side_diagonal(
+                        chord_type,
+                        idx_panel,
+                        x0,
+                        x1,
+                        y,
+                        mid,
+                        nid,
+                        lambda a, b, g: add_member(a, b, "chord_lacing"),
+                    )
 
         for x in xs:
             add_member(nid(x, ys[0], "bottom"), nid(x, ys[1], "bottom"), "bottom_transverse")
@@ -171,34 +209,83 @@ class GeometryService:
             k = cfg.get("effective_length_factor_by_group", {}).get(group, {})
             members.append(Member(idx, i, j, group, n_sticks, sec["A"], sec["A"], sec["A"], sec["Iy"], sec["Iz"], sec["J"], float(mat["E_MPa"]), float(mat["G_MPa"]), float(k.get("Ky", 1.0)), float(k.get("Kz", 1.0)), L))
 
-        left_xs = set(float(v) for v in cfg["bridge"]["support_contact_x_left_mm"])
-        right_xs = set(float(v) for v in cfg["bridge"]["support_contact_x_right_mm"])
-        support_ys = set(float(v) for v in cfg["bridge"]["support_contact_y_mm"])
+        left_xs_raw = [
+            float(v)
+            for v in cfg["bridge"].get("support_contact_x_left_mm", [])
+        ]
+        right_xs_raw = [
+            float(v)
+            for v in cfg["bridge"].get("support_contact_x_right_mm", [])
+        ]
+        support_ys_raw = [
+            float(v)
+            for v in cfg["bridge"].get("support_contact_y_mm", [])
+        ]
+
+        left_xs = set(self._snap_many(left_xs_raw, xs))
+        right_xs = set(self._snap_many(right_xs_raw, xs))
+        support_ys = set(self._snap_many(support_ys_raw, ys))
+        left_min = min(left_xs) if left_xs else None
+        right_max = max(right_xs) if right_xs else None
+        y_min = min(support_ys) if support_ys else None
+        y_max = max(support_ys) if support_ys else None
+
         supports: List[Support] = []
+
         for n in nodes:
             if n.level != "bottom" or n.y not in support_ys:
                 continue
             if n.x in left_xs or n.x in right_xs:
                 UX = UY = UZ = 0
                 UZ = 1
-                if n.x == min(left_xs) and n.y == min(support_ys):
+                if left_min is not None and y_min is not None and n.x == left_min and n.y == y_min:
                     UX, UY = 1, 1
-                elif n.x == min(left_xs) and n.y == max(support_ys):
+                elif left_min is not None and y_max is not None and n.x == left_min and n.y == y_max:
                     UY = 1
-                elif n.x == max(right_xs) and n.y == min(support_ys):
+                elif right_max is not None and y_min is not None and n.x == right_max and n.y == y_min:
                     UY = 1
-                supports.append(Support(n.id, UX, UY, UZ, 0, 0, 0, "left" if n.x in left_xs else "right", True))
+                supports.append(
+                    Support(
+                        n.id,
+                        UX,
+                        UY,
+                        UZ,
+                        0,
+                        0,
+                        0,
+                        "left" if n.x in left_xs else "right",
+                        True,
+                    )
+                )
+
+        if not supports:
+            raise ValueError(
+                "Nenhum apoio foi criado. Verifique limites de contato dos apoios "
+                "e a largura da ponte."
+            )
 
         load_total = float(cfg["bridge"]["load_total_N"])
-        load_xs = [float(v) for v in cfg["bridge"]["load_distribution_x_mm"]]
-        loaded_nodes = []
+        load_xs_raw = [
+            float(v)
+            for v in cfg["bridge"].get("load_distribution_x_mm", [])
+        ]
+        load_xs = self._snap_many(load_xs_raw, xs)
+
+        if not load_xs:
+            load_xs = [self._snap_value(float(cfg["bridge"]["span_mm"]) / 2.0, xs)]
+
+        loaded_nodes_set = set()
         for x in load_xs:
-            # ajusta para estação existente mais próxima
-            x_near = min(xs, key=lambda xv: abs(xv - x))
             for y in ys:
-                loaded_nodes.append(nid(x_near, y, "top"))
+                loaded_nodes_set.add(nid(x, y, "top"))
+
+        loaded_nodes = sorted(loaded_nodes_set)
         fz_each = -load_total / len(loaded_nodes)
-        loads = [Load("LC1_carga_central_distribuida", node_id, 0.0, 0.0, fz_each) for node_id in loaded_nodes]
+        loads = [
+            Load("LC1_carga_central_distribuida", node_id, 0.0, 0.0, fz_each)
+            for node_id in loaded_nodes
+        ]
+
         return nodes, members, supports, loads
 
     @staticmethod

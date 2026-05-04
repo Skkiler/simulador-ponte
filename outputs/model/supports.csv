@@ -1,9 +1,0 @@
-node_id,UX,UY,UZ,RX,RY,RZ,support_group,active_vertical
-1,1,1,1,0,0,0,left,True
-3,0,1,1,0,0,0,left,True
-5,0,0,1,0,0,0,left,True
-7,0,0,1,0,0,0,left,True
-53,0,0,1,0,0,0,right,True
-55,0,0,1,0,0,0,right,True
-57,0,1,1,0,0,0,right,True
-59,0,0,1,0,0,0,right,True

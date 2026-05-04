@@ -1,0 +1,74 @@
+# -----------------------------
+# Python bytecode and caches
+# -----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Static type / lint / test caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.nox/
+.tox/
+.hypothesis/
+
+# Coverage / test artifacts
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+
+# -----------------------------
+# Virtual environments
+# -----------------------------
+.venv/
+venv/
+env/
+ENV/
+outputs/
+
+# -----------------------------
+# Build / packaging artifacts
+# -----------------------------
+build/
+dist/
+site/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+*.egg
+
+# -----------------------------
+# Streamlit / local config
+# -----------------------------
+.streamlit/secrets.toml
+
+# Optional env files
+.env
+.env.*
+
+# -----------------------------
+# IDE / Editor
+# -----------------------------
+.vscode/
+.idea/
+*.iml
+
+# -----------------------------
+# OS artifacts
+# -----------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# -----------------------------
+# Project-generated outputs
+# -----------------------------
+outputs/
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp

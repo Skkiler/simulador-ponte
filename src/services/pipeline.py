@@ -14,7 +14,7 @@ from src.services.report_service import ReportService
 from src.services.visualization_service import VisualizationService
 from src.services.stick_detail_service import StickDetailService
 from src.services.detail_visualization_service import DetailVisualizationService
-from src.services.design_optimizer import DesignOptimizer
+from src.services.active_design_planner import ActiveDesignPlanner
 from src.solvers.frame3dd_adapter import Frame3DDAdapter
 from src.solvers.linear_truss_solver import LinearTrussSolver
 
@@ -66,10 +66,10 @@ class SimulationPipeline:
         self.recs = RecommendationService()
         self.reporter = ReportService()
         self.frame3dd = Frame3DDAdapter()
-        self.optimizer = DesignOptimizer()
+        self.optimizer = ActiveDesignPlanner()
 
     def run(self, cfg: Dict) -> Dict:
-        cfg = self.config_service.normalize(cfg)
+        input_cfg = self.config_service.normalize(cfg)
 
         self.output_root.mkdir(parents=True, exist_ok=True)
 
@@ -79,6 +79,36 @@ class SimulationPipeline:
         detail_dir = self.output_root / "details"
         frame_dir = self.output_root / "frame3dd"
         report_dir = self.output_root / "reports"
+
+        optimization = None
+        cfg = input_cfg
+
+        planner_enabled = bool(
+            input_cfg.get("analysis", {}).get("active_planner_enabled", True)
+        )
+        optimize_variants = bool(
+            input_cfg.get("analysis", {}).get("optimize_variants", True)
+        )
+
+        if optimize_variants and planner_enabled:
+            try:
+                optimization = self.optimizer.run(
+                    input_cfg,
+                    self.output_root / "optimization",
+                )
+                best = (optimization or {}).get("best")
+                best_cfg = (best or {}).get("config")
+
+                if best_cfg:
+                    cfg = self.config_service.normalize(best_cfg)
+            except Exception as exc:
+                optimization = {
+                    "error": repr(exc),
+                    "stage1": [],
+                    "stage2": [],
+                    "stage3": [],
+                    "best": None,
+                }
 
         nodes, members, supports, loads = self.geometry.generate(cfg)
         self.geometry.export_csvs(cfg, model_dir)
@@ -196,20 +226,32 @@ class SimulationPipeline:
             "estimated_glue_mass_g": detailed_summary.get("estimated_glue_mass_g"),
         }
 
-        optimization = None
+        if optimization and optimization.get("best"):
+            best = optimization["best"]
+            metrics["planner_score"] = safe_float(best.get("score"), None)
+            metrics["predicted_breaking_load_kgf"] = safe_float(
+                best.get("predicted_breaking_load_kgf"),
+                None,
+            )
+            metrics["planner_feasible"] = bool(best.get("feasible"))
+            metrics["planner_objective_profile"] = cfg.get("analysis", {}).get(
+                "planner_objective_profile",
+                "balanced",
+            )
+            counts = optimization.get("stage_counts") or {}
+            metrics["planner_stage1_count"] = counts.get("stage1")
+            metrics["planner_stage2_count"] = counts.get("stage2")
+            metrics["planner_stage3_count"] = counts.get("stage3")
+            metrics["planner_stage4_count"] = counts.get("stage4")
+            metrics["planner_final_variants_count"] = counts.get("final_variants")
 
-        if cfg.get("analysis", {}).get("optimize_variants", True):
-            try:
-                optimization = self.optimizer.run(
-                    cfg,
-                    self.output_root / "optimization",
-                )
-            except Exception as exc:
-                optimization = {
-                    "error": repr(exc),
-                    "variants": [],
-                    "best": None,
-                }
+            fv = optimization.get("final_variants") or {}
+            fmin = fv.get("min") or {}
+            fmax = fv.get("max") or {}
+            metrics["final_min_fs_primary"] = safe_float(fmin.get("min_fs_primary"), None)
+            metrics["final_max_fs_primary"] = safe_float(fmax.get("min_fs_primary"), None)
+            metrics["final_min_mass_g"] = safe_float(fmin.get("mass_g"), None)
+            metrics["final_max_mass_g"] = safe_float(fmax.get("mass_g"), None)
 
         recommendations = self.recs.build(
             cfg,
@@ -232,12 +274,14 @@ class SimulationPipeline:
         )
 
         self.config_service.save(cfg, self.output_root / "config_used.json")
+        self.config_service.save(input_cfg, self.output_root / "config_requested.json")
 
         zip_path = self.output_root / "resultados_simulacao.zip"
         self.zip_outputs(zip_path)
 
         return {
             "cfg": cfg,
+            "input_cfg": input_cfg,
             "nodes": nodes,
             "members": members,
             "supports": active_supports,

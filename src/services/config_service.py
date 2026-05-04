@@ -28,6 +28,7 @@ class ConfigService:
         cfg = copy.deepcopy(cfg)
         bridge = cfg.setdefault("bridge", {})
         mat = cfg.setdefault("material", {})
+        planner = cfg.setdefault("planner", {})
 
         bridge.setdefault("truss_type", bridge.get("side_truss_type", "Parker"))
         bridge.setdefault("side_truss_type", bridge.get("truss_type", "Parker"))
@@ -75,6 +76,11 @@ class ConfigService:
         mat.setdefault("compression_capacity_one_stick_kgf", 4.0)
         mat.setdefault("compression_capacity_two_sticks_kgf", 11.0)
 
+        support_check = cfg.setdefault("support_check", {})
+        support_check.setdefault("contact_length_per_support_node_mm", 50.0)
+        support_check.setdefault("n_contact_sticks_per_support_node", 4)
+        support_check.setdefault("allowable_reaction_per_support_node_kgf", 22.0)
+        support_check.setdefault("negative_reaction_means_uplift", True)
 
         detail = cfg.setdefault("detail_model", {})
         detail.setdefault("enabled", True)
@@ -124,8 +130,52 @@ class ConfigService:
         cfg["effective_length_factor_by_group"].setdefault("chord_lacing", {"Ky": 1.0, "Kz": 1.0})
         cfg.setdefault("analysis", {})
         cfg["analysis"].setdefault("max_optimizer_variants", 180)
+        cfg["analysis"].setdefault("active_planner_enabled", True)
+        cfg["analysis"].setdefault("target_min_fs", 2.0)
+        cfg["analysis"].setdefault("planner_stage1_variants", 220)
+        cfg["analysis"].setdefault("planner_stage1_top_k", 42)
+        cfg["analysis"].setdefault("planner_stage2_top_k", 14)
+        cfg["analysis"].setdefault("planner_stage3_top_k", 6)
+        cfg["analysis"].setdefault("planner_adaptive_refinement", True)
+        cfg["analysis"].setdefault("planner_stage4_seed_top_k", 4)
+        cfg["analysis"].setdefault("planner_stage4_iterations", 8)
+        cfg["analysis"].setdefault("planner_max_sticks_per_group", 12)
+        cfg["analysis"].setdefault("planner_min_sticks_per_group", 1)
+        cfg["analysis"].setdefault("planner_objective_profile", "balanced")
+        cfg["analysis"].setdefault("planner_objective_weight_fs", 0.52)
+        cfg["analysis"].setdefault("planner_objective_weight_break", 0.28)
+        cfg["analysis"].setdefault("planner_objective_weight_mass_target", 0.12)
+        cfg["analysis"].setdefault("planner_objective_weight_mass_limit", 0.08)
+        cfg["analysis"].setdefault("final_variants_enabled", True)
+        cfg["analysis"].setdefault("final_round_step_length_mm", 5.0)
+        cfg["analysis"].setdefault("final_round_step_section_mm", 0.1)
+        cfg["analysis"].setdefault("final_round_step_mass_g", 0.1)
         cfg["analysis"].setdefault("primary_groups", ["bottom_chord", "top_chord", "vertical", "diagonal", "top_transverse", "bottom_transverse", "support_pad", "chord_lacing"])
         cfg["analysis"].setdefault("stabilizer_groups", ["top_bracing", "bottom_bracing", "cross_frame_bracing"])
+
+        span = float(bridge["span_mm"])
+        width = float(bridge["width_mm"])
+        center_height = float(bridge["center_height_mm"])
+        panel = float(bridge["panel_mm"])
+        mass_limit = float(mat.get("mass_limit_g", 1000.0))
+        load_kgf = float(bridge.get("load_total_kgf", 120.0))
+
+        planner.setdefault("span_min_mm", max(400.0, span * 0.85))
+        planner.setdefault("span_max_mm", min(3000.0, span * 1.15))
+        planner.setdefault("width_min_mm", max(80.0, width * 0.85))
+        planner.setdefault("width_max_mm", min(300.0, width * 1.2))
+        planner.setdefault("height_min_mm", max(80.0, center_height * 0.75))
+        planner.setdefault("height_max_mm", min(700.0, center_height * 1.25))
+        planner.setdefault("panel_min_mm", max(40.0, panel * 0.85))
+        planner.setdefault("panel_max_mm", min(220.0, panel * 1.2))
+        planner.setdefault("target_load_kgf", load_kgf)
+        planner.setdefault("target_breaking_load_kgf", load_kgf)
+        planner.setdefault("max_bridge_mass_g", mass_limit)
+        planner.setdefault("target_bridge_mass_g", min(mass_limit, max(200.0, mass_limit * 0.85)))
+        planner.setdefault("consider_top_profiles", ["parker_plateau", "triangular_peak", "shallow_arch", "flat"])
+        planner.setdefault("consider_side_trusses", ["Parker", "Pratt", "Howe", "Warren"])
+        planner.setdefault("consider_internal_trusses", ["X", "Warren", "Pratt", "Howe", "none"])
+        planner.setdefault("consider_chord_trusses", ["none", "Warren", "X"])
         return cfg
 
     def from_minimal_inputs(
@@ -201,4 +251,124 @@ class ConfigService:
             cfg.setdefault("detail_model", {})["overlap_length_mm"] = overlap_length_mm
         if mass_limit_g is not None:
             cfg.setdefault("material", {})["mass_limit_g"] = mass_limit_g
+        return self.normalize(cfg)
+
+    def from_planner_inputs(
+        self,
+        base: Dict[str, Any],
+        *,
+        target_load_kgf: float,
+        span_min_mm: float,
+        span_max_mm: float,
+        width_min_mm: float,
+        width_max_mm: float,
+        height_min_mm: float,
+        height_max_mm: float,
+        panel_min_mm: float,
+        panel_max_mm: float,
+        max_bridge_mass_g: float,
+        target_bridge_mass_g: float | None,
+        E_MPa: float,
+        stick_length_mm: float,
+        stick_width_mm: float,
+        stick_thickness_mm: float,
+        stick_mass_g: float,
+        tension_capacity_per_stick_kgf: float,
+        compression_capacity_one_stick_kgf: float,
+        compression_capacity_two_sticks_kgf: float,
+        glue_shear_strength_MPa: float,
+        overlap_length_mm: float,
+        target_min_fs: float,
+        stage1_variants: int,
+        objective_profile: str = "balanced",
+        adaptive_refinement: bool = True,
+        adaptive_iterations: int = 8,
+    ) -> Dict[str, Any]:
+        cfg = copy.deepcopy(base)
+
+        span_mid = 0.5 * (float(span_min_mm) + float(span_max_mm))
+        width_mid = 0.5 * (float(width_min_mm) + float(width_max_mm))
+        height_mid = 0.5 * (float(height_min_mm) + float(height_max_mm))
+        panel_mid = 0.5 * (float(panel_min_mm) + float(panel_max_mm))
+
+        cfg.setdefault("bridge", {}).update(
+            {
+                "load_total_kgf": float(target_load_kgf),
+                "span_mm": span_mid,
+                "width_mm": width_mid,
+                "center_height_mm": height_mid,
+                "panel_mm": panel_mid,
+                "left_support_overhang_mm": 100.0,
+                "right_support_overhang_mm": 100.0,
+                "end_height_mm": max(50.0, height_mid / 3.0),
+                "plateau_start_mm": span_mid / 3.0,
+                "plateau_end_mm": 2.0 * span_mid / 3.0,
+                "load_distribution_x_mm": [],
+                "support_contact_y_mm": [-width_mid / 2.0, width_mid / 2.0],
+                "support_contact_x_left_mm": [-100.0, 0.0],
+                "support_contact_x_right_mm": [span_mid, span_mid + 100.0],
+                "truss_type": "Parker",
+                "side_truss_type": "Parker",
+                "internal_truss_type": "X",
+                "cross_frame_truss_type": "X",
+                "chord_truss_type": "none",
+                "top_profile": "parker_plateau",
+            }
+        )
+
+        cfg.setdefault("material", {}).update(
+            {
+                "E_MPa": float(E_MPa),
+                "stick_length_mm": float(stick_length_mm),
+                "stick_width_mm": float(stick_width_mm),
+                "stick_thickness_mm": float(stick_thickness_mm),
+                "stick_mass_g": float(stick_mass_g),
+                "mass_limit_g": float(max_bridge_mass_g),
+                "tension_capacity_per_stick_kgf": float(tension_capacity_per_stick_kgf),
+                "compression_capacity_one_stick_kgf": float(compression_capacity_one_stick_kgf),
+                "compression_capacity_two_sticks_kgf": float(compression_capacity_two_sticks_kgf),
+            }
+        )
+
+        cfg.setdefault("detail_model", {}).update(
+            {
+                "glue_shear_strength_MPa": float(glue_shear_strength_MPa),
+                "overlap_length_mm": float(overlap_length_mm),
+            }
+        )
+
+        cfg.setdefault("analysis", {}).update(
+            {
+                "target_min_fs": float(target_min_fs),
+                "active_planner_enabled": True,
+                "planner_stage1_variants": int(stage1_variants),
+                "planner_objective_profile": str(objective_profile),
+                "planner_adaptive_refinement": bool(adaptive_refinement),
+                "planner_stage4_iterations": int(adaptive_iterations),
+            }
+        )
+
+        target_mass = (
+            float(target_bridge_mass_g)
+            if target_bridge_mass_g is not None
+            else float(max_bridge_mass_g) * 0.85
+        )
+
+        cfg.setdefault("planner", {}).update(
+            {
+                "span_min_mm": float(span_min_mm),
+                "span_max_mm": float(span_max_mm),
+                "width_min_mm": float(width_min_mm),
+                "width_max_mm": float(width_max_mm),
+                "height_min_mm": float(height_min_mm),
+                "height_max_mm": float(height_max_mm),
+                "panel_min_mm": float(panel_min_mm),
+                "panel_max_mm": float(panel_max_mm),
+                "target_load_kgf": float(target_load_kgf),
+                "target_breaking_load_kgf": float(target_load_kgf),
+                "max_bridge_mass_g": float(max_bridge_mass_g),
+                "target_bridge_mass_g": float(target_mass),
+            }
+        )
+
         return self.normalize(cfg)

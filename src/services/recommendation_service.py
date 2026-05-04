@@ -280,6 +280,8 @@ class RecommendationService:
             )
 
         best = optimization.get("best")
+        stage_counts = optimization.get("stage_counts") or {}
+        final_variants = optimization.get("final_variants") or {}
 
         if best:
             b_height = fmt_float(
@@ -297,10 +299,39 @@ class RecommendationService:
             )
 
             suggestions.append(
-                f"Proposta automática: testar {best.get('truss_type', '—')} / "
+                f"Proposta automática: testar {best.get('truss_type', best.get('side_truss_type', '—'))} / "
                 f"{best.get('top_profile', '—')} com altura {b_height} "
                 f"e painel {b_panel}. Use outputs/optimization/recommended_config.json."
             )
+
+            pred_break = fmt_float(
+                best.get("predicted_breaking_load_kgf"),
+                decimals=1,
+                default="—",
+                suffix=" kgf",
+            )
+            suggestions.append(
+                f"Carga de ruptura estimada do melhor candidato: {pred_break}."
+            )
+
+            if stage_counts:
+                suggestions.append(
+                    f"Busca executada: S1={stage_counts.get('stage1', 0)}, "
+                    f"S2={stage_counts.get('stage2', 0)}, "
+                    f"S3={stage_counts.get('stage3', 0)}, "
+                    f"S4={stage_counts.get('stage4', 0)}."
+                )
+
+            if final_variants:
+                vmin = final_variants.get("min") or {}
+                vmax = final_variants.get("max") or {}
+                suggestions.append(
+                    "Versões finais conservadoras geradas: "
+                    f"MIN (FS={fmt_float(vmin.get('min_fs_primary'), 2)}, "
+                    f"massa={fmt_float(vmin.get('mass_g'), 1, '—', ' g')}) e "
+                    f"MAX (FS={fmt_float(vmax.get('min_fs_primary'), 2)}, "
+                    f"massa={fmt_float(vmax.get('mass_g'), 1, '—', ' g')})."
+                )
 
         if not suggestions:
             suggestions.append(

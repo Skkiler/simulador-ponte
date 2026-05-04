@@ -41,6 +41,13 @@ Arquivos detalhados: `outputs/details/stick_pieces.csv`, `glue_joints.csv`, `cut
 - Erro de equilíbrio vertical: {metrics.get('equilibrium_error_N'):.3e} N
 - Menor FS em membros principais: {metrics.get('min_fs_primary')}
 - Menor FS em todos os membros: {metrics.get('min_fs_all')}
+- Score do planejador: {metrics.get('planner_score')}
+- Carga de ruptura estimada (planejador): {metrics.get('predicted_breaking_load_kgf')}
+- Perfil de objetivo do planejador: {metrics.get('planner_objective_profile')}
+- Variantes por etapa: S1={metrics.get('planner_stage1_count')} | S2={metrics.get('planner_stage2_count')} | S3={metrics.get('planner_stage3_count')} | S4={metrics.get('planner_stage4_count')}
+- Variantes finais conservadoras: {metrics.get('planner_final_variants_count')}
+- Versão MIN: FS={metrics.get('final_min_fs_primary')} | massa={metrics.get('final_min_mass_g')}
+- Versão MAX: FS={metrics.get('final_max_fs_primary')} | massa={metrics.get('final_max_mass_g')}
 
 ## Análise automática
 
