@@ -50,4 +50,5 @@ class Frame3DDAdapter:
             ok=proc.returncode==0 and 'error' not in (proc.stderr or '').lower()
             status='ok' if ok else ('ok_with_warnings' if converged else 'error')
             return {'status':status,'returncode':str(proc.returncode),'stdout':proc.stdout,'stderr':proc.stderr,'output_path':str(out),'exe':str(exe),'mode':'linear_stabilized','note':'Frame3DD é usado como validação/visualização linear; flambagem é avaliada no pós-processador.'}
-        except Exception as exc: return {'status':'error','message':repr(exc),'exe':str(exe),'mode':'linear_stabilized'}
+        except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
+            return {'status':'error','message':repr(exc),'exe':str(exe),'mode':'linear_stabilized'}

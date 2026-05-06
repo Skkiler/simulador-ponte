@@ -10,7 +10,7 @@
     "left_support_overhang_mm": 100.0,
     "right_support_overhang_mm": 100.0,
     "panel_mm": 100.0,
-    "width_mm": 180.0,
+    "width_mm": 160.0,
     "end_height_mm": 100.0,
     "center_height_mm": 300.0,
     "plateau_start_mm": 400.0,
@@ -42,13 +42,16 @@
     "unilateral_supports": true,
     "tension_only_bracing_interpretation": true,
     "truss_type": "Parker",
-    "top_profile": "parker_plateau"
+    "top_profile": "parker_plateau",
+    "internal_truss_type": "X",
+    "top_chord_truss_type": "X",
+    "bottom_chord_truss_type": "X"
   },
   "material": {
     "name": "Palito de picolé equivalente",
     "E_MPa": 6000.0,
     "G_MPa": 500.0,
-    "stick_length_mm": 120.0,
+    "stick_length_mm": 115.0,
     "stick_width_mm": 7.0,
     "stick_thickness_mm": 1.5,
     "stick_mass_g": 1.4,

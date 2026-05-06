@@ -1,49 +1,12 @@
 from __future__ import annotations
 
-import math
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Dict, List
 
+from src.core.numeric import safe_float
+from src.core.safety import risk_from_fs, safety_label
 from src.services.geometry_service import GeometryService
 from src.services.section_service import SectionService
-
-
-def safe_float(value: Any, default: float | None = None) -> float | None:
-    """Converte valores para float limpo, evitando NaN/inf/texto em campos numéricos."""
-    try:
-        if value is None:
-            return default
-
-        v = float(value)
-
-        if math.isnan(v) or math.isinf(v):
-            return default
-
-        return v
-    except Exception:
-        return default
-
-
-def safety_label(value: float | None) -> str:
-    """Texto humano para fatores de segurança."""
-    if value is None:
-        return "sem solicitação"
-
-    return f"{value:.3f}"
-
-
-def risk_from_fs(fs: float | None) -> str:
-    """Classifica risco por fator de segurança."""
-    if fs is None:
-        return "OK"
-
-    if fs < 1.0:
-        return "CRITICAL"
-
-    if fs < 2.0:
-        return "LOW_MARGIN"
-
-    return "OK"
 
 
 class PostProcessor:
@@ -54,6 +17,7 @@ class PostProcessor:
 
     def check_members(self, cfg: Dict, member_results: List[Dict]) -> List[Dict]:
         mat = cfg["material"]
+        detail = cfg.get("detail_model", {})
         primary = set(cfg["analysis"].get("primary_groups", []))
         stabilizers = set(cfg["analysis"].get("stabilizer_groups", []))
 
@@ -68,8 +32,36 @@ class PostProcessor:
             Ky = float(r.get("Ky", 1.0))
             Kz = float(r.get("Kz", 1.0))
 
+            eta_t = self.sections.splice_efficiency_factor(
+                L_mm=L,
+                stick_length_mm=float(mat.get("stick_length_mm", 115.0)),
+                overlap_length_mm=float(detail.get("overlap_length_mm", 30.0)),
+                model_efficiency=float(
+                    (detail.get("joint_efficiency_tension_by_model", {}) or {}).get(
+                        str(detail.get("tension_joint_model", "double_lap_reinforced")),
+                        1.0,
+                    )
+                ),
+                decay_per_splice=float(detail.get("joint_efficiency_decay_per_splice_tension", 0.03)),
+            )
+            eta_c = self.sections.splice_efficiency_factor(
+                L_mm=L,
+                stick_length_mm=float(mat.get("stick_length_mm", 115.0)),
+                overlap_length_mm=float(detail.get("overlap_length_mm", 30.0)),
+                model_efficiency=float(
+                    (detail.get("joint_efficiency_compression_by_model", {}) or {}).get(
+                        str(detail.get("compression_joint_model", "double_lap_reinforced")),
+                        1.0,
+                    )
+                ),
+                decay_per_splice=float(detail.get("joint_efficiency_decay_per_splice_compression", 0.04)),
+            )
+
             Pcr_y = self.sections.euler_buckling_N(mat["E_MPa"], Iy, Ky, L)
             Pcr_z = self.sections.euler_buckling_N(mat["E_MPa"], Iz, Kz, L)
+            # Em compressão, emendas e excentricidades reduzem capacidade efetiva.
+            Pcr_y *= max(0.55, min(1.2, eta_c))
+            Pcr_z *= max(0.55, min(1.2, eta_c))
 
             Pcr_y_clean = safe_float(Pcr_y, None)
             Pcr_z_clean = safe_float(Pcr_z, None)
@@ -83,8 +75,8 @@ class PostProcessor:
             else:
                 Pcr_min_clean = min(Pcr_y_clean, Pcr_z_clean)
 
-            cap_t = self.sections.tension_capacity_N(n, mat)
-            cap_c = self.sections.compression_capacity_N(n, mat)
+            cap_t = self.sections.tension_capacity_N(n, mat) * max(0.55, min(1.2, eta_t))
+            cap_c = self.sections.compression_capacity_N(n, mat) * max(0.55, min(1.2, eta_c))
 
             fs_t = cap_t / N if N > 0 else None
             fs_c = cap_c / abs(N) if N < 0 else None
@@ -157,6 +149,8 @@ class PostProcessor:
                     "report_mode": report_mode,
                     "member_role": role,
                     "risk_flag": risk,
+                    "splice_eff_tension": eta_t,
+                    "splice_eff_compression": eta_c,
                 }
             )
 

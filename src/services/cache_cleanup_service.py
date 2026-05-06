@@ -32,6 +32,7 @@ class CacheCleanupService:
     def cleanup_filesystem_cache(self) -> Dict[str, List[str] | int]:
         removed_dirs: List[str] = []
         removed_files: List[str] = []
+        errors: List[str] = []
 
         for current, dirs, files in os.walk(self.root, topdown=True):
             dirs[:] = [d for d in dirs if d not in self.skip_dir_names]
@@ -41,8 +42,8 @@ class CacheCleanupService:
                 try:
                     shutil.rmtree(cache_dir, ignore_errors=True)
                     removed_dirs.append(str(cache_dir.relative_to(self.root)))
-                except Exception:
-                    pass
+                except (OSError, PermissionError) as exc:
+                    errors.append(f"Falha ao remover diretório {cache_dir}: {exc!r}")
                 dirs.remove("__pycache__")
 
             for file_name in files:
@@ -53,8 +54,8 @@ class CacheCleanupService:
                 try:
                     fpath.unlink(missing_ok=True)
                     removed_files.append(str(fpath.relative_to(self.root)))
-                except Exception:
-                    pass
+                except (OSError, PermissionError) as exc:
+                    errors.append(f"Falha ao remover arquivo {fpath}: {exc!r}")
 
         for rel in self.extra_cache_dirs:
             cdir = self.root / rel
@@ -63,12 +64,14 @@ class CacheCleanupService:
             try:
                 shutil.rmtree(cdir, ignore_errors=True)
                 removed_dirs.append(str(cdir.relative_to(self.root)))
-            except Exception:
-                pass
+            except (OSError, PermissionError) as exc:
+                errors.append(f"Falha ao remover diretório {cdir}: {exc!r}")
 
         return {
             "removed_dirs_count": len(removed_dirs),
             "removed_files_count": len(removed_files),
             "removed_dirs": removed_dirs,
             "removed_files": removed_files,
+            "errors_count": len(errors),
+            "errors": errors,
         }

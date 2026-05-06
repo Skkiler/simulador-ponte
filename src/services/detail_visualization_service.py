@@ -4,25 +4,7 @@ from pathlib import Path
 from typing import Dict, List
 import matplotlib.pyplot as plt
 
-import math
-from typing import Any
-
-def safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-
-        if isinstance(value, str) and value.strip() == "":
-            return default
-
-        v = float(value)
-
-        if math.isnan(v) or math.isinf(v):
-            return default
-
-        return v
-    except Exception:
-        return default
+from src.core.numeric import safe_float
 
 class DetailVisualizationService:
     def save_all(self, detailed: Dict, out_dir: str | Path, top_n: int = 12) -> List[Path]:
@@ -44,7 +26,7 @@ class DetailVisualizationService:
         if top:
             ax.barh(
                 [str(r.get("joint_id", ""))[-18:] for r in top],
-                [safe_float(r.get("FS_glue_shear"), 0.0) for r in top],
+                [safe_float(r.get("FS_glue_shear"), 0.0) or 0.0 for r in top],
             )
             ax.axvline(1, linestyle="--")
             ax.axvline(2, linestyle=":")

@@ -25,6 +25,7 @@ coverage.xml
 # -----------------------------
 .venv/
 venv/
+.venv_test/
 env/
 ENV/
 outputs/

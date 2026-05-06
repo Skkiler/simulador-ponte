@@ -1,35 +1,9 @@
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, List
 
-
-def safe_float(value: Any, default: float | None = None) -> float | None:
-    """
-    Converte para float sem quebrar com None, string vazia, texto, NaN ou infinito.
-
-    Use sempre que o valor vier de:
-    - CSV;
-    - JSON;
-    - pós-processamento;
-    - campos opcionais;
-    - resultados de cálculo que podem não existir para certos membros.
-    """
-    try:
-        if value is None:
-            return default
-
-        if isinstance(value, str) and value.strip() == "":
-            return default
-
-        v = float(value)
-
-        if math.isnan(v) or math.isinf(v):
-            return default
-
-        return v
-    except Exception:
-        return default
+from src.core.numeric import safe_float
+from src.services.mass_guard import resolve_mass_limits
 
 
 def fmt_float(
@@ -77,8 +51,23 @@ class RecommendationService:
         detailed: Dict | None = None,
         optimization: Dict | None = None,
     ) -> Dict[str, List[str] | str]:
+        def topo_pt(value: Any) -> str:
+            raw = str(value or "").strip().lower()
+            mp = {
+                "parker_plateau": "platô",
+                "triangular_peak": "pontiagudo/triangular",
+                "shallow_arch": "arco",
+                "flat": "reto",
+            }
+            return mp.get(raw, str(value or "—"))
+
         detailed = detailed or {}
         optimization = optimization or {}
+        mat = cfg.get("material", {})
+        detail_cfg = cfg.get("detail_model", {})
+        t_cap = float(mat.get("tension_capacity_per_stick_kgf", 72.0))
+        c_cap = max(1.0e-6, float(mat.get("compression_capacity_two_sticks_kgf", 11.0)) / 2.0)
+        tc_ratio = t_cap / c_cap
 
         primary = [
             r
@@ -123,6 +112,7 @@ class RecommendationService:
         ]
 
         dsum = detailed.get("summary", {}) or {}
+        limits = resolve_mass_limits(cfg)
 
         weak_glue = []
 
@@ -143,6 +133,30 @@ class RecommendationService:
                 f"Erro de equilíbrio vertical: {equilibrium_error:.3e} N."
             )
         ]
+        span_mm = float(cfg.get("bridge", {}).get("span_mm", 1200.0))
+        height_mm = max(40.0, float(cfg.get("bridge", {}).get("center_height_mm", 300.0)))
+        load_kgf = float(cfg.get("bridge", {}).get("load_total_kgf", 120.0))
+        n_top = int(cfg.get("member_sticks_by_group", {}).get("top_chord", 1))
+        c_per_stick = max(0.1, float(mat.get("compression_capacity_two_sticks_kgf", 11.0)) / 2.0)
+        chord_force_aprox = (0.5 * load_kgf * span_mm / 4.0) / height_mm
+        top_cap_aprox = n_top * c_per_stick
+        summary.append(
+            "Checagem simplificada M/h: "
+            f"força de banzo por treliça ≈ {chord_force_aprox:.1f} kgf, "
+            f"capacidade direta aproximada do banzo (n={n_top}) ≈ {top_cap_aprox:.1f} kgf."
+        )
+        if tc_ratio >= 6.0:
+            summary.append(
+                "Material com alta razão tração/compressão detectada. "
+                "Sob carga vertical, topologias tipo Pratt tendem a ser mais eficientes "
+                "porque deslocam diagonais longas para tração."
+            )
+        summary.append(
+            "Modelos de emenda ativos: "
+            f"tração={detail_cfg.get('tension_joint_model', '—')}, "
+            f"compressão={detail_cfg.get('compression_joint_model', '—')}, "
+            f"sobreposição={fmt_float(detail_cfg.get('overlap_length_mm'), 1, '—', ' mm')}."
+        )
 
         if critical_primary:
             summary.append(
@@ -192,6 +206,13 @@ class RecommendationService:
                 f"Modelo peça-a-peça: {estimated_sticks} palitos estimados com perdas "
                 f"e massa total de {estimated_mass}."
             )
+            summary.append(
+                "Limites de massa: "
+                f"nominal={fmt_float(limits.get('nominal_limit_g'), 0, '—', ' g')}, "
+                f"planner={fmt_float(limits.get('planner_limit_g'), 0, '—', ' g')}, "
+                f"material={fmt_float(limits.get('material_limit_g'), 0, '—', ' g')}, "
+                f"efetivo={fmt_float(limits.get('effective_limit_g'), 0, '—', ' g')}."
+            )
 
             if is_below(dsum.get("mass_margin_g"), 0.0):
                 summary.append(
@@ -206,13 +227,15 @@ class RecommendationService:
             )
 
         suggestions: List[str] = []
+        proposal_description = ""
+        comparison_notes: List[str] = []
 
         primary_sorted = sorted(
             primary,
             key=lambda r: safe_float(r.get("FS_min"), 1.0e99) or 1.0e99,
         )
 
-        for r in primary_sorted[:10]:
+        for r in primary_sorted[:8]:
             if r.get("risk_flag") not in {"CRITICAL", "LOW_MARGIN"}:
                 continue
 
@@ -279,11 +302,39 @@ class RecommendationService:
                 "weakest_glue_joints.csv ou adote talas simétricas."
             )
 
+        # Recomendações de montagem e detalhamento baseadas no modo de falha dominante.
+        compression_critical = [
+            r for r in primary_sorted[:20]
+            if str(r.get("governing_mode", "")).startswith("compression")
+            or "buckling" in str(r.get("governing_mode", ""))
+        ]
+        overlap_mm = safe_float(cfg.get("detail_model", {}).get("overlap_length_mm"), 30.0) or 30.0
+        comp_joint_model = str(cfg.get("detail_model", {}).get("compression_joint_model", "double_lap_reinforced"))
+
+        if compression_critical:
+            suggestions.append(
+                "Montagem de membros comprimidos: priorize seção caixa/afastada em banzo superior e verticais, "
+                "com talas simétricas (dupla sobreposição) para reduzir excentricidade local."
+            )
+            if overlap_mm < 25.0:
+                suggestions.append(
+                    "Sobreposição atual curta para emendas comprimidas. Considere 25 a 40 mm para melhorar transferência."
+                )
+            if comp_joint_model not in {"double_lap_reinforced", "double_lap"}:
+                suggestions.append(
+                    "Modelo de junta comprimida conservador. Considere `double_lap` ou `double_lap_reinforced`."
+                )
+            suggestions.append(
+                "Se a massa estiver no limite, aumente o painel (menos barras totais) e redirecione palitos para grupos críticos."
+            )
+
         best = optimization.get("best")
         stage_counts = optimization.get("stage_counts") or {}
         final_variants = optimization.get("final_variants") or {}
 
         if best:
+            max_mass = float(limits["effective_limit_g"])
+            best_mass = safe_float(best.get("mass_g"), None)
             b_height = fmt_float(
                 best.get("center_height_mm"),
                 decimals=0,
@@ -297,11 +348,34 @@ class RecommendationService:
                 default="—",
                 suffix=" mm",
             )
+            b_width = fmt_float(
+                best.get("width_mm"),
+                decimals=0,
+                default="—",
+                suffix=" mm",
+            )
+            b_span = fmt_float(
+                best.get("span_mm"),
+                decimals=0,
+                default="—",
+                suffix=" mm",
+            )
+            b_side = best.get("side_truss_type", "—")
+            b_int = best.get("internal_truss_type", "—")
+            b_top_chord = best.get("top_chord_truss_type", "—")
+            b_bottom_chord = best.get("bottom_chord_truss_type", "—")
+
+            proposal_description = (
+                f"Proposta selecionada automaticamente: treliça lateral {b_side}, "
+                f"topo {topo_pt(best.get('top_profile', '—'))}, treliça interna {b_int}, "
+                f"banzo superior {b_top_chord}, banzo inferior {b_bottom_chord}, "
+                f"vão {b_span}, largura {b_width}, altura {b_height}, painel {b_panel}."
+            )
+            summary.insert(1, proposal_description)
 
             suggestions.append(
-                f"Proposta automática: testar {best.get('truss_type', best.get('side_truss_type', '—'))} / "
-                f"{best.get('top_profile', '—')} com altura {b_height} "
-                f"e painel {b_panel}. Use outputs/optimization/recommended_config.json."
+                "A proposta selecionada já foi calculada e detalhada. "
+                "Use os arquivos de saída para construção e comparação entre versões final_ideal/min/max."
             )
 
             pred_break = fmt_float(
@@ -313,11 +387,20 @@ class RecommendationService:
             suggestions.append(
                 f"Carga de ruptura estimada do melhor candidato: {pred_break}."
             )
+            if best_mass is not None and best_mass > max_mass + 1e-6:
+                suggestions.append(
+                    f"Atenção: a proposta excede a massa máxima ({best_mass:.1f} g > {max_mass:.1f} g) "
+                    "e não deve ser aceita como solução final."
+                )
 
             if stage_counts:
                 suggestions.append(
-                    f"Busca executada: S1={stage_counts.get('stage1', 0)}, "
-                    f"S2={stage_counts.get('stage2', 0)}, "
+                    f"Busca executada: S0-gerados={stage_counts.get('stage0_generated', 0)}, "
+                    f"S0-aprovados={stage_counts.get('stage0_prefilter_passed', 0)}, "
+                    f"S1-válidos={stage_counts.get('stage1', 0)}, "
+                    f"S2A={stage_counts.get('stage2a_selected', 0)}, "
+                    f"S2B={stage_counts.get('stage2b_evaluated', 0)}, "
+                    f"S2-únicos={stage_counts.get('stage2_unique', stage_counts.get('stage2', 0))}, "
                     f"S3={stage_counts.get('stage3', 0)}, "
                     f"S4={stage_counts.get('stage4', 0)}."
                 )
@@ -325,12 +408,31 @@ class RecommendationService:
             if final_variants:
                 vmin = final_variants.get("min") or {}
                 vmax = final_variants.get("max") or {}
+                videal = final_variants.get("ideal") or {}
                 suggestions.append(
                     "Versões finais conservadoras geradas: "
                     f"MIN (FS={fmt_float(vmin.get('min_fs_primary'), 2)}, "
                     f"massa={fmt_float(vmin.get('mass_g'), 1, '—', ' g')}) e "
                     f"MAX (FS={fmt_float(vmax.get('min_fs_primary'), 2)}, "
                     f"massa={fmt_float(vmax.get('mass_g'), 1, '—', ' g')})."
+                )
+                comparison_notes.append(
+                    "IDEAL: "
+                    f"FS={fmt_float(videal.get('min_fs_primary'), 2)} | "
+                    f"ruptura={fmt_float(videal.get('predicted_breaking_load_kgf'), 1, '—', ' kgf')} | "
+                    f"massa={fmt_float(videal.get('mass_g'), 1, '—', ' g')}"
+                )
+                comparison_notes.append(
+                    "MIN: "
+                    f"FS={fmt_float(vmin.get('min_fs_primary'), 2)} | "
+                    f"ruptura={fmt_float(vmin.get('predicted_breaking_load_kgf'), 1, '—', ' kgf')} | "
+                    f"massa={fmt_float(vmin.get('mass_g'), 1, '—', ' g')}"
+                )
+                comparison_notes.append(
+                    "MAX: "
+                    f"FS={fmt_float(vmax.get('min_fs_primary'), 2)} | "
+                    f"ruptura={fmt_float(vmax.get('predicted_breaking_load_kgf'), 1, '—', ' kgf')} | "
+                    f"massa={fmt_float(vmax.get('mass_g'), 1, '—', ' g')}"
                 )
 
         if not suggestions:
@@ -342,4 +444,6 @@ class RecommendationService:
         return {
             "summary": "\n".join(summary),
             "suggestions": suggestions,
+            "proposal_description": proposal_description,
+            "comparison_notes": comparison_notes,
         }

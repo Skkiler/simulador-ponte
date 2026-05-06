@@ -6,72 +6,13 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from src.core.numeric import safe_float, safe_sort_key
+from src.core.safety import risk_from_fs, safety_label
 from src.domain.models import Member, Node
 from src.services.geometry_service import GeometryService
+from src.services.mass_guard import resolve_mass_limits
 from src.services.section_service import SectionService
-
-
-def safe_float(value: Any, default: float | None = None) -> float | None:
-    """
-    Converte para float sem quebrar quando o valor vier como None, string vazia,
-    NaN, infinito ou texto.
-
-    Use isto sempre que um campo puder vir de CSV, JSON ou pós-processamento.
-    """
-    try:
-        if value is None:
-            return default
-
-        if isinstance(value, str) and value.strip() == "":
-            return default
-
-        v = float(value)
-
-        if math.isnan(v) or math.isinf(v):
-            return default
-
-        return v
-    except Exception:
-        return default
-
-
-def safe_sort_key(value: Any, default: float = 1.0e99) -> float:
-    """
-    Chave segura para ordenação crescente.
-    Valores ausentes ou inválidos vão para o final.
-    """
-    v = safe_float(value, None)
-    return default if v is None else v
-
-
-def safety_label(value: Any) -> str:
-    """
-    Representação humana para fator de segurança.
-    """
-    v = safe_float(value, None)
-
-    if v is None:
-        return "sem solicitação"
-
-    return f"{v:.3f}"
-
-
-def risk_from_fs(value: Any) -> str:
-    """
-    Classificação simples por fator de segurança.
-    """
-    fs = safe_float(value, None)
-
-    if fs is None:
-        return "OK"
-
-    if fs < 1.0:
-        return "CRITICAL"
-
-    if fs < 2.0:
-        return "LOW_MARGIN"
-
-    return "OK"
+from src.services.splice_staggering_service import SpliceStaggeringService
 
 
 class StickDetailService:
@@ -85,6 +26,17 @@ class StickDetailService:
 
     def __init__(self, section_service: SectionService | None = None) -> None:
         self.sections = section_service or SectionService()
+        self.splice_stagger = SpliceStaggeringService()
+
+    @staticmethod
+    def floor_to_cut_increment(
+        value_mm: float,
+        increment_mm: float = 5.0,
+        min_value_mm: float = 5.0,
+    ) -> float:
+        inc = max(1.0e-9, float(increment_mm))
+        v = max(float(min_value_mm), float(value_mm))
+        return max(float(min_value_mm), math.floor(v / inc) * inc)
 
     @staticmethod
     def _unit_vector(ni: Node, nj: Node) -> Tuple[float, float, float, float]:
@@ -206,6 +158,14 @@ class StickDetailService:
         overlap = float(detail.get("overlap_length_mm", 30.0))
         glue_tau = float(detail.get("glue_shear_strength_MPa", 3.5))
         glue_sf = float(detail.get("default_joint_safety_factor", 2.0))
+        min_end_margin = max(0.0, float(detail.get("min_end_margin_mm", 10.0)))
+        cut_increment_mm = max(0.5, float(detail.get("cut_increment_mm", 5.0)))
+        allow_cut_rounding = bool(detail.get("allow_cut_rounding", True))
+        min_cut_length_mm = max(1.0, float(detail.get("min_cut_length_mm", 5.0)))
+        # global default joint models.  These may be overridden per member by
+        # a connection planner via ``cfg['member_joint_plan']``.
+        tension_joint_model = str(detail.get("tension_joint_model", "double_lap_reinforced"))
+        compression_joint_model = str(detail.get("compression_joint_model", "double_lap_reinforced"))
         glue_spread = float(detail.get("glue_spread_g_per_m2", 160.0))
         glue_eff = float(detail.get("glue_mass_efficiency", 0.65))
         imperfection_e = float(detail.get("imperfection_eccentricity_mm", 2.0))
@@ -218,6 +178,7 @@ class StickDetailService:
         node_by_id = {n.id: n for n in nodes}
         res_by = {int(r["member_id"]): r for r in member_results}
         chk_by = {int(r["member_id"]): r for r in member_checks}
+        sizing_map = cfg.get("member_sizing_plan_by_id", {}) or {}
 
         stabilizers = set(cfg.get("analysis", {}).get("stabilizer_groups", []))
 
@@ -233,6 +194,19 @@ class StickDetailService:
         total_pieces = 0
         total_cut = 0.0
 
+        # Determinar se estamos usando modelo de quarto de ponte.  Quando
+        # `use_quarter_model` é verdadeiro e um valor de
+        # `quarter_member_count` é fornecido, cada membro pode ser atribuído
+        # a um dos quadrantes.  Isto permite alternar a orientação das emendas
+        # por quadrante para reduzir alinhamentos contínuos.
+        use_quarter_model = bool(cfg.get("analysis", {}).get("use_quarter_model", False))
+        quarter_count = 0
+        if use_quarter_model:
+            try:
+                quarter_count = int(cfg.get("analysis", {}).get("quarter_member_count", 0))
+            except (TypeError, ValueError):
+                quarter_count = 0
+
         for m in members:
             ni = node_by_id[m.i]
             nj = node_by_id[m.j]
@@ -244,6 +218,7 @@ class StickDetailService:
 
             res = res_by.get(m.id, {})
             chk = chk_by.get(m.id, {})
+            sizing = sizing_map.get(str(m.id)) or sizing_map.get(m.id) or {}
 
             N = safe_float(res.get("N_N"), 0.0) or 0.0
             n_lanes = max(1, int(m.n_sticks))
@@ -259,7 +234,33 @@ class StickDetailService:
             piece_area = stick_w * stick_t
             per_sigma = per_lane / piece_area if piece_area else 0.0
 
+            # Gera as subdivisões do membro em peças de palito.  Caso
+            # seja um modelo de quarto, alternamos a orientação das
+            # emendas em quadrantes ímpares para evitar alinhamento
+            # perfeito de juntas nas quatro porções da ponte.  Para
+            # quadrantes ímpares, invertimos a ordem de segmentação (os
+            # cortes passam a ser contados a partir da extremidade oposta).
             intervals = self._piece_intervals(L, stick_len, overlap)
+            quadrant_id = 0
+            if use_quarter_model and quarter_count > 0:
+                # Determinar qual quadrante este membro pertence com base
+                # no número de membros no quarto.  O identificador do
+                # quadrante é dado por inteiro da divisão do índice do
+                # membro (começando em 0) pelo total de membros de um
+                # quarto.
+                try:
+                    quadrant_id = (int(m.id) - 1) // int(quarter_count)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    quadrant_id = 0
+                # Inverter a orientação das emendas para quadrantes ímpares
+                if quadrant_id % 2 == 1:
+                    rev: List[Tuple[float, float, float]] = []
+                    for s0, s1, cl in reversed(intervals):
+                        # Para inverter, subtrai os limites do comprimento total
+                        rev.append((L - s1, L - s0, cl))
+                    intervals = rev
+
+            base_intervals = intervals
 
             r_y = self.sections.radius_of_gyration(sec["Iy"], sec["A"])
             r_z = self.sections.radius_of_gyration(sec["Iz"], sec["A"])
@@ -280,12 +281,72 @@ class StickDetailService:
 
             member_glue = 0.0
             joint_fs_values: List[float] = []
+            # Determine joint model.  If a connection plan is attached to
+            # the configuration it overrides the global defaults on a per
+            # member basis.  The plan should be a dictionary keyed by
+            # member id (as int or str) containing a ``recommended_joint_model``
+            # field.  When absent the global tension/compression model is used.
+            member_plan = (cfg.get("member_joint_plan", {}) or {}).get(m.id) or (cfg.get("member_joint_plan", {}) or {}).get(str(m.id))
+            if member_plan and isinstance(member_plan, dict):
+                plan_model = member_plan.get("recommended_joint_model") or member_plan.get("joint_model")
+            else:
+                plan_model = None
+            if plan_model:
+                joint_model = str(plan_model)
+            else:
+                joint_model = tension_joint_model if N >= 0 else compression_joint_model
+
+            joint_area_factor = {
+                "butt_plain": 0.35,
+                "single_lap": 1.00,
+                "single_lap_tala": 1.30,
+                "butt_small_splints": 1.45,
+                "butt_full_splints": 1.70,
+                "double_lap": 1.75,
+                "double_lap_reinforced": 2.10,
+                "scarf": 1.55,
+                "half_lap_notched": 1.40,
+            }.get(joint_model, 1.0)
+            joint_secondary_bending_factor = {
+                "butt_plain": 1.55,
+                "single_lap": 1.25,
+                "single_lap_tala": 1.12,
+                "butt_small_splints": 1.05,
+                "butt_full_splints": 0.98,
+                "double_lap": 1.00,
+                "double_lap_reinforced": 0.95,
+                "scarf": 1.00,
+                "half_lap_notched": 1.08,
+            }.get(joint_model, 1.0)
 
             for lane in range(1, n_lanes + 1):
+                lane_intervals = list(base_intervals)
+                if detail.get("splice_stagger_enabled", True):
+                    lane_intervals = self.splice_stagger.offset_splice_positions(
+                        lane_intervals,
+                        member_length=L,
+                        quadrant_id=quadrant_id,
+                        lane_id=lane,
+                        cfg=cfg,
+                    )
                 prev_id = None
                 prev_end = None
 
-                for piece_index, (s0, s1, cut_len) in enumerate(intervals, 1):
+                for piece_index, (s0, s1, cut_len) in enumerate(lane_intervals, 1):
+                    # Arredondamento de corte para incremento de oficina (ex.: 5 mm).
+                    geom_len = max(0.0, float(cut_len))
+                    if allow_cut_rounding and geom_len <= stick_len + 1.0e-9:
+                        cut_len_rounded = self.floor_to_cut_increment(
+                            geom_len,
+                            increment_mm=cut_increment_mm,
+                            min_value_mm=min_cut_length_mm,
+                        )
+                        # Não reduzir abaixo do necessário perto de extremidades críticas.
+                        if s0 <= min_end_margin or (L - s1) <= min_end_margin:
+                            cut_len_rounded = geom_len
+                    else:
+                        cut_len_rounded = geom_len
+                    cut_rounding_delta = geom_len - cut_len_rounded
                     sid = f"M{m.id:03d}-L{lane:02d}-P{piece_index:02d}"
 
                     x0 = ni.x + ux * s0
@@ -297,10 +358,10 @@ class StickDetailService:
                     z1 = ni.z + uz * s1
 
                     total_pieces += 1
-                    total_cut += cut_len
+                    total_cut += cut_len_rounded
 
-                    cut_lengths.append(cut_len)
-                    cut_counter[round(cut_len, 1)] += 1
+                    cut_lengths.append(cut_len_rounded)
+                    cut_counter[round(cut_len_rounded, 1)] += 1
 
                     stick_rows.append(
                         {
@@ -311,7 +372,9 @@ class StickDetailService:
                             "piece_index": piece_index,
                             "s0_mm": s0,
                             "s1_mm": s1,
-                            "cut_length_mm": cut_len,
+                            "geometric_piece_length_mm": geom_len,
+                            "cut_length_mm": cut_len_rounded,
+                            "cut_rounding_delta_mm": cut_rounding_delta,
                             "x0_mm": x0,
                             "y0_mm": y0,
                             "z0_mm": z0,
@@ -321,16 +384,19 @@ class StickDetailService:
                             "N_piece_N": per_lane,
                             "sigma_axial_piece_MPa": per_sigma,
                             "member_state": "tension" if N >= 0 else "compression",
-                            "mass_g": stick_mass * cut_len / stick_len,
+                            "width_mm": stick_w,
+                            "thickness_mm": stick_t,
+                            "quadrant_id": quadrant_id,
+                            "mass_g": stick_mass * cut_len_rounded / stick_len,
                         }
                     )
 
                     if prev_id is not None and prev_end is not None:
                         overlap_actual = max(0.0, prev_end - s0)
-                        glue_area = overlap_actual * stick_w
+                        glue_area = overlap_actual * stick_w * joint_area_factor
 
                         if glue_area > 0:
-                            glue_shear = abs(per_lane) / glue_area
+                            glue_shear = (abs(per_lane) / glue_area) * joint_secondary_bending_factor
                         else:
                             glue_shear = None
 
@@ -358,14 +424,31 @@ class StickDetailService:
                                 "piece_a": prev_id,
                                 "piece_b": sid,
                                 "joint_type": "lap_overlap",
+                                "joint_model": joint_model,
                                 "overlap_length_mm": overlap_actual,
+                                "splice_center_mm": 0.5 * (prev_end + s0),
+                                "quadrant_id": quadrant_id,
+                                "joint_area_factor": joint_area_factor,
+                                "joint_secondary_bending_factor": joint_secondary_bending_factor,
                                 "glue_area_mm2": glue_area,
                                 "force_transfer_N": abs(per_lane),
                                 "glue_shear_MPa": glue_shear,
                                 "glue_allow_design_MPa": glue_allow,
-                                "FS_glue_shear": fs_glue_clean,
-                                "FS_glue_shear_label": safety_label(fs_glue_clean),
-                                "risk_flag": risk_from_fs(fs_glue_clean),
+                                        "FS_glue_shear": fs_glue_clean,
+                                        "FS_glue_shear_label": safety_label(fs_glue_clean),
+                                        "risk_flag": risk_from_fs(fs_glue_clean),
+                                        "splice_pattern": self.splice_stagger.assign_splice_stagger_pattern(
+                                            cfg,
+                                            {"member_id": m.id},
+                                            quadrant_id,
+                                            lane,
+                                        ).get("splice_pattern", "brick_alt"),
+                                        "stagger_offset_mm": self.splice_stagger.assign_splice_stagger_pattern(
+                                            cfg,
+                                            {"member_id": m.id},
+                                            quadrant_id,
+                                            lane,
+                                        ).get("stagger_offset_mm", 0.0),
                             }
                         )
 
@@ -429,9 +512,11 @@ class StickDetailService:
                     "member_id": m.id,
                     "group": m.group,
                     "role": role,
+                    "n_sticks_current": n_lanes,
+                    "n_sticks_recommended": int(sizing.get("n_sticks_recommended", n_lanes)),
                     "n_lanes_sticks": n_lanes,
-                    "pieces_per_lane": len(intervals),
-                    "total_piece_count": len(intervals) * n_lanes,
+                    "pieces_per_lane": len(base_intervals),
+                    "total_piece_count": len(base_intervals) * n_lanes,
                     "member_length_mm": L,
                     "layout": sec.get("layout"),
                     "section_A_mm2": sec["A"],
@@ -449,6 +534,7 @@ class StickDetailService:
                     "M_imperfection_Nmm": M_imp,
                     "sigma_bending_est_MPa": max(abs(sig_by), abs(sig_bz)),
                     "sigma_combined_est_MPa": sig_comb,
+                    "joint_model": joint_model,
                     "glue_area_total_mm2": member_glue,
                     "glue_mass_est_g": glue_mass,
                     "FS_min_global": fs_min_global,
@@ -460,6 +546,10 @@ class StickDetailService:
                     "suggested_action": action,
                 }
             )
+
+        # Detecta e anota alinhamentos críticos de emendas após detalhamento completo.
+        joint_rows = self.splice_stagger.reduce_aligned_splices(joint_rows, cfg)
+        splice_stagger_report = self.splice_stagger.validate_splice_alignment(joint_rows, cfg)
 
         cutting_rows = [
             {
@@ -495,7 +585,8 @@ class StickDetailService:
         glue_mass = (total_glue_area / 1_000_000.0) * glue_spread / max(glue_eff, 1.0e-6)
         total_mass = total * stick_mass + glue_mass
 
-        limit = float(mat.get("mass_limit_g", 1000.0))
+        mass_limits = resolve_mass_limits(cfg)
+        limit = float(mass_limits["effective_limit_g"])
 
         summary = {
             "total_members": len(member_rows),
@@ -511,8 +602,15 @@ class StickDetailService:
             "estimated_total_mass_g": total_mass,
             "mass_limit_g": limit,
             "mass_margin_g": limit - total_mass,
+            "mass_limit_nominal_g": float(mass_limits["nominal_limit_g"]),
+            "mass_limit_material_g": mass_limits["material_limit_g"],
+            "mass_limit_planner_g": mass_limits["planner_limit_g"],
+            "mass_limit_effective_g": float(mass_limits["effective_limit_g"]),
+            "mass_limit_effective_source": str(mass_limits["effective_source"]),
             "glue_shear_strength_MPa": glue_tau,
             "glue_safety_factor": glue_sf,
+            "cut_increment_mm": cut_increment_mm,
+            "allow_cut_rounding": allow_cut_rounding,
         }
 
         weakest = sorted(
@@ -543,6 +641,10 @@ class StickDetailService:
             json.dumps(summary, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+        (out / "splice_stagger_report.json").write_text(
+            json.dumps(splice_stagger_report, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
         return {
             "stick_pieces": stick_rows,
@@ -553,5 +655,6 @@ class StickDetailService:
             "reinforcement_suggestions": reinf_rows,
             "weakest_members": weakest,
             "weakest_glue_joints": glue_weak,
+            "splice_stagger_report": splice_stagger_report,
             "summary": summary,
         }

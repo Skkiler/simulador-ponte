@@ -24,21 +24,157 @@ class ConfigService:
             json.dump(self.normalize(cfg), f, indent=2, ensure_ascii=False)
         return p
 
+    @staticmethod
+    def _build_default_load_distribution_x_mm(bridge: Dict[str, Any]) -> list[float]:
+        panel = max(1.0, float(bridge.get("panel_mm", 100.0)))
+        start = float(bridge.get("plateau_start_mm", float(bridge.get("span_mm", 1200.0)) / 3.0))
+        end = float(bridge.get("plateau_end_mm", 2.0 * float(bridge.get("span_mm", 1200.0)) / 3.0))
+        span = float(bridge.get("span_mm", 1200.0))
+        lo = max(0.0, min(start, end))
+        hi = min(span, max(start, end))
+        xs: list[float] = []
+        x = lo
+        while x <= hi + 1e-9:
+            xs.append(round(x, 6))
+            x += panel
+        return xs or [round(span / 2.0, 6)]
+
+    @classmethod
+    def _normalize_load_distribution_x_mm(cls, bridge: Dict[str, Any]) -> list[float]:
+        raw = bridge.get("load_distribution_x_mm")
+        span = float(bridge.get("span_mm", 1200.0))
+        if not isinstance(raw, list) or not raw:
+            return cls._build_default_load_distribution_x_mm(bridge)
+        cleaned: list[float] = []
+        for value in raw:
+            try:
+                x = float(value)
+            except (TypeError, ValueError):
+                continue
+            x = max(0.0, min(span, x))
+            cleaned.append(round(x, 6))
+        cleaned = sorted(set(cleaned))
+        return cleaned or cls._build_default_load_distribution_x_mm(bridge)
+
+    @staticmethod
+    def _validate_normalized(cfg: Dict[str, Any]) -> None:
+        bridge = cfg.get("bridge", {}) or {}
+        material = cfg.get("material", {}) or {}
+        planner = cfg.get("planner", {}) or {}
+
+        positive_bridge = (
+            "span_mm",
+            "panel_mm",
+            "width_mm",
+            "center_height_mm",
+            "load_total_kgf",
+        )
+        for key in positive_bridge:
+            val = float(bridge.get(key, 0.0))
+            if val <= 0:
+                raise ValueError(f"Config inválida: bridge.{key} deve ser > 0 (recebido {val}).")
+
+        positive_material = (
+            "stick_length_mm",
+            "stick_width_mm",
+            "stick_thickness_mm",
+            "stick_mass_g",
+            "mass_limit_g",
+        )
+        for key in positive_material:
+            val = float(material.get(key, 0.0))
+            if val <= 0:
+                raise ValueError(f"Config inválida: material.{key} deve ser > 0 (recebido {val}).")
+
+        range_pairs = (
+            ("span_min_mm", "span_max_mm"),
+            ("width_min_mm", "width_max_mm"),
+            ("height_min_mm", "height_max_mm"),
+            ("panel_min_mm", "panel_max_mm"),
+        )
+        for min_key, max_key in range_pairs:
+            mn = float(planner.get(min_key, 0.0))
+            mx = float(planner.get(max_key, 0.0))
+            if mn > mx:
+                raise ValueError(
+                    f"Config inválida: planner.{min_key} ({mn}) não pode ser maior que planner.{max_key} ({mx})."
+                )
+
     def normalize(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         cfg = copy.deepcopy(cfg)
         bridge = cfg.setdefault("bridge", {})
         mat = cfg.setdefault("material", {})
         planner = cfg.setdefault("planner", {})
 
+        # Análise: configurações de verificação e otimização. Se não existir, cria com
+        # valores padrão.
+        analysis = cfg.setdefault("analysis", {})
+        analysis.setdefault("enforce_symmetry", True)
+        if "use_quarter_model" not in analysis:
+            # Fallback seguro: se simetria for exigida e o usuário não definiu,
+            # habilita quarter-model automaticamente.
+            analysis["use_quarter_model"] = bool(analysis.get("enforce_symmetry", True))
+        analysis.setdefault("quarter_model_mode", "strict")
+        analysis.setdefault("quarter_model_debug", False)
+
+        # Perfil legado -> perfil atual
+        top_profile_legacy = str(bridge.get("top_profile", "parker_plateau")).strip().lower()
+        top_profile_aliases = {
+            "parker_plateau": "parker_plateau",
+            "plateau": "parker_plateau",
+            "platô": "parker_plateau",
+            "plato": "parker_plateau",
+            "triangular_peak": "triangular_peak",
+            "triangular": "triangular_peak",
+            "pontiagudo/triangular": "triangular_peak",
+            "shallow_arch": "shallow_arch",
+            "arch": "shallow_arch",
+            "arco": "shallow_arch",
+            "flat": "flat",
+            "reto": "flat",
+            "reta": "flat",
+        }
+        bridge["top_profile"] = top_profile_aliases.get(top_profile_legacy, "parker_plateau")
+        compat_warnings = cfg.setdefault("compatibility_warnings", [])
+
+        def add_compat_warning(message: str) -> None:
+            if message not in compat_warnings:
+                compat_warnings.append(message)
+
         bridge.setdefault("truss_type", bridge.get("side_truss_type", "Parker"))
         bridge.setdefault("side_truss_type", bridge.get("truss_type", "Parker"))
         bridge.setdefault("internal_truss_type", "X")
         bridge.setdefault("chord_truss_type", "none")
+        legacy_chord = str(bridge.get("chord_truss_type", "none"))
+        legacy_mode = legacy_chord.strip().lower()
+        legacy_enabled = legacy_mode not in {"", "none", "sem", "nenhuma"}
+        bridge.setdefault("legacy_chord_truss_lacing_enabled", False)
+        if "top_chord_truss_type" not in bridge:
+            bridge["top_chord_truss_type"] = legacy_chord if legacy_enabled else "X"
+            if legacy_enabled:
+                add_compat_warning(
+                    "bridge.chord_truss_type legado migrado para bridge.top_chord_truss_type."
+                )
+        else:
+            bridge["top_chord_truss_type"] = str(bridge.get("top_chord_truss_type", "X"))
+        if "bottom_chord_truss_type" not in bridge:
+            bridge["bottom_chord_truss_type"] = legacy_chord if legacy_enabled else "X"
+            if legacy_enabled:
+                add_compat_warning(
+                    "bridge.chord_truss_type legado migrado para bridge.bottom_chord_truss_type."
+                )
+        else:
+            bridge["bottom_chord_truss_type"] = str(bridge.get("bottom_chord_truss_type", "X"))
+        if legacy_enabled and not bool(bridge.get("legacy_chord_truss_lacing_enabled", False)):
+            add_compat_warning(
+                "bridge.chord_truss_type legado detectado; lacing legado desativado por padrão. "
+                "Ative bridge.legacy_chord_truss_lacing_enabled=true para manter comportamento antigo."
+            )
         bridge.setdefault("cross_frame_truss_type", bridge.get("internal_truss_type", "X"))
-        bridge.setdefault("top_profile", "parker_plateau")
+        bridge.setdefault("top_profile", bridge["top_profile"])
         bridge.setdefault("span_mm", 1200.0)
         bridge.setdefault("panel_mm", 100.0)
-        bridge.setdefault("width_mm", 180.0)
+        bridge.setdefault("width_mm", 160.0)
         bridge.setdefault("left_support_overhang_mm", 100.0)
         bridge.setdefault("right_support_overhang_mm", 100.0)
         bridge.setdefault("end_height_mm", 100.0)
@@ -48,14 +184,7 @@ class ConfigService:
         bridge.setdefault("load_total_kgf", 120.0)
         bridge["load_total_N"] = float(bridge["load_total_kgf"]) * 9.80665
 
-        if "load_distribution_x_mm" not in bridge or not bridge["load_distribution_x_mm"]:
-            p = float(bridge["panel_mm"])
-            xs = []
-            x = float(bridge["plateau_start_mm"])
-            while x <= float(bridge["plateau_end_mm"]) + 1e-9:
-                xs.append(round(x, 6))
-                x += p
-            bridge["load_distribution_x_mm"] = xs or [bridge["span_mm"] / 2.0]
+        bridge["load_distribution_x_mm"] = self._normalize_load_distribution_x_mm(bridge)
 
         half_w = float(bridge["width_mm"]) / 2.0
         bridge.setdefault("support_contact_y_mm", [-half_w, half_w])
@@ -64,7 +193,11 @@ class ConfigService:
 
         mat.setdefault("E_MPa", 6000.0)
         mat.setdefault("G_MPa", 500.0)
-        mat.setdefault("stick_length_mm", 120.0)
+        # Valores padrão alinhados com o edital.
+        mat.setdefault("stick_length_mm", 115.0)
+        # Default dimensions for popsicle sticks.  Use 7.0 mm × 1.5 mm instead of 8.2 × 2.0
+        # to align with the updated physical stick specification.  These defaults are
+        # only used when the user does not specify values in the UI or configuration.
         mat.setdefault("stick_width_mm", 7.0)
         mat.setdefault("stick_thickness_mm", 1.5)
         mat.setdefault("stick_mass_g", 1.4)
@@ -86,16 +219,86 @@ class ConfigService:
         detail.setdefault("enabled", True)
         detail.setdefault("splice_mode", "overlap")
         detail.setdefault("overlap_length_mm", 30.0)
-        detail.setdefault("min_end_margin_mm", 15.0)
+        detail.setdefault("min_end_margin_mm", 10.0)
         detail.setdefault("reinforcement_length_mm", 55.0)
         detail.setdefault("reinforcement_sticks_per_splice", 2)
         detail.setdefault("glue_shear_strength_MPa", 3.5)
         detail.setdefault("glue_spread_g_per_m2", 160.0)
         detail.setdefault("glue_mass_efficiency", 0.65)
         detail.setdefault("default_joint_safety_factor", 2.0)
+        joint_alias = {
+            "single_lap": "single_lap",
+            "lap": "single_lap",
+            "butt_plain": "butt_plain",
+            "ponta_a_ponta": "butt_plain",
+            "overlap": "single_lap",
+            "single_lap_tala": "single_lap_tala",
+            "butt_small_splints": "butt_small_splints",
+            "butt_full_splints": "butt_full_splints",
+            "double_lap": "double_lap",
+            "double_lap_reinforced": "double_lap_reinforced",
+            "scarf": "scarf",
+            "half_lap_notched": "half_lap_notched",
+        }
+        tension_joint_model = str(detail.get("tension_joint_model", "double_lap_reinforced")).strip().lower()
+        compression_joint_model = str(detail.get("compression_joint_model", "double_lap_reinforced")).strip().lower()
+        detail["tension_joint_model"] = joint_alias.get(tension_joint_model, "double_lap_reinforced")
+        detail["compression_joint_model"] = joint_alias.get(compression_joint_model, "double_lap_reinforced")
+        detail.setdefault("joint_efficiency_tension_by_model", {
+            "butt_plain": 0.58,
+            "single_lap": 0.86,
+            "single_lap_tala": 0.94,
+            "butt_small_splints": 0.98,
+            "butt_full_splints": 1.04,
+            "double_lap": 1.00,
+            "double_lap_reinforced": 1.08,
+            "scarf": 0.98,
+            "half_lap_notched": 0.95,
+        })
+        detail.setdefault("joint_efficiency_compression_by_model", {
+            "butt_plain": 0.52,
+            "single_lap": 0.80,
+            "single_lap_tala": 0.90,
+            "butt_small_splints": 0.93,
+            "butt_full_splints": 1.00,
+            "double_lap": 0.98,
+            "double_lap_reinforced": 1.04,
+            "scarf": 0.95,
+            "half_lap_notched": 0.92,
+        })
+        detail.setdefault("joint_model_rank_tension", [
+            "double_lap_reinforced",
+            "butt_full_splints",
+            "double_lap",
+            "butt_small_splints",
+            "scarf",
+            "single_lap_tala",
+            "single_lap",
+            "butt_plain",
+        ])
+        detail.setdefault("joint_model_rank_compression", [
+            "double_lap_reinforced",
+            "double_lap",
+            "butt_full_splints",
+            "scarf",
+            "butt_small_splints",
+            "single_lap_tala",
+            "single_lap",
+            "half_lap_notched",
+            "butt_plain",
+        ])
+        detail.setdefault("joint_efficiency_decay_per_splice_tension", 0.03)
+        detail.setdefault("joint_efficiency_decay_per_splice_compression", 0.04)
         detail.setdefault("construction_waste_factor", 0.08)
         detail.setdefault("saw_kerf_mm", 1.0)
         detail.setdefault("imperfection_eccentricity_mm", 2.0)
+        detail.setdefault("splice_stagger_enabled", True)
+        detail.setdefault("splice_stagger_step_mm", 5.0)
+        detail.setdefault("splice_stagger_max_offset_mm", 30.0)
+        detail.setdefault("splice_alignment_tolerance_mm", 10.0)
+        detail.setdefault("cut_increment_mm", 5.0)
+        detail.setdefault("allow_cut_rounding", True)
+        detail.setdefault("min_cut_length_mm", 5.0)
         detail.setdefault("allow_recommend_removal_if_fs_gt", 8.0)
         detail.setdefault("reinforce_if_fs_lt", 2.0)
         detail.setdefault("tension_only_stabilizers", True)
@@ -136,16 +339,37 @@ class ConfigService:
         cfg["analysis"].setdefault("planner_stage1_top_k", 42)
         cfg["analysis"].setdefault("planner_stage2_top_k", 14)
         cfg["analysis"].setdefault("planner_stage3_top_k", 6)
+        cfg["analysis"].setdefault("planner_stage2a_top_k", 220)
+        cfg["analysis"].setdefault("planner_stage2b_top_k", 80)
         cfg["analysis"].setdefault("planner_adaptive_refinement", True)
         cfg["analysis"].setdefault("planner_stage4_seed_top_k", 4)
-        cfg["analysis"].setdefault("planner_stage4_iterations", 8)
-        cfg["analysis"].setdefault("planner_max_sticks_per_group", 12)
+        cfg["analysis"].setdefault("planner_stage4_iterations", 12)
+        cfg["analysis"].setdefault("planner_max_sticks_per_group", 16)
         cfg["analysis"].setdefault("planner_min_sticks_per_group", 1)
+        cfg["analysis"].setdefault(
+            "planner_max_sticks_per_group_by_group",
+            {
+                "top_chord": 20,
+                "vertical": 16,
+                "diagonal": 14,
+                "bottom_transverse": 12,
+                "top_transverse": 12,
+                "bottom_chord": 12,
+                "support_pad": 10,
+                "top_bracing": 6,
+                "bottom_bracing": 6,
+                "cross_frame_bracing": 6,
+                "chord_lacing": 4,
+            },
+        )
+        cfg["analysis"].setdefault("planner_threads", 0)
+        cfg["analysis"].setdefault("strict_mass_acceptance", True)
         cfg["analysis"].setdefault("planner_objective_profile", "balanced")
-        cfg["analysis"].setdefault("planner_objective_weight_fs", 0.52)
-        cfg["analysis"].setdefault("planner_objective_weight_break", 0.28)
-        cfg["analysis"].setdefault("planner_objective_weight_mass_target", 0.12)
-        cfg["analysis"].setdefault("planner_objective_weight_mass_limit", 0.08)
+        cfg["analysis"].setdefault("planner_objective_weight_fs", 0.65)
+        cfg["analysis"].setdefault("planner_objective_weight_break", 0.25)
+        cfg["analysis"].setdefault("planner_objective_weight_mass_target", 0.07)
+        cfg["analysis"].setdefault("planner_objective_weight_mass_limit", 0.03)
+        cfg["analysis"].setdefault("planner_debug_enabled", True)
         cfg["analysis"].setdefault("final_variants_enabled", True)
         cfg["analysis"].setdefault("final_round_step_length_mm", 5.0)
         cfg["analysis"].setdefault("final_round_step_section_mm", 0.1)
@@ -160,22 +384,90 @@ class ConfigService:
         mass_limit = float(mat.get("mass_limit_g", 1000.0))
         load_kgf = float(bridge.get("load_total_kgf", 120.0))
 
-        planner.setdefault("span_min_mm", max(400.0, span * 0.85))
-        planner.setdefault("span_max_mm", min(3000.0, span * 1.15))
-        planner.setdefault("width_min_mm", max(80.0, width * 0.85))
-        planner.setdefault("width_max_mm", min(300.0, width * 1.2))
-        planner.setdefault("height_min_mm", max(80.0, center_height * 0.75))
+        # Base do edital (placeholders iniciais, podendo ser alterados pelo usuário).
+        planner.setdefault("span_min_mm", 1200.0)
+        planner.setdefault("span_max_mm", 1200.0)
+        planner.setdefault("width_min_mm", 100.0)
+        planner.setdefault("width_max_mm", 200.0)
+        planner.setdefault("height_min_mm", 50.0)
         planner.setdefault("height_max_mm", min(700.0, center_height * 1.25))
-        planner.setdefault("panel_min_mm", max(40.0, panel * 0.85))
-        planner.setdefault("panel_max_mm", min(220.0, panel * 1.2))
+        planner.setdefault("panel_min_mm", max(40.0, min(120.0, panel * 0.75)))
+        planner.setdefault("panel_max_mm", min(260.0, max(180.0, panel * 2.0)))
         planner.setdefault("target_load_kgf", load_kgf)
         planner.setdefault("target_breaking_load_kgf", load_kgf)
         planner.setdefault("max_bridge_mass_g", mass_limit)
         planner.setdefault("target_bridge_mass_g", min(mass_limit, max(200.0, mass_limit * 0.85)))
         planner.setdefault("consider_top_profiles", ["parker_plateau", "triangular_peak", "shallow_arch", "flat"])
-        planner.setdefault("consider_side_trusses", ["Parker", "Pratt", "Howe", "Warren"])
-        planner.setdefault("consider_internal_trusses", ["X", "Warren", "Pratt", "Howe", "none"])
+        planner.setdefault(
+            "consider_side_trusses",
+            [
+                "Parker",
+                "Pratt",
+                "Howe",
+                "Warren",
+                "K",
+                "Baltimore",
+                "Howe_inverted",
+                "Warren_mid_braced",
+                "Pratt_symmetric",
+                "Warren_symmetric",
+                "K_symmetric",
+            ],
+        )
+        planner.setdefault(
+            "consider_internal_trusses",
+            [
+                "X",
+                "Warren",
+                "Pratt",
+                "Howe",
+                "K",
+                "N",
+                "none",
+                "Howe_inverted",
+                "Warren_mid_braced",
+                "Pratt_symmetric",
+                "Warren_symmetric",
+                "K_symmetric",
+            ],
+        )
         planner.setdefault("consider_chord_trusses", ["none", "Warren", "X"])
+        planner.setdefault(
+            "consider_top_chord_trusses",
+            [
+                "X",
+                "Warren",
+                "Pratt",
+                "Howe",
+                "K",
+                "N",
+                "none",
+                "Howe_inverted",
+                "Warren_mid_braced",
+                "Pratt_symmetric",
+                "Warren_symmetric",
+                "K_symmetric",
+            ],
+        )
+        planner.setdefault(
+            "consider_bottom_chord_trusses",
+            [
+                "X",
+                "Warren",
+                "Pratt",
+                "Howe",
+                "K",
+                "N",
+                "none",
+                "Howe_inverted",
+                "Warren_mid_braced",
+                "Pratt_symmetric",
+                "Warren_symmetric",
+                "K_symmetric",
+            ],
+        )
+        planner.setdefault("prefer_truss_by_material", True)
+        self._validate_normalized(cfg)
         return cfg
 
     def from_minimal_inputs(
@@ -192,9 +484,9 @@ class ConfigService:
         internal_truss_type: str = "X",
         chord_truss_type: str = "none",
         E_MPa: float = 6000.0,
-        stick_length_mm: float = 120.0,
+        stick_length_mm: float = 115.0,
         stick_width_mm: float = 7.0,
-        stick_thickness_mm: float,
+        stick_thickness_mm: float = 1.5,
         stick_mass_g: float,
         glue_shear_strength_MPa: float | None = None,
         overlap_length_mm: float | None = None,
@@ -210,6 +502,8 @@ class ConfigService:
                 "top_profile": top_profile,
                 "internal_truss_type": internal_truss_type,
                 "chord_truss_type": chord_truss_type,
+                "top_chord_truss_type": chord_truss_type,
+                "bottom_chord_truss_type": chord_truss_type,
                 "cross_frame_truss_type": internal_truss_type,
                 "load_total_kgf": load_kgf,
                 "span_mm": span_mm,
@@ -280,6 +574,8 @@ class ConfigService:
         overlap_length_mm: float,
         target_min_fs: float,
         stage1_variants: int,
+        top_chord_truss_type: str = "X",
+        bottom_chord_truss_type: str = "X",
         objective_profile: str = "balanced",
         adaptive_refinement: bool = True,
         adaptive_iterations: int = 8,
@@ -312,6 +608,8 @@ class ConfigService:
                 "internal_truss_type": "X",
                 "cross_frame_truss_type": "X",
                 "chord_truss_type": "none",
+                "top_chord_truss_type": str(top_chord_truss_type),
+                "bottom_chord_truss_type": str(bottom_chord_truss_type),
                 "top_profile": "parker_plateau",
             }
         )

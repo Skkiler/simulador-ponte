@@ -7,40 +7,8 @@ from typing import Any, Dict, Iterable, List
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 
+from src.core.numeric import safe_float, safe_sort_key
 from src.domain.models import Load, Member, Node, Support
-
-
-def safe_float(value: Any, default: float | None = None) -> float | None:
-    """
-    Converte valor para float sem quebrar com None, string vazia, NaN,
-    infinito ou texto.
-
-    Use em qualquer campo que venha de CSV, pós-processamento ou JSON.
-    """
-    try:
-        if value is None:
-            return default
-
-        if isinstance(value, str) and value.strip() == "":
-            return default
-
-        v = float(value)
-
-        if math.isnan(v) or math.isinf(v):
-            return default
-
-        return v
-    except Exception:
-        return default
-
-
-def safe_sort_key(value: Any, default: float = 1.0e99) -> float:
-    """
-    Chave de ordenação segura.
-    Valores vazios/inválidos vão para o final.
-    """
-    v = safe_float(value, None)
-    return default if v is None else v
 
 
 def safe_abs_float(value: Any, default: float = 0.0) -> float:
@@ -79,8 +47,8 @@ class VisualizationService:
                 ax.set_box_aspect((x_span, y_span, z_span))
             else:
                 ax.set_box_aspect((1400, 260, 340))
-        except Exception:
-            pass
+        except (TypeError, ValueError):
+            ax.set_box_aspect((1400, 260, 340))
 
     def save_all(
         self,
@@ -516,8 +484,10 @@ class VisualizationService:
         supports,
         loads,
         highlight_member_ids: Iterable[int] | None = None,
+        *,
+        highlight_member_colors: Dict[int, str] | None = None,
         scale_mode: str = "real",
-    ):
+    ) -> go.Figure:
         """
         Gera visualização 3D interativa.
 
@@ -586,35 +556,60 @@ class VisualizationService:
                 )
 
         if highlight_ids:
-            hx, hy, hz = [], [], []
-            htext = []
-
-            for m in [m for m in members if m.id in highlight_ids]:
-                ni, nj = node_by_id[m.i], node_by_id[m.j]
-
-                hx += [ni.x, nj.x, None]
-                hy += [ni.y, nj.y, None]
-                hz += [ni.z, nj.z, None]
-
-                htext += [
-                    f"Membro {m.id}<br>Grupo: {m.group}<br>{m.i} → {m.j}",
-                    f"Membro {m.id}<br>Grupo: {m.group}<br>{m.i} → {m.j}",
-                    None,
-                ]
-
-            fig.add_trace(
-                go.Scatter3d(
-                    x=hx,
-                    y=hy,
-                    z=hz,
-                    mode="lines+markers",
-                    name="membro destacado",
-                    text=htext,
-                    hoverinfo="text",
-                    line={"width": 10, "color": "red"},
-                    marker={"size": 5, "color": "red"},
+            # If specific colors are provided per member, plot each
+            # individually.  Otherwise fallback to a single red trace
+            if highlight_member_colors:
+                for mid in highlight_ids:
+                    color = highlight_member_colors.get(mid, "red")
+                    hx, hy, hz, htext = [], [], [], []
+                    for m in [m for m in members if m.id == mid]:
+                        ni, nj = node_by_id[m.i], node_by_id[m.j]
+                        hx += [ni.x, nj.x, None]
+                        hy += [ni.y, nj.y, None]
+                        hz += [ni.z, nj.z, None]
+                        htext += [
+                            f"Membro {m.id}<br>Grupo: {m.group}<br>{m.i} → {m.j}",
+                            f"Membro {m.id}<br>Grupo: {m.group}<br>{m.i} → {m.j}",
+                            None,
+                        ]
+                    fig.add_trace(
+                        go.Scatter3d(
+                            x=hx,
+                            y=hy,
+                            z=hz,
+                            mode="lines+markers",
+                            name=f"membro {mid}",
+                            text=htext,
+                            hoverinfo="text",
+                            line={"width": 10, "color": color},
+                            marker={"size": 5, "color": color},
+                        )
+                    )
+            else:
+                hx, hy, hz, htext = [], [], [], []
+                for m in [m for m in members if m.id in highlight_ids]:
+                    ni, nj = node_by_id[m.i], node_by_id[m.j]
+                    hx += [ni.x, nj.x, None]
+                    hy += [ni.y, nj.y, None]
+                    hz += [ni.z, nj.z, None]
+                    htext += [
+                        f"Membro {m.id}<br>Grupo: {m.group}<br>{m.i} → {m.j}",
+                        f"Membro {m.id}<br>Grupo: {m.group}<br>{m.i} → {m.j}",
+                        None,
+                    ]
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=hx,
+                        y=hy,
+                        z=hz,
+                        mode="lines+markers",
+                        name="membro destacado",
+                        text=htext,
+                        hoverinfo="text",
+                        line={"width": 10, "color": "red"},
+                        marker={"size": 5, "color": "red"},
+                    )
                 )
-            )
 
         support_ids = [s.node_id for s in supports if s.active_vertical]
 
@@ -682,29 +677,211 @@ class VisualizationService:
 
         return fig
 
-    def plotly_stick_pieces(self, stick_pieces, member_id: int | None = None, max_pieces: int = 1500, lane_offset_mm: float = 5.0):
+    @staticmethod
+    def make_oriented_stick_prism(
+        p0: tuple[float, float, float],
+        p1: tuple[float, float, float],
+        width_mm: float,
+        thickness_mm: float,
+        local_rotation: float = 0.0,
+        offset: tuple[float, float, float] | None = None,
+    ) -> Dict[str, List[float]]:
+        """Gera vértices/faces de um prisma orientado entre p0 e p1."""
+        import numpy as _np
+
+        p0v = _np.array(p0, dtype=float)
+        p1v = _np.array(p1, dtype=float)
+        if offset is not None:
+            off = _np.array(offset, dtype=float)
+            p0v = p0v + off
+            p1v = p1v + off
+        d = p1v - p0v
+        L = _np.linalg.norm(d)
+        if L <= 1e-9:
+            return {"x": [float(p0v[0])] * 8, "y": [float(p0v[1])] * 8, "z": [float(p0v[2])] * 8, "i": [], "j": [], "k": []}
+        d_unit = d / L
+        aux = _np.array([0.0, 0.0, 1.0])
+        if abs(_np.dot(aux, d_unit)) > 0.9:
+            aux = _np.array([0.0, 1.0, 0.0])
+        u = _np.cross(d_unit, aux)
+        un = _np.linalg.norm(u)
+        u = _np.array([1.0, 0.0, 0.0]) if un <= 1e-9 else (u / un)
+        v = _np.cross(d_unit, u)
+        vn = _np.linalg.norm(v)
+        v = _np.array([0.0, 1.0, 0.0]) if vn <= 1e-9 else (v / vn)
+
+        if abs(float(local_rotation)) > 1.0e-12:
+            ang = float(local_rotation)
+            c = math.cos(ang)
+            s = math.sin(ang)
+            u2 = c * u + s * v
+            v2 = -s * u + c * v
+            u, v = u2, v2
+
+        half_w = float(width_mm) * 0.5
+        half_t = float(thickness_mm) * 0.5
+        offsets = [
+            -half_w * u - half_t * v,
+            half_w * u - half_t * v,
+            half_w * u + half_t * v,
+            -half_w * u + half_t * v,
+        ]
+        verts = []
+        for end in [p0v, p1v]:
+            for off in offsets:
+                verts.append(end + off)
+        xs = [float(pt[0]) for pt in verts]
+        ys = [float(pt[1]) for pt in verts]
+        zs = [float(pt[2]) for pt in verts]
+        faces = [
+            (0, 1, 2), (0, 2, 3),
+            (4, 5, 6), (4, 6, 7),
+            (0, 1, 5), (0, 5, 4),
+            (1, 2, 6), (1, 6, 5),
+            (2, 3, 7), (2, 7, 6),
+            (3, 0, 4), (3, 4, 7),
+        ]
+        return {
+            "x": xs,
+            "y": ys,
+            "z": zs,
+            "i": [f[0] for f in faces],
+            "j": [f[1] for f in faces],
+            "k": [f[2] for f in faces],
+        }
+
+    def plotly_stick_pieces(
+        self,
+        stick_pieces,
+        member_id: int | None = None,
+        max_pieces: int = 1500,
+        lane_offset_mm: float = 5.0,
+        render_mode: str = "prismas reais",
+    ):
         rows = list(stick_pieces or [])
         if member_id is not None:
+            # Filtra apenas o membro solicitado
             rows = [r for r in rows if int(safe_float(r.get("member_id"), -1) or -1) == int(member_id)]
+        # Limita número máximo de peças para evitar travamentos na renderização
         rows = rows[:max_pieces]
+
         fig = go.Figure()
         if not rows:
             fig.update_layout(title="Sem peças para mostrar", height=500)
             return fig
+
+        # Agrupa por grupo de membros para colorir de forma consistente
         groups = sorted({str(r.get("member_group", "sem_grupo")) for r in rows})
-        for g in groups:
-            xs=[]; ys=[]; zs=[]; texts=[]
+        # Paleta simples de cores discretas
+        base_colors = [
+            "#1f77b4",  # azul
+            "#ff7f0e",  # laranja
+            "#2ca02c",  # verde
+            "#d62728",  # vermelho
+            "#9467bd",  # roxo
+            "#8c564b",  # marrom
+            "#e377c2",  # rosa
+            "#7f7f7f",  # cinza
+            "#bcbd22",  # oliva
+            "#17becf",  # ciano
+        ]
+
+        render_mode_norm = str(render_mode or "prismas reais").strip().lower()
+        use_lines = render_mode_norm in {"linhas", "linhas leves", "light_lines"}
+        exaggeration = 1.0 if render_mode_norm in {"prismas reais", "prismas_reais"} else 2.0
+
+        for gi, g in enumerate(groups):
+            color = base_colors[gi % len(base_colors)]
+            # Desenha cada peça como um prisma 3D
             for r in [rr for rr in rows if str(rr.get("member_group", "sem_grupo")) == g]:
-                lane=int(safe_float(r.get("lane"),1) or 1); pidx=int(safe_float(r.get("piece_index"),1) or 1)
-                off_y=(lane-1)*lane_offset_mm; off_z=(0.35*lane_offset_mm)*((pidx%2)-0.5)
-                x0=safe_float(r.get("x0_mm"),0.0) or 0.0; y0=(safe_float(r.get("y0_mm"),0.0) or 0.0)+off_y; z0=(safe_float(r.get("z0_mm"),0.0) or 0.0)+off_z
-                x1=safe_float(r.get("x1_mm"),0.0) or 0.0; y1=(safe_float(r.get("y1_mm"),0.0) or 0.0)+off_y; z1=(safe_float(r.get("z1_mm"),0.0) or 0.0)+off_z
-                label=f"{r.get('stick_id','')}<br>Membro {r.get('member_id','?')} — {g}<br>Linha {lane}, peça {pidx}<br>Corte {safe_float(r.get('cut_length_mm'),0.0) or 0.0:.1f} mm<br>N peça {safe_float(r.get('N_piece_N'),0.0) or 0.0:.2f} N"
-                xs += [x0,x1,None]; ys += [y0,y1,None]; zs += [z0,z1,None]; texts += [label,label,None]
-            fig.add_trace(go.Scatter3d(x=xs,y=ys,z=zs,mode="lines+markers",name=g,text=texts,hoverinfo="text",line={"width":6},marker={"size":3}))
-        xs_all=[safe_float(r.get("x0_mm"),0.0) or 0.0 for r in rows]+[safe_float(r.get("x1_mm"),0.0) or 0.0 for r in rows]
-        ys_all=[safe_float(r.get("y0_mm"),0.0) or 0.0 for r in rows]+[safe_float(r.get("y1_mm"),0.0) or 0.0 for r in rows]
-        zs_all=[safe_float(r.get("z0_mm"),0.0) or 0.0 for r in rows]+[safe_float(r.get("z1_mm"),0.0) or 0.0 for r in rows]
-        x_span=max(max(xs_all)-min(xs_all),1.0); y_span=max(max(ys_all)-min(ys_all),1.0); z_span=max(max(zs_all)-min(zs_all),1.0)
-        fig.update_layout(title="Modelo simplificado peça-a-peça",scene={"xaxis":{"title":"x [mm]"},"yaxis":{"title":"y [mm]"},"zaxis":{"title":"z [mm]"},"aspectmode":"manual","aspectratio":{"x":1.0,"y":max(y_span/x_span,0.20),"z":max(z_span/x_span,0.25)}},height=650,margin={"l":0,"r":0,"t":45,"b":0})
+                lane = int(safe_float(r.get("lane"), 1) or 1)
+                pidx = int(safe_float(r.get("piece_index"), 1) or 1)
+                # Offsets para separar visualmente lanes e peças alternadas
+                off_y = (lane - 1) * lane_offset_mm
+                off_z = (0.35 * lane_offset_mm) * ((pidx % 2) - 0.5)
+                x0 = safe_float(r.get("x0_mm"), 0.0) or 0.0
+                y0 = (safe_float(r.get("y0_mm"), 0.0) or 0.0) + off_y
+                z0 = (safe_float(r.get("z0_mm"), 0.0) or 0.0) + off_z
+                x1 = safe_float(r.get("x1_mm"), 0.0) or 0.0
+                y1 = (safe_float(r.get("y1_mm"), 0.0) or 0.0) + off_y
+                z1 = (safe_float(r.get("z1_mm"), 0.0) or 0.0) + off_z
+                # Recupera largura e espessura do palito, se disponíveis; caso contrário usa defaults genéricos
+                try:
+                    wmm = float(r.get("width_mm"))
+                    tmm = float(r.get("thickness_mm"))
+                except (TypeError, ValueError):
+                    # Valores típicos de referência
+                    wmm = 7.0
+                    tmm = 1.5
+                # Monta label para hover
+                label_parts = [
+                    f"{r.get('stick_id', '')}",
+                    f"Membro {r.get('member_id', '?')} — {g}",
+                    f"Linha {lane}, peça {pidx}",
+                    f"Corte {safe_float(r.get('cut_length_mm'), 0.0) or 0.0:.1f} mm",
+                    f"N peça {safe_float(r.get('N_piece_N'), 0.0) or 0.0:.2f} N",
+                ]
+                label_parts.append(f"Seção {wmm:.1f}×{tmm:.1f} mm")
+                label = "<br>".join(label_parts)
+                if use_lines:
+                    fig.add_trace(
+                        go.Scatter3d(
+                            x=[x0, x1],
+                            y=[y0, y1],
+                            z=[z0, z1],
+                            mode="lines",
+                            line={"width": 3, "color": color},
+                            name=g,
+                            hovertext=label,
+                            hoverinfo="text",
+                            showlegend=False,
+                        )
+                    )
+                else:
+                    prism = self.make_oriented_stick_prism(
+                        (x0, y0, z0),
+                        (x1, y1, z1),
+                        width_mm=wmm * exaggeration,
+                        thickness_mm=tmm * exaggeration,
+                    )
+                    fig.add_trace(
+                        go.Mesh3d(
+                            x=prism["x"],
+                            y=prism["y"],
+                            z=prism["z"],
+                            i=prism["i"],
+                            j=prism["j"],
+                            k=prism["k"],
+                            name=g,
+                            opacity=0.85,
+                            color=color,
+                            hovertext=label,
+                            hoverinfo="text",
+                            showscale=False,
+                        )
+                    )
+
+        # Ajusta aspectos da figura para melhor visualização
+        xs_all = [safe_float(r.get("x0_mm"), 0.0) or 0.0 for r in rows] + [safe_float(r.get("x1_mm"), 0.0) or 0.0 for r in rows]
+        ys_all = [safe_float(r.get("y0_mm"), 0.0) or 0.0 for r in rows] + [safe_float(r.get("y1_mm"), 0.0) or 0.0 for r in rows]
+        zs_all = [safe_float(r.get("z0_mm"), 0.0) or 0.0 for r in rows] + [safe_float(r.get("z1_mm"), 0.0) or 0.0 for r in rows]
+        x_span = max(max(xs_all) - min(xs_all), 1.0)
+        y_span = max(max(ys_all) - min(ys_all), 1.0)
+        z_span = max(max(zs_all) - min(zs_all), 1.0)
+        fig.update_layout(
+            title=f"Modelo peça‑a‑peça ({'linhas leves' if use_lines else render_mode})",
+            scene={
+                "xaxis": {"title": "x [mm]"},
+                "yaxis": {"title": "y [mm]"},
+                "zaxis": {"title": "z [mm]"},
+                "aspectmode": "manual",
+                "aspectratio": {
+                    "x": 1.0,
+                    "y": max(y_span / x_span, 0.20),
+                    "z": max(z_span / x_span, 0.25),
+                },
+            },
+            height=650,
+            margin={"l": 0, "r": 0, "t": 45, "b": 0},
+        )
         return fig
