@@ -35,20 +35,55 @@ class Frame3DDAdapter:
         lines.append("# e n1 n2 Ax Asy Asz Jxx Iyy Izz E G roll density")
         for m in members:
             lines.append(f"{m.id:5d} {m.i:5d} {m.j:5d} {m.A:12.6f} {m.Asy:12.6f} {m.Asz:12.6f} {m.J:12.6f} {m.Iy:12.6f} {m.Iz:12.6f} {m.E:12.6f} {m.G:12.6f} {0.0:8.3f} {dens:12.6e}")
-        lines += ["1 # include shear deformation", "0 # include geometric stiffness", "20.0 # exaggerate", "1.0 # zoom", f"{float(cfg['analysis'].get('frame3dd_internal_force_dx_mm',25.0)):12.6f} # internal force increment"]
+        include_shear = int(float(cfg.get("analysis", {}).get("frame3dd_include_shear_deformation", 1)))
+        include_geo = int(float(cfg.get("analysis", {}).get("frame3dd_include_geometric_stiffness", 0)))
+        lines += [
+            f"{include_shear} # include shear deformation",
+            f"{include_geo} # include geometric stiffness",
+            "20.0 # exaggerate",
+            "1.0 # zoom",
+            f"{float(cfg['analysis'].get('frame3dd_internal_force_dx_mm',25.0)):12.6f} # internal force increment",
+        ]
         lines += ["1 # number of static load cases", "0.0 0.0 0.0 # gravity", f"{len(loads)} # number of loaded nodes", "# node Fx Fy Fz Mxx Myy Mzz"]
         for l in loads: lines.append(f"{l.node_id:5d} {l.Fx:12.6f} {l.Fy:12.6f} {l.Fz:12.6f} {l.Mx:12.6f} {l.My:12.6f} {l.Mz:12.6f}")
         lines += ["0 # uniform loads", "0 # trapezoidal loads", "0 # internal point loads", "0 # temperature loads", "0 # prescribed displacements", "0 # number of desired dynamic modes", "0 # matrix condensation method: none", "0 # number of condensed nodes"]
         out.write_text("\n".join(lines)+"\n",encoding='utf-8'); return out
+    def _equivalence_status(self, cfg: Dict) -> str:
+        if bool(cfg.get("analysis", {}).get("frame3dd_assume_truss_equivalent", False)):
+            return "run_truss_equivalent"
+        return "run_frame_model_not_equivalent_to_truss"
+
     def run(self,cfg:Dict,input_path:str|Path,output_path:str|Path)->Dict[str,str]:
         exe=self.find_executable(cfg['analysis'].get('frame3dd_path','auto'))
-        if exe is None: return {'status':'not_found','message':'Frame3DD não encontrado.','mode':'linear_stabilized'}
+        if exe is None:
+            return {
+                'status':'not_run',
+                'message':'Frame3DD não encontrado.',
+                'mode':'linear_stabilized',
+                'classification':'not_run',
+            }
         out=Path(output_path); out.parent.mkdir(parents=True,exist_ok=True)
         try:
             proc=subprocess.run([str(exe),str(input_path),str(out)],capture_output=True,text=True,timeout=15)
             converged='** converged **' in (proc.stdout or '')
             ok=proc.returncode==0 and 'error' not in (proc.stderr or '').lower()
-            status='ok' if ok else ('ok_with_warnings' if converged else 'error')
-            return {'status':status,'returncode':str(proc.returncode),'stdout':proc.stdout,'stderr':proc.stderr,'output_path':str(out),'exe':str(exe),'mode':'linear_stabilized','note':'Frame3DD é usado como validação/visualização linear; flambagem é avaliada no pós-processador.'}
+            status=self._equivalence_status(cfg) if (ok or converged) else 'failed'
+            return {
+                'status':status,
+                'returncode':str(proc.returncode),
+                'stdout':proc.stdout,
+                'stderr':proc.stderr,
+                'output_path':str(out),
+                'exe':str(exe),
+                'mode':'linear_stabilized',
+                'classification':status,
+                'note':'Frame3DD é usado como validação/visualização linear. Esforços de pórtico não substituem checagens de treliça sem equivalência explícita.'
+            }
         except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
-            return {'status':'error','message':repr(exc),'exe':str(exe),'mode':'linear_stabilized'}
+            return {
+                'status':'failed',
+                'message':repr(exc),
+                'exe':str(exe),
+                'mode':'linear_stabilized',
+                'classification':'failed',
+            }

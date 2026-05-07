@@ -130,13 +130,21 @@ class ConnectionPlanner:
         members: List[Member],
         member_results: List[Dict],
         member_checks: List[Dict],
+        member_sizing_plan: Dict[int, Dict[str, Any]] | None = None,
     ) -> Dict[int, Dict]:
         analysis = cfg.get("analysis", {}) or {}
+        planner = cfg.get("planner", {}) or {}
+        local = planner.get("local_sizing", {}) or {}
         detail = cfg.get("detail_model", {}) or {}
         target_fs = float(analysis.get("target_min_fs", 2.0))
         base_overlap = float(detail.get("overlap_length_mm", 30.0))
         min_end_margin = float(detail.get("min_end_margin_mm", 10.0))
-        near_zero_tol = float(detail.get("near_zero_force_tolerance_N", 8.0))
+        near_zero_tol = float(
+            local.get(
+                "zero_force_tolerance_N",
+                detail.get("near_zero_force_tolerance_N", 8.0),
+            )
+        )
         stick_len = float(cfg.get("material", {}).get("stick_length_mm", 115.0))
         primary_groups = set(
             analysis.get(
@@ -155,6 +163,7 @@ class ConnectionPlanner:
 
         res_map = {int(r.get("member_id")): r for r in (member_results or []) if r.get("member_id") is not None}
         chk_map = {int(r.get("member_id")): r for r in (member_checks or []) if r.get("member_id") is not None}
+        sizing_plan = member_sizing_plan or {}
         max_abs_n = max((abs(safe_float(r.get("N_N"), 0.0) or 0.0) for r in res_map.values()), default=0.0)
         max_abs_n = max(1.0e-9, max_abs_n)
         partners = self._symmetry_partners(cfg, nodes, members) if members and nodes else {}
@@ -180,16 +189,22 @@ class ConnectionPlanner:
             state = self._force_state(n_val, near_zero_tol)
             group = str(getattr(m, "group", ""))
             role = "primary" if group in primary_groups else "secondary"
+            sizing_row = sizing_plan.get(mid) or sizing_plan.get(str(mid)) or {}
+            force_band = str(sizing_row.get("force_band", "") or "")
 
             lvl = base_level(ratio)
             if fs_min < target_fs:
                 lvl = {"light": "moderate", "moderate": "reinforced", "reinforced": "reinforced"}[lvl]
-            if state == "compression" and lvl == "light":
+            if state == "compression" and lvl == "light" and state != "near_zero":
                 lvl = "moderate"
             if role == "primary" and ratio >= 0.40:
                 lvl = "reinforced"
+            if force_band == "near_zero" or state == "near_zero":
+                lvl = "light"
 
-            if lvl == "light":
+            if force_band == "near_zero" or state == "near_zero":
+                model = "single_lap_tala" if n_val >= 0 else "single_lap"
+            elif lvl == "light":
                 model = "single_lap_tala" if state == "tension" else "single_lap"
             elif lvl == "moderate":
                 model = "double_lap"
@@ -230,6 +245,7 @@ class ConnectionPlanner:
                 "force_state": state,
                 "abs_force_N": abs_n,
                 "axial_force_ratio": ratio,
+                "force_band": force_band or state,
                 "FS_min": fs_min,
                 "utilization": util,
                 "recommended_joint_model": model,

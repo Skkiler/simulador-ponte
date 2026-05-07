@@ -58,3 +58,23 @@ def test_connection_planner_force_ratio_levels(base_cfg: dict) -> None:
     assert plan[4]["force_state"] == "compression"
     assert plan[4]["recommended_joint_model"] != "butt_plain"
     assert plan[4]["recommended_joint_model"] in {"double_lap", "double_lap_reinforced"}
+
+
+def test_connection_planner_near_zero_compression_simplifies_joint(base_cfg: dict) -> None:
+    cfg = base_cfg
+    cfg["analysis"]["enforce_symmetry"] = False
+    cfg.setdefault("planner", {}).setdefault("local_sizing", {})
+    cfg["planner"]["local_sizing"]["zero_force_tolerance_N"] = 15.0
+
+    planner = ConnectionPlanner()
+    nodes = [
+        Node(1, 0.0, 0.0, 0.0, "bottom", "R", 0.0),
+        Node(2, 100.0, 0.0, 80.0, "top", "R", 100.0),
+    ]
+    members = [_member(1, 1, 2, "diagonal", 2)]
+    member_results = [{"member_id": 1, "N_N": -5.0}]
+    member_checks = [{"member_id": 1, "FS_min": 10.0, "utilization": 0.02}]
+
+    plan = planner.assign_member_joint_plan(cfg, nodes, members, member_results, member_checks)
+    assert plan[1]["force_state"] == "near_zero"
+    assert plan[1]["recommended_joint_model"] == "single_lap"

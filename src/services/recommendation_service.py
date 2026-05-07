@@ -119,6 +119,9 @@ class RecommendationService:
         for r in detailed.get("weakest_glue_joints", []) or []:
             if is_below(r.get("FS_glue_shear"), 2.0):
                 weak_glue.append(r)
+        weak_glue_count = int(
+            safe_float(dsum.get("n_weak_glue_joints"), len(weak_glue)) or 0
+        )
 
         reinf = detailed.get("reinforcement_suggestions", []) or []
 
@@ -220,9 +223,9 @@ class RecommendationService:
                     "ou revise a geometria."
                 )
 
-        if weak_glue:
+        if weak_glue_count > 0:
             summary.append(
-                f"Há {len(weak_glue)} juntas coladas com FS < 2,0 ao cisalhamento "
+                f"Há {weak_glue_count} juntas coladas com FS < 2,0 ao cisalhamento "
                 "estimado. Aumente a sobreposição ou use tala dupla nesses pontos."
             )
 
@@ -296,7 +299,7 @@ class RecommendationService:
                 "e membros de baixa solicitação."
             )
 
-        if weak_glue:
+        if weak_glue_count > 0:
             suggestions.append(
                 "Colagens: aumente a sobreposição dos membros listados em "
                 "weakest_glue_joints.csv ou adote talas simétricas."
@@ -394,16 +397,30 @@ class RecommendationService:
                 )
 
             if stage_counts:
-                suggestions.append(
-                    f"Busca executada: S0-gerados={stage_counts.get('stage0_generated', 0)}, "
-                    f"S0-aprovados={stage_counts.get('stage0_prefilter_passed', 0)}, "
-                    f"S1-válidos={stage_counts.get('stage1', 0)}, "
-                    f"S2A={stage_counts.get('stage2a_selected', 0)}, "
-                    f"S2B={stage_counts.get('stage2b_evaluated', 0)}, "
-                    f"S2-únicos={stage_counts.get('stage2_unique', stage_counts.get('stage2', 0))}, "
-                    f"S3={stage_counts.get('stage3', 0)}, "
-                    f"S4={stage_counts.get('stage4', 0)}."
-                )
+                if "S1_macro_candidates" in stage_counts:
+                    suggestions.append(
+                        "Funil executado: "
+                        f"S1={stage_counts.get('S1_macro_candidates', 0)}, "
+                        f"S2={stage_counts.get('S2_fast_screening_candidates', 0)}→{stage_counts.get('S2_fast_screening_top_k', 0)}, "
+                        f"S3={stage_counts.get('S3_multi_loadcase_candidates', 0)}→{stage_counts.get('S3_multi_loadcase_top_k', 0)}, "
+                        f"S4={stage_counts.get('S4_geometry_refinement_candidates', 0)}→{stage_counts.get('S4_geometry_refinement_top_k', 0)}, "
+                        f"S5={stage_counts.get('S5_member_sizing_candidates', 0)}, "
+                        f"S6={stage_counts.get('S6_topology_candidates', 0)}, "
+                        f"S7={stage_counts.get('S7_fabrication_candidates', 0)}, "
+                        f"S8={stage_counts.get('S8_final_validation_candidates', 0)}, "
+                        f"solves={stage_counts.get('solves_total', 0)}."
+                    )
+                else:
+                    suggestions.append(
+                        f"Busca executada: S0-gerados={stage_counts.get('stage0_generated', 0)}, "
+                        f"S0-aprovados={stage_counts.get('stage0_prefilter_passed', 0)}, "
+                        f"S1-válidos={stage_counts.get('stage1', 0)}, "
+                        f"S2A={stage_counts.get('stage2a_selected', 0)}, "
+                        f"S2B={stage_counts.get('stage2b_evaluated', 0)}, "
+                        f"S2-únicos={stage_counts.get('stage2_unique', stage_counts.get('stage2', 0))}, "
+                        f"S3={stage_counts.get('stage3', 0)}, "
+                        f"S4={stage_counts.get('stage4', 0)}."
+                    )
 
             if final_variants:
                 vmin = final_variants.get("min") or {}

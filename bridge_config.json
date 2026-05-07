@@ -15,7 +15,7 @@
     "center_height_mm": 300.0,
     "plateau_start_mm": 400.0,
     "plateau_end_mm": 800.0,
-    "load_total_kgf": 120.0,
+    "load_total_kgf": 80.0,
     "load_distribution_x_mm": [
       400,
       500,
@@ -41,6 +41,7 @@
     "include_support_pad_members": true,
     "unilateral_supports": true,
     "tension_only_bracing_interpretation": true,
+    "tension_only_bracing_solver_enabled": true,
     "truss_type": "Parker",
     "top_profile": "parker_plateau",
     "internal_truss_type": "X",
@@ -51,16 +52,25 @@
     "name": "Palito de picolé equivalente",
     "E_MPa": 6000.0,
     "G_MPa": 500.0,
-    "stick_length_mm": 115.0,
+    "stick_length_mm": 120.0,
     "stick_width_mm": 7.0,
     "stick_thickness_mm": 1.5,
     "stick_mass_g": 1.4,
+    "stick_budget_g": 900.0,
+    "wet_glue_budget_g": 100.0,
+    "nominal_competition_limit_g": 1000.0,
     "glue_reserved_g": 100.0,
     "mass_limit_g": 1000.0,
     "tension_capacity_per_stick_kgf": 72.0,
     "compression_capacity_one_stick_kgf": 4.0,
     "compression_capacity_two_sticks_kgf": 11.0,
-    "compression_capacity_model": "one_or_two_then_linear_by_two_stick_capacity",
+    "compression_capacity_model": "experimental_table_with_efficiency",
+    "compression_capacity_table_kgf": {
+      "1": 4.0,
+      "2": 11.0
+    },
+    "bending_strength_MPa": 55.0,
+    "compression_strength_MPa": 32.0,
     "default_Ky": 1.0,
     "default_Kz": 1.0
   },
@@ -124,6 +134,39 @@
     "allowable_reaction_per_support_node_kgf": 22.0,
     "negative_reaction_means_uplift": true
   },
+  "planner": {
+    "target_load_kgf": 80.0,
+    "target_breaking_load_kgf": 80.0,
+    "stretch_breaking_load_kgf": 120.0,
+    "max_bridge_mass_g": 1000.0,
+    "target_bridge_mass_g": 950.0,
+    "target_installed_stick_mass_g": 900.0,
+    "target_wet_glue_mass_g": 100.0,
+    "prefer_truss_by_material": true,
+    "local_sizing": {
+      "zero_force_tolerance_N": 8.0,
+      "low_force_ratio": 0.12,
+      "moderate_force_ratio": 0.35,
+      "high_force_ratio": 0.65,
+      "allow_optional_member_removal": true,
+      "donor_fs_threshold": 3.0,
+      "never_reinforce_if_fs_above": 3.0,
+      "never_reinforce_tension_if_fs_above": 3.0,
+      "allow_primary_member_lightening_if_topology_ok": true,
+      "min_sticks_structural_member": 1,
+      "max_local_iterations": 6,
+      "require_topology_validation_after_removal": true,
+      "min_sticks_primary_member_by_group": {
+        "top_chord": 2,
+        "bottom_chord": 2,
+        "vertical": 1,
+        "diagonal": 1,
+        "top_transverse": 1,
+        "bottom_transverse": 1,
+        "support_pad": 2
+      }
+    }
+  },
   "analysis": {
     "frame3dd_path": "auto",
     "run_frame3dd_if_available": true,
@@ -131,6 +174,19 @@
     "frame3dd_include_shear_deformation": 1,
     "frame3dd_internal_force_dx_mm": 25.0,
     "deformed_scale": 30.0,
+    "target_min_fs": 1.5,
+    "acceptance_min_primary_fs": 1.05,
+    "acceptance_min_support_fs": 1.0,
+    "acceptance_min_glue_fs": 1.5,
+    "acceptance_min_design_breaking_load_kgf": 80.0,
+    "use_target_min_fs_as_hard_acceptance": false,
+    "planner_objective_profile": "max_strength_per_competition_mass",
+    "tension_only_groups": [
+      "top_bracing",
+      "bottom_bracing",
+      "cross_frame_bracing",
+      "chord_lacing"
+    ],
     "primary_groups": [
       "bottom_chord",
       "top_chord",
@@ -157,6 +213,7 @@
     "glue_shear_strength_MPa": 3.5,
     "glue_spread_g_per_m2": 160.0,
     "glue_mass_efficiency": 0.65,
+    "glue_cure_solids_fraction": 0.5,
     "default_joint_safety_factor": 2.0,
     "construction_waste_factor": 0.08,
     "saw_kerf_mm": 1.0,
@@ -164,6 +221,17 @@
     "allow_recommend_removal_if_fs_gt": 8.0,
     "reinforce_if_fs_lt": 2.0,
     "tension_only_stabilizers": true,
+    "composite_action": {
+      "enabled": true,
+      "default_eta_I": 0.7,
+      "eta_I_by_joint_quality": {
+        "weak": 0.55,
+        "normal": 0.7,
+        "laced": 0.85,
+        "continuous_box": 0.9
+      },
+      "eta_A": 1.0
+    },
     "generate_member_templates": true,
     "generate_piece_views": true
   },

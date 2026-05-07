@@ -168,6 +168,10 @@ class StickDetailService:
         compression_joint_model = str(detail.get("compression_joint_model", "double_lap_reinforced"))
         glue_spread = float(detail.get("glue_spread_g_per_m2", 160.0))
         glue_eff = float(detail.get("glue_mass_efficiency", 0.65))
+        glue_cure_solids_fraction = max(
+            0.30,
+            min(0.80, float(detail.get("glue_cure_solids_fraction", 0.50))),
+        )
         imperfection_e = float(detail.get("imperfection_eccentricity_mm", 2.0))
         waste = float(detail.get("construction_waste_factor", 0.08))
         kerf = float(detail.get("saw_kerf_mm", 1.0))
@@ -228,7 +232,12 @@ class StickDetailService:
                 {"layout": "stacked"},
             )
 
-            sec = self.sections.composite_section(n_lanes, mat, layout_cfg)
+            layout_cfg_detail = dict(layout_cfg)
+            layout_cfg_detail.setdefault(
+                "composite_action",
+                detail.get("composite_action", {}),
+            )
+            sec = self.sections.composite_section(n_lanes, mat, layout_cfg_detail)
 
             per_lane = N / n_lanes
             piece_area = stick_w * stick_t
@@ -522,6 +531,11 @@ class StickDetailService:
                     "section_A_mm2": sec["A"],
                     "section_Iy_mm4": sec["Iy"],
                     "section_Iz_mm4": sec["Iz"],
+                    "section_Iy_perfect_mm4": sec.get("Iy_perfect"),
+                    "section_Iz_perfect_mm4": sec.get("Iz_perfect"),
+                    "section_Iy_noncomposite_mm4": sec.get("Iy_noncomposite"),
+                    "section_Iz_noncomposite_mm4": sec.get("Iz_noncomposite"),
+                    "section_eta_I": sec.get("eta_I"),
                     "section_J_mm4_est": sec["J"],
                     "radius_y_mm": r_y,
                     "radius_z_mm": r_z,
@@ -581,12 +595,37 @@ class StickDetailService:
         extra = math.ceil(blank * waste)
         total = blank + extra
 
-        piece_mass = sum(float(r["mass_g"]) for r in stick_rows)
-        glue_mass = (total_glue_area / 1_000_000.0) * glue_spread / max(glue_eff, 1.0e-6)
-        total_mass = total * stick_mass + glue_mass
+        installed_stick_mass = sum(float(r["mass_g"]) for r in stick_rows)
+        wet_glue_mass = (total_glue_area / 1_000_000.0) * glue_spread / max(glue_eff, 1.0e-6)
+        cured_glue_mass = wet_glue_mass * glue_cure_solids_fraction
+        evaporated_glue_water = max(0.0, wet_glue_mass - cured_glue_mass)
+
+        purchased_blank_sticks_needed = total
+        purchased_stick_mass = purchased_blank_sticks_needed * stick_mass
+        cutting_scrap_mass = max(0.0, purchased_stick_mass - installed_stick_mass)
+
+        competition_mass = installed_stick_mass + cured_glue_mass
+        assembly_procurement_mass = purchased_stick_mass + wet_glue_mass
 
         mass_limits = resolve_mass_limits(cfg)
         limit = float(mass_limits["effective_limit_g"])
+        mat = cfg.get("material", {}) or {}
+        planner = cfg.get("planner", {}) or {}
+        stick_budget_g = safe_float(mat.get("stick_budget_g"), safe_float(planner.get("target_installed_stick_mass_g"), 900.0)) or 900.0
+        wet_glue_budget_g = safe_float(mat.get("wet_glue_budget_g"), safe_float(planner.get("target_wet_glue_mass_g"), 100.0)) or 100.0
+        nominal_competition_limit_g = safe_float(
+            mat.get("nominal_competition_limit_g"),
+            safe_float(mass_limits.get("nominal_limit_g"), 1000.0),
+        ) or 1000.0
+        glue_acceptance_fs = safe_float(
+            cfg.get("analysis", {}).get("acceptance_min_glue_fs"),
+            1.5,
+        ) or 1.5
+        weak_glue_count = 0
+        for r in (joint_rows or []):
+            fs_joint = safe_float(r.get("FS_glue_shear"), None)
+            if fs_joint is not None and fs_joint < glue_acceptance_fs:
+                weak_glue_count += 1
 
         summary = {
             "total_members": len(member_rows),
@@ -596,17 +635,35 @@ class StickDetailService:
             "waste_factor": waste,
             "extra_sticks_for_waste": extra,
             "estimated_total_sticks_with_waste": total,
-            "estimated_piece_mass_g_without_waste_scaling": piece_mass,
+            "estimated_piece_mass_g_without_waste_scaling": installed_stick_mass,
+            "installed_stick_mass_g": installed_stick_mass,
+            "purchased_blank_sticks_needed": purchased_blank_sticks_needed,
+            "purchased_stick_mass_g": purchased_stick_mass,
+            "cutting_scrap_mass_g": cutting_scrap_mass,
             "estimated_glue_area_mm2": total_glue_area,
-            "estimated_glue_mass_g": glue_mass,
-            "estimated_total_mass_g": total_mass,
+            "estimated_glue_mass_g": wet_glue_mass,
+            "wet_glue_mass_g": wet_glue_mass,
+            "glue_cure_solids_fraction": glue_cure_solids_fraction,
+            "cured_glue_mass_g": cured_glue_mass,
+            "evaporated_glue_water_g": evaporated_glue_water,
+            "competition_mass_g": competition_mass,
+            "assembly_procurement_mass_g": assembly_procurement_mass,
+            # Backward compatibility: old "total mass" now maps to final competition mass.
+            "estimated_total_mass_g": competition_mass,
             "mass_limit_g": limit,
-            "mass_margin_g": limit - total_mass,
+            "mass_margin_g": limit - competition_mass,
             "mass_limit_nominal_g": float(mass_limits["nominal_limit_g"]),
             "mass_limit_material_g": mass_limits["material_limit_g"],
             "mass_limit_planner_g": mass_limits["planner_limit_g"],
             "mass_limit_effective_g": float(mass_limits["effective_limit_g"]),
             "mass_limit_effective_source": str(mass_limits["effective_source"]),
+            "stick_budget_g": stick_budget_g,
+            "wet_glue_budget_g": wet_glue_budget_g,
+            "stick_budget_margin_g": stick_budget_g - installed_stick_mass,
+            "wet_glue_budget_margin_g": wet_glue_budget_g - wet_glue_mass,
+            "nominal_competition_limit_g": nominal_competition_limit_g,
+            "competition_mass_margin_g": nominal_competition_limit_g - competition_mass,
+            "n_weak_glue_joints": weak_glue_count,
             "glue_shear_strength_MPa": glue_tau,
             "glue_safety_factor": glue_sf,
             "cut_increment_mm": cut_increment_mm,

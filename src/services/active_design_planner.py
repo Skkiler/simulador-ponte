@@ -10,7 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List
+from typing import Any, Callable, Dict, Iterable, List, Set
 
 from src.core.numeric import safe_float
 from src.domain.models import Member, Node
@@ -24,6 +24,9 @@ from src.services.mass_guard import effective_mass_limit_g, assert_mass_complian
 from src.services.rupture_estimator import estimate_rupture_load
 # Connection planner chooses joint models per member automatically.
 from src.services.connection_planner import ConnectionPlanner
+from src.services.quarter_model_service import QuarterModelService
+from src.services.staged_fidelity_funnel import StagedFidelityFunnelPlanner
+from src.services.topology_validator import TopologyValidator
 from src.solvers.linear_truss_solver import LinearTrussSolver
 
 
@@ -32,16 +35,37 @@ class MemberSizingDecision:
     member_id: int
     original_group: str
     effective_group: str
+    symmetry_orbit_id: int
+    quarter_member_id: int
     n_sticks_current: int
     n_sticks_recommended: int
+    force_N: float
     axial_force_N: float
+    abs_force_N: float
     axial_force_ratio: float
+    force_band: str
+    utilization: float
     FS_min: float
     governing_mode: str
     action: str
     reason: str
+    is_structurally_required: bool
+    can_disable: bool
+    joint_before: str
+    joint_after: str
     symmetry_partner_ids: List[int]
     applied_to_member_ids: List[int]
+    old_mass_est_g: float = 0.0
+    new_mass_est_g: float = 0.0
+    delta_mass_g: float = 0.0
+    old_utilization: float = 0.0
+    new_estimated_utilization: float = 0.0
+    estimated_capacity_gain_ratio: float = 1.0
+    governing_mode_before: str = ""
+    governing_mode_after_est: str = ""
+    can_be_mass_donor: bool = False
+    donor_rank: float = 0.0
+    reinforcement_efficiency_score: float = 0.0
 
 
 def min_numeric(values: Iterable[Any], default: float | None = None) -> float | None:
@@ -66,6 +90,8 @@ class ActiveDesignPlanner:
         self.post = PostProcessor()
         self.detail = StickDetailService()
         self.connection = ConnectionPlanner()
+        self.quarter_model = QuarterModelService()
+        self.topology = TopologyValidator()
         self._base_eval_cache: Dict[str, Dict] = {}
         self._cache_hits = 0
         self._cache_misses = 0
@@ -101,6 +127,28 @@ class ActiveDesignPlanner:
         return sorted(set(round(v, 6) for v in vals))
 
     @staticmethod
+    def _symmetry_panel_values(
+        span: float,
+        panel_min: float,
+        panel_max: float,
+        *,
+        n_panels_min: int = 6,
+        n_panels_max: int = 24,
+    ) -> List[float]:
+        span = max(1.0, float(span))
+        lo = max(1.0, min(float(panel_min), float(panel_max)))
+        hi = max(lo, max(float(panel_min), float(panel_max)))
+        vals: List[float] = []
+        # Simetria longitudinal exige número par de painéis.
+        for n_panels in range(max(2, n_panels_min), max(n_panels_min, n_panels_max) + 1):
+            if n_panels % 2 != 0:
+                continue
+            panel = span / float(n_panels)
+            if lo - 1.0e-9 <= panel <= hi + 1.0e-9:
+                vals.append(round(panel, 6))
+        return sorted(set(vals))
+
+    @staticmethod
     def _quick_mass_estimate(cfg: Dict, members: List) -> tuple[float, int]:
         mat = cfg["material"]
         stick_len = max(1.0, float(mat["stick_length_mm"]))
@@ -115,9 +163,10 @@ class ActiveDesignPlanner:
         stick_w = float(mat.get("stick_width_mm", 7.0))
 
         # Calibração para aproximar o detalhamento completo sem rodar corte/cola detalhado.
-        fast_mass_scale = max(0.75, min(1.05, float(detail.get("fast_mass_scale", 0.90))))
+        fast_mass_scale = max(0.90, min(1.25, float(detail.get("fast_mass_scale", 1.00))))
 
         total_cut_len = 0.0
+        total_installed_len = 0.0
         total_splices = 0
 
         for m in members:
@@ -133,21 +182,45 @@ class ActiveDesignPlanner:
             splices = max(0, pieces - 1)
             lane_cut_len = L + splices * overlap + max(0, pieces - 1) * kerf
             total_cut_len += lanes * lane_cut_len
+            total_installed_len += lanes * (L + splices * overlap)
             total_splices += lanes * splices
 
         raw_sticks = int(math.ceil(total_cut_len / stick_len))
         sticks_with_waste = int(math.ceil(raw_sticks * (1.0 + waste)))
         glue_area_mm2 = total_splices * overlap * stick_w * 1.6
-        approx_glue_mass = (glue_area_mm2 / 1_000_000.0) * glue_spread / glue_eff
-        mass = (sticks_with_waste * stick_mass + approx_glue_mass) * fast_mass_scale
+        approx_wet_glue_mass = (glue_area_mm2 / 1_000_000.0) * glue_spread / glue_eff
+        glue_cure = max(0.30, min(0.80, float(detail.get("glue_cure_solids_fraction", 0.50))))
+        approx_cured_glue_mass = approx_wet_glue_mass * glue_cure
+        installed_stick_mass = (total_installed_len / stick_len) * stick_mass
+        mass = (installed_stick_mass + approx_cured_glue_mass) * fast_mass_scale
         return mass, sticks_with_waste
 
     @staticmethod
     def _reinforcement_profiles() -> Dict[str, Dict[str, int]]:
         return {
             "light": {
+                "top_chord": 2,
+                "bottom_chord": 2,
+                "diagonal": 1,
+                "vertical": 1,
+                "top_transverse": 1,
+                "bottom_transverse": 1,
+                "support_pad": 2,
+                "chord_lacing": 1,
+            },
+            "balanced": {
                 "top_chord": 3,
-                "bottom_chord": 3,
+                "bottom_chord": 2,
+                "diagonal": 2,
+                "vertical": 1,
+                "top_transverse": 1,
+                "bottom_transverse": 1,
+                "support_pad": 2,
+                "chord_lacing": 1,
+            },
+            "strong_top": {
+                "top_chord": 4,
+                "bottom_chord": 2,
                 "diagonal": 2,
                 "vertical": 2,
                 "top_transverse": 1,
@@ -155,54 +228,34 @@ class ActiveDesignPlanner:
                 "support_pad": 3,
                 "chord_lacing": 1,
             },
-            "balanced": {
+            "strong": {
                 "top_chord": 4,
                 "bottom_chord": 3,
                 "diagonal": 2,
                 "vertical": 2,
-                "top_transverse": 1,
-                "bottom_transverse": 1,
-                "support_pad": 4,
-                "chord_lacing": 1,
-            },
-            "strong_top": {
-                "top_chord": 5,
-                "bottom_chord": 3,
-                "diagonal": 3,
-                "vertical": 2,
                 "top_transverse": 2,
                 "bottom_transverse": 1,
-                "support_pad": 4,
+                "support_pad": 3,
                 "chord_lacing": 1,
             },
-            "strong": {
-                "top_chord": 5,
+            "ultra_compression": {
+                "top_chord": 6,
                 "bottom_chord": 4,
                 "diagonal": 3,
                 "vertical": 3,
                 "top_transverse": 2,
                 "bottom_transverse": 2,
                 "support_pad": 4,
-                "chord_lacing": 1,
-            },
-            "ultra_compression": {
-                "top_chord": 7,
-                "bottom_chord": 5,
-                "diagonal": 4,
-                "vertical": 4,
-                "top_transverse": 3,
-                "bottom_transverse": 3,
-                "support_pad": 5,
                 "chord_lacing": 2,
             },
             "ultra_pratt": {
-                "top_chord": 8,
-                "bottom_chord": 5,
-                "diagonal": 4,
-                "vertical": 3,
-                "top_transverse": 3,
+                "top_chord": 6,
+                "bottom_chord": 4,
+                "diagonal": 3,
+                "vertical": 2,
+                "top_transverse": 2,
                 "bottom_transverse": 2,
-                "support_pad": 5,
+                "support_pad": 4,
                 "chord_lacing": 2,
             },
         }
@@ -284,6 +337,32 @@ class ActiveDesignPlanner:
         if overlap_length_mm is not None:
             detail["overlap_length_mm"] = float(overlap_length_mm)
 
+        # Preset estrutural para reduzir eixo fraco em grupos comprimidos.
+        analysis = v.setdefault("analysis", {})
+        if bool(analysis.get("planner_auto_section_layout", True)):
+            mat = v.get("material", {}) or {}
+            t_cap = float(mat.get("tension_capacity_per_stick_kgf", 72.0))
+            c_cap = max(1.0e-6, float(mat.get("compression_capacity_two_sticks_kgf", 11.0)) / 2.0)
+            tc_ratio = t_cap / c_cap
+            layout_by_group = v.setdefault("section_layout_by_group", {})
+            if tc_ratio >= 5.0:
+                for g in ("top_chord", "bottom_chord"):
+                    gcfg = dict(layout_by_group.get(g, {}) or {})
+                    if str(gcfg.get("layout", "stacked")).lower() in {"stacked", "single", "side_by_side"}:
+                        gcfg.update({"layout": "box", "spacing_y_mm": 12.0, "spacing_z_mm": 12.0})
+                        layout_by_group[g] = gcfg
+                for g in ("vertical", "diagonal"):
+                    gcfg = dict(layout_by_group.get(g, {}) or {})
+                    if str(gcfg.get("layout", "stacked")).lower() in {"stacked", "single"}:
+                        gcfg.update(
+                            {
+                                "layout": "box",
+                                "spacing_y_mm": 10.0,
+                                "spacing_z_mm": 10.0,
+                            }
+                        )
+                        layout_by_group[g] = gcfg
+
         return self.config.normalize(v)
 
     def _score_candidate(self, cfg: Dict, metrics: Dict) -> float:
@@ -306,26 +385,54 @@ class ActiveDesignPlanner:
         target_mass = max(1.0, float(planner.get("target_bridge_mass_g", max_mass * 0.85)))
 
         min_fs_primary = max(0.0, safe_float(metrics.get("min_fs_primary"), 0.0) or 0.0)
-        mass_g = max(0.0, safe_float(metrics.get("mass_g"), 0.0) or 0.0)
+        min_fs_design = max(0.0, safe_float(metrics.get("min_fs_design"), min_fs_primary) or min_fs_primary)
+        mass_g = max(
+            0.0,
+            safe_float(
+                metrics.get("competition_mass_g"),
+                safe_float(metrics.get("mass_g"), 0.0),
+            )
+            or 0.0,
+        )
+        installed_stick_mass_g = safe_float(metrics.get("installed_stick_mass_g"), None)
+        wet_glue_mass_g = safe_float(metrics.get("wet_glue_mass_g"), None)
+        stick_budget_g = safe_float(
+            cfg.get("material", {}).get("stick_budget_g"),
+            safe_float(cfg.get("planner", {}).get("target_installed_stick_mass_g"), 900.0),
+        ) or 900.0
+        wet_glue_budget_g = safe_float(
+            cfg.get("material", {}).get("wet_glue_budget_g"),
+            safe_float(cfg.get("planner", {}).get("target_wet_glue_mass_g"), 100.0),
+        ) or 100.0
         min_support_fs = safe_float(metrics.get("min_support_fs"), None)
         eq_error = abs(safe_float(metrics.get("equilibrium_error_N"), 0.0) or 0.0)
         load_total_N = abs(safe_float(bridge.get("load_total_N"), 1.0) or 1.0)
 
         predicted_break = max(
             0.0,
-            safe_float(metrics.get("estimated_breaking_load_kgf"), 0.0) or 0.0,
+            safe_float(
+                metrics.get("predicted_breaking_load_design_kgf"),
+                safe_float(metrics.get("estimated_breaking_load_kgf"), 0.0),
+            )
+            or 0.0,
         )
         target_load = max(1.0, float(planner.get("target_load_kgf", bridge.get("load_total_kgf", 120.0))))
 
-        fs_score = min(2.5, min_fs_primary / target_fs)
+        fs_score = min(2.5, min_fs_design / target_fs)
         break_score = max(0.0, min(2.0, predicted_break / target_break))
         mass_target_score = max(0.0, 1.0 - abs(mass_g - target_mass) / target_mass)
         mass_limit_score = max(0.0, min(1.0, (max_mass - mass_g) / max_mass))
+        strength_to_weight = predicted_break / mass_g if mass_g > 1.0e-9 else 0.0
+        break_margin = predicted_break - max(
+            0.1,
+            float(analysis.get("acceptance_min_design_breaking_load_kgf", target_break)),
+        )
 
         profile = str(analysis.get("planner_objective_profile", "balanced")).lower()
         presets = {
             "balanced": (0.65, 0.25, 0.07, 0.03),
             "max_strength": (0.70, 0.23, 0.05, 0.02),
+            "max_strength_per_competition_mass": (0.62, 0.28, 0.04, 0.06),
             "min_mass": (0.38, 0.22, 0.25, 0.15),
         }
         default_weights = presets.get(profile, presets["balanced"])
@@ -361,7 +468,7 @@ class ActiveDesignPlanner:
         if min_fs_primary < 1.0:
             score -= 110.0 * w_fs * (1.0 - min_fs_primary)
 
-        if metrics.get("solver_status") != "regular":
+        if not self._solver_is_regular(metrics.get("solver_status")):
             score -= 80.0
 
         if min_support_fs is not None and min_support_fs < 1.0:
@@ -377,6 +484,16 @@ class ActiveDesignPlanner:
             score -= 90.0 * (1.0 - predicted_break / target_load)
         else:
             score += 8.0
+
+        # Prioriza margem de ruptura e eficiência resistência/massa.
+        score += max(-35.0, min(45.0, 3.5 * break_margin))
+        score += max(-25.0, min(25.0, 18.0 * strength_to_weight))
+
+        # Penalizações de orçamento preferencial (não são trava dura).
+        if installed_stick_mass_g is not None and installed_stick_mass_g > stick_budget_g:
+            score -= 120.0 * min(1.0, (installed_stick_mass_g - stick_budget_g) / max(1.0, stick_budget_g))
+        if wet_glue_mass_g is not None and wet_glue_mass_g > wet_glue_budget_g:
+            score -= 60.0 * min(1.0, (wet_glue_mass_g - wet_glue_budget_g) / max(1.0, wet_glue_budget_g))
 
         # Bônus/penalidades de simetria estrutural.
         enforce_symmetry = bool(analysis.get("enforce_symmetry", True))
@@ -436,6 +553,15 @@ class ActiveDesignPlanner:
         else:
             score -= 10.0 + 2.0 * aligned_critical
 
+        near_critical_members = sum(
+            1
+            for row in (metrics.get("member_checks") or [])
+            if safe_float(row.get("FS_design", row.get("FS_min")), None) is not None
+            and (safe_float(row.get("FS_design", row.get("FS_min")), 9.9) or 9.9) <= 1.12
+            and bool(row.get("design_relevant", True))
+        )
+        score -= min(22.0, 1.2 * near_critical_members)
+
         return score
 
     @staticmethod
@@ -454,18 +580,54 @@ class ActiveDesignPlanner:
 
         return out
 
+    @staticmethod
+    def _solver_is_regular(status: Any) -> bool:
+        base = str(status or "").split("|", 1)[0]
+        return base == "regular"
+
+    @staticmethod
+    def _solver_kwargs_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+        bridge = cfg.get("bridge", {}) or {}
+        analysis = cfg.get("analysis", {}) or {}
+        return {
+            "unilateral_supports": bool(bridge.get("unilateral_supports", True)),
+            "tension_only_solver_enabled": bool(
+                bridge.get("tension_only_bracing_solver_enabled", False)
+            ),
+            "tension_only_groups": analysis.get(
+                "tension_only_groups",
+                ["top_bracing", "bottom_bracing", "cross_frame_bracing", "chord_lacing"],
+            ),
+            "tension_only_compression_tolerance_N": float(
+                analysis.get("tension_only_compression_tolerance_N", 1.0e-6)
+            ),
+        }
+
     def _cfg_cache_key(self, cfg: Dict) -> str:
         c = cfg
+        def stringify_keys(obj: Any) -> Any:
+            if isinstance(obj, dict):
+                return {str(k): stringify_keys(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [stringify_keys(v) for v in obj]
+            return obj
         payload = {
             "bridge": c.get("bridge", {}),
             "material": c.get("material", {}),
             "member_sticks_by_group": c.get("member_sticks_by_group", {}),
+            "member_sticks_by_id": stringify_keys(c.get("member_sticks_by_id", {})),
+            "member_active_by_id": stringify_keys(c.get("member_active_by_id", {})),
+            "disabled_member_ids": c.get("disabled_member_ids", []),
+            "member_joint_plan": stringify_keys(c.get("member_joint_plan", {})),
             "effective_length_factor_by_group": c.get("effective_length_factor_by_group", {}),
             "section_layout_by_group": c.get("section_layout_by_group", {}),
             "analysis": {
                 "target_min_fs": c.get("analysis", {}).get("target_min_fs"),
                 "primary_groups": c.get("analysis", {}).get("primary_groups"),
                 "stabilizer_groups": c.get("analysis", {}).get("stabilizer_groups"),
+                "enforce_symmetry": c.get("analysis", {}).get("enforce_symmetry"),
+                "use_quarter_model": c.get("analysis", {}).get("use_quarter_model"),
+                "quarter_model_mode": c.get("analysis", {}).get("quarter_model_mode"),
             },
             "detail_model": c.get("detail_model", {}),
             "support_check": c.get("support_check", {}),
@@ -473,6 +635,7 @@ class ActiveDesignPlanner:
                 "max_bridge_mass_g": c.get("planner", {}).get("max_bridge_mass_g"),
                 "target_bridge_mass_g": c.get("planner", {}).get("target_bridge_mass_g"),
                 "target_breaking_load_kgf": c.get("planner", {}).get("target_breaking_load_kgf"),
+                "local_sizing": c.get("planner", {}).get("local_sizing", {}),
             },
         }
         return json.dumps(payload, sort_keys=True, ensure_ascii=False)
@@ -490,13 +653,94 @@ class ActiveDesignPlanner:
             self._cache_misses += 1
 
         nodes, members, supports, loads = self.geometry.generate(cfg)
-        sol = self.solver.solve(
-            nodes,
-            members,
-            supports,
-            loads,
-            unilateral_supports=bool(cfg["bridge"].get("unilateral_supports", True)),
-        )
+        quarter_model_used = False
+        quarter_model_fallback_reason = None
+        quarter_member_count = 0
+        quarter_member_map: Dict[str, Any] = {}
+        quarter_validation: Dict[str, Any] = {}
+
+        def solver_is_acceptable(result_obj: Any, load_rows: List[Any]) -> tuple[bool, float]:
+            total_load_N = abs(sum(float(getattr(ld, "Fz", 0.0)) for ld in (load_rows or [])))
+            eq_tol_N = max(1.0e-6, 0.005 * max(total_load_N, 1.0))
+            status_ok = self._solver_is_regular(getattr(result_obj, "status", ""))
+            eq_ok = abs(float(getattr(result_obj, "equilibrium_error_N", 0.0) or 0.0)) <= eq_tol_N
+            return (status_ok and eq_ok), eq_tol_N
+
+        if self.quarter_model.is_quarter_model_enabled(cfg):
+            quarter_validation = self.quarter_model.validate_quarter_symmetry(
+                cfg,
+                nodes,
+                members,
+                supports,
+                loads,
+            )
+            if bool(quarter_validation.get("is_valid")):
+                try:
+                    q_model = self.quarter_model.build_quarter_model(
+                        cfg,
+                        nodes,
+                        members,
+                        supports,
+                        loads,
+                    )
+                    full = self.quarter_model.solve_quarter_and_replicate(
+                        cfg,
+                        self.solver,
+                        q_model,
+                    )
+                    nodes, members, supports, loads, sol = (
+                        full.nodes,
+                        full.members,
+                        full.supports,
+                        full.loads,
+                        full.result,
+                    )
+                    quarter_model_used = True
+                    quarter_member_count = int(full.quarter_member_count)
+                    quarter_member_map = full.mirror_maps
+                    ok, eq_tol_N = solver_is_acceptable(sol, loads)
+                    if not ok:
+                        quarter_model_used = False
+                        quarter_member_count = 0
+                        quarter_member_map = {}
+                        quarter_model_fallback_reason = (
+                            f"quarter_model_solution_invalid:status={sol.status},"
+                            f"eq_error={sol.equilibrium_error_N:.6f},eq_tol={eq_tol_N:.6f}"
+                        )
+                        nodes, members, supports, loads = self.geometry.generate(cfg)
+                        sol = self.solver.solve(
+                            nodes,
+                            members,
+                            supports,
+                            loads,
+                            **self._solver_kwargs_from_cfg(cfg),
+                        )
+                except (TypeError, ValueError, RuntimeError, KeyError) as exc:
+                    quarter_model_fallback_reason = f"quarter_model_execution_failed:{exc!r}"
+                    sol = self.solver.solve(
+                        nodes,
+                        members,
+                        supports,
+                        loads,
+                        **self._solver_kwargs_from_cfg(cfg),
+                    )
+            else:
+                quarter_model_fallback_reason = "symmetry_validation_failed"
+                sol = self.solver.solve(
+                    nodes,
+                    members,
+                    supports,
+                    loads,
+                    **self._solver_kwargs_from_cfg(cfg),
+                )
+        else:
+            sol = self.solver.solve(
+                nodes,
+                members,
+                supports,
+                loads,
+                **self._solver_kwargs_from_cfg(cfg),
+            )
 
         active_supports = [
             type(s)(
@@ -532,6 +776,11 @@ class ActiveDesignPlanner:
             "support_checks": support_checks,
             "quick_mass_g": quick_mass_g,
             "quick_sticks": quick_sticks,
+            "quarter_model_used": quarter_model_used,
+            "quarter_model_fallback_reason": quarter_model_fallback_reason,
+            "quarter_member_count": quarter_member_count,
+            "quarter_member_map": quarter_member_map,
+            "quarter_validation": quarter_validation,
         }
         with self._cache_lock:
             self._base_eval_cache[key] = payload
@@ -657,7 +906,7 @@ class ActiveDesignPlanner:
                 changed = True
                 actions.append(f"support_pad: {old}->{new} (FS_apoio={min_support_fs:.2f})")
 
-        if metrics.get("solver_status") != "regular":
+        if not self._solver_is_regular(metrics.get("solver_status")):
             for g in ("top_bracing", "bottom_bracing", "cross_frame_bracing"):
                 old = int(sticks.get(g, min_sticks))
                 new = min(max_for(g), old + 1)
@@ -801,33 +1050,39 @@ class ActiveDesignPlanner:
             if r.get("member_role") == "primary"
         ]
         min_fs_primary = min_numeric((r.get("FS_min") for r in primary_checks), 0.0) or 0.0
-        min_fs_all = min_numeric((r.get("FS_min") for r in member_checks), 0.0) or 0.0
+        min_fs_all_raw = min_numeric(
+            (r.get("FS_min_all_raw", r.get("FS_min")) for r in member_checks),
+            0.0,
+        ) or 0.0
+        min_fs_design = min_numeric(
+            (
+                r.get("FS_design")
+                for r in member_checks
+                if r.get("design_relevant", True)
+            ),
+            None,
+        )
+        if min_fs_design is None:
+            min_fs_design = min_fs_primary
         min_support_fs = min_numeric((r.get("FS_support_reaction") for r in support_checks), None)
 
         quick_mass_g = float(base["quick_mass_g"])
         quick_sticks = int(base["quick_sticks"])
 
         detailed = None
-        mass_g = quick_mass_g
+        competition_mass_g = quick_mass_g
+        mass_g = competition_mass_g
         glue_mass_g = None
+        wet_glue_mass_g = None
+        cured_glue_mass_g = None
+        installed_stick_mass_g = None
+        assembly_procurement_mass_g = None
         weak_glue = None
+        min_glue_fs = None
         eval_warnings: List[str] = []
 
         if include_detail:
             dd = detail_dir or Path("outputs/tmp_detail")
-            # compute per-member joint plan automatically.  This prevents the
-            # user from having to specify global tension/compression joints.
-            try:
-                plan = self.connection.assign_member_joint_plan(
-                    cfg,
-                    nodes,
-                    members,
-                    sol.member_results,
-                    member_checks,
-                )
-            except (TypeError, ValueError, KeyError) as exc:
-                plan = {}
-                eval_warnings.append(f"Falha ao gerar connection_plan: {exc!r}")
             try:
                 sizing_plan_obj = self.build_member_sizing_plan(
                     cfg,
@@ -841,6 +1096,22 @@ class ActiveDesignPlanner:
                 sizing_plan_obj = {}
                 sizing_rows = []
                 eval_warnings.append(f"Falha ao gerar member_sizing_plan: {exc!r}")
+            # compute per-member joint plan automatically.  This prevents the
+            # user from having to specify global tension/compression joints.
+            try:
+                plan = self.connection.assign_member_joint_plan(
+                    cfg,
+                    nodes,
+                    members,
+                    sol.member_results,
+                    member_checks,
+                    member_sizing_plan={
+                        int(k): asdict(v) for k, v in sizing_plan_obj.items()
+                    },
+                )
+            except (TypeError, ValueError, KeyError) as exc:
+                plan = {}
+                eval_warnings.append(f"Falha ao gerar connection_plan: {exc!r}")
             try:
                 dd.mkdir(parents=True, exist_ok=True)
                 connection_rows = sorted(
@@ -874,15 +1145,59 @@ class ActiveDesignPlanner:
                 dd,
             )
             dsum = detailed.get("summary", {})
-            mass_g = safe_float(dsum.get("estimated_total_mass_g"), quick_mass_g) or quick_mass_g
-            glue_mass_g = safe_float(dsum.get("estimated_glue_mass_g"), None)
-            weak_glue = len(detailed.get("weakest_glue_joints", []) or [])
+            installed_stick_mass_g = safe_float(
+                dsum.get("installed_stick_mass_g"),
+                safe_float(dsum.get("estimated_piece_mass_g_without_waste_scaling"), None),
+            )
+            wet_glue_mass_g = safe_float(
+                dsum.get("wet_glue_mass_g"),
+                safe_float(dsum.get("estimated_glue_mass_g"), None),
+            )
+            cured_glue_mass_g = safe_float(
+                dsum.get("cured_glue_mass_g"),
+                wet_glue_mass_g,
+            )
+            competition_mass_g = safe_float(
+                dsum.get("competition_mass_g"),
+                safe_float(dsum.get("estimated_total_mass_g"), quick_mass_g),
+            ) or quick_mass_g
+            assembly_procurement_mass_g = safe_float(
+                dsum.get("assembly_procurement_mass_g"),
+                None,
+            )
+            mass_g = competition_mass_g
+            glue_mass_g = wet_glue_mass_g
+            min_glue_fs = min_numeric(
+                (
+                    r.get("FS_glue_shear")
+                    for r in (detailed.get("glue_joints") or [])
+                ),
+                None,
+            )
+            weak_glue = int(
+                safe_float(
+                    dsum.get("n_weak_glue_joints"),
+                    0.0,
+                )
+                or 0
+            )
             detailed["connection_plan"] = list(plan.values())
+        if installed_stick_mass_g is None:
+            installed_stick_mass_g = mass_g
+        if wet_glue_mass_g is None:
+            wet_glue_mass_g = glue_mass_g
+        if cured_glue_mass_g is None:
+            cured_glue_mass_g = glue_mass_g
+        if weak_glue is None:
+            weak_glue = 0
 
         load_kgf = float(cfg["bridge"]["load_total_kgf"])
         # Estimate rupture load using multiple limit states.
         rupture = estimate_rupture_load(cfg, member_checks, support_checks, detailed, load_kgf)
-        estimated_breaking_load_kgf = rupture.get("predicted_breaking_load_kgf")
+        estimated_breaking_load_kgf = (
+            rupture.get("predicted_breaking_load_design_kgf")
+            or rupture.get("predicted_breaking_load_kgf")
+        )
         group_min_fs = self._group_min_fs(member_checks)
 
         critical_members = sorted(
@@ -902,13 +1217,32 @@ class ActiveDesignPlanner:
             "equilibrium_error_N": sol.equilibrium_error_N,
             "active_support_count": len(sol.active_support_node_ids),
             "inactive_support_count": len(sol.inactive_support_node_ids),
+            "inactive_tension_only_member_count": len(getattr(sol, "inactive_tension_only_member_ids", set())),
+            "tension_only_iterations": getattr(sol, "tension_only_iterations", 0),
+            "tension_only_converged": getattr(sol, "tension_only_converged", True),
+            "tension_only_compression_released_N_total": getattr(
+                sol,
+                "tension_only_compression_released_N_total",
+                0.0,
+            ),
             "min_fs_primary": min_fs_primary,
-            "min_fs_all": min_fs_all,
+            "min_fs_all": min_fs_design,
+            "min_fs_all_raw": min_fs_all_raw,
+            "min_fs_design": min_fs_design,
             "min_support_fs": min_support_fs,
+            "min_glue_fs": min_glue_fs,
             "mass_g": mass_g,
+            "competition_mass_g": competition_mass_g,
+            "installed_stick_mass_g": installed_stick_mass_g,
+            "wet_glue_mass_g": wet_glue_mass_g,
+            "cured_glue_mass_g": cured_glue_mass_g,
+            "assembly_procurement_mass_g": assembly_procurement_mass_g,
             "quick_mass_g": quick_mass_g,
             "estimated_sticks": quick_sticks,
             "estimated_breaking_load_kgf": estimated_breaking_load_kgf,
+            "predicted_breaking_load_primary_kgf": rupture.get("predicted_breaking_load_primary_kgf"),
+            "predicted_breaking_load_all_kgf": rupture.get("predicted_breaking_load_all_kgf"),
+            "predicted_breaking_load_design_kgf": rupture.get("predicted_breaking_load_design_kgf"),
             "critical_members": critical_summary,
             "glue_mass_g": glue_mass_g,
             "weak_glue_joints": weak_glue,
@@ -919,6 +1253,11 @@ class ActiveDesignPlanner:
             "nodes": nodes,
             "detailed": detailed,
             "rupture_details": rupture,
+            "quarter_model_used": bool(base.get("quarter_model_used", False)),
+            "quarter_model_fallback_reason": base.get("quarter_model_fallback_reason"),
+            "quarter_member_count": int(base.get("quarter_member_count", 0) or 0),
+            "quarter_member_map": base.get("quarter_member_map", {}),
+            "quarter_validation": base.get("quarter_validation", {}),
         }
 
         try:
@@ -953,39 +1292,88 @@ class ActiveDesignPlanner:
 
         metrics["score"] = self._score_candidate(cfg, metrics)
 
-        # target safety factor and effective mass limit.  Using the global
-        # effective mass limit avoids divergence between planner and material configs.
-        target_fs = float(cfg.get("analysis", {}).get("target_min_fs", 2.0))
-        max_mass = effective_mass_limit_g(cfg)
+        analysis_cfg = cfg.get("analysis", {}) or {}
+        target_fs = float(analysis_cfg.get("target_min_fs", 2.0))
+        use_target_hard = bool(analysis_cfg.get("use_target_min_fs_as_hard_acceptance", False))
+        acceptance_min_primary_fs = float(analysis_cfg.get("acceptance_min_primary_fs", 1.05))
+        acceptance_min_support_fs = float(analysis_cfg.get("acceptance_min_support_fs", 1.00))
+        acceptance_min_glue_fs = float(analysis_cfg.get("acceptance_min_glue_fs", 1.50))
+        acceptance_min_break_kgf = float(
+            analysis_cfg.get(
+                "acceptance_min_design_breaking_load_kgf",
+                cfg.get("planner", {}).get(
+                    "target_breaking_load_kgf",
+                    cfg.get("planner", {}).get("target_load_kgf", cfg.get("bridge", {}).get("load_total_kgf", 120.0)),
+                ),
+            )
+        )
+        enforce_stick_budget = bool(analysis_cfg.get("acceptance_require_stick_budget", False))
+        enforce_wet_glue_budget = bool(analysis_cfg.get("acceptance_require_wet_glue_budget", False))
+
         total_load_N = abs(float(cfg["bridge"].get("load_total_N", 0.0)))
         eq_tol_N = max(1.0e-6, 0.005 * max(total_load_N, 1.0))
         equilibrium_ok = abs(float(sol.equilibrium_error_N)) <= eq_tol_N
 
-        # A design is considered feasible only if the solver ran regularly,
-        # the minimum safety factor exceeds the target, the detailed mass
-        # estimate is within the effective mass limit, the system is in
-        # equilibrium, support reactions are acceptable, and predicted rupture
-        # is not below the load target.
-        target_load_kgf = float(cfg.get("planner", {}).get("target_load_kgf", cfg.get("bridge", {}).get("load_total_kgf", 120.0)))
-        predicted_break = safe_float(metrics.get("estimated_breaking_load_kgf"), 0.0) or 0.0
+        predicted_break = safe_float(
+            metrics.get("predicted_breaking_load_design_kgf"),
+            safe_float(metrics.get("estimated_breaking_load_kgf"), 0.0),
+        ) or 0.0
+        metrics["predicted_breaking_load_kgf"] = predicted_break
+        metrics["metric_strength_to_weight"] = (
+            predicted_break / competition_mass_g
+            if competition_mass_g and competition_mass_g > 1.0e-9
+            else None
+        )
+        metrics["metric_break_margin_kgf"] = predicted_break - acceptance_min_break_kgf
+
+        # Annotate mass compliance flags first; feasibility below uses these flags.
+        assert_mass_compliant(metrics, cfg, source="evaluate_config")
+        solver_regular = self._solver_is_regular(metrics.get("solver_status"))
+        competition_mass_ok = bool(metrics.get("competition_mass_compliant", metrics.get("mass_compliant", False)))
+        stick_budget_ok = bool(metrics.get("stick_budget_compliant", True))
+        wet_glue_budget_ok = bool(metrics.get("wet_glue_budget_compliant", True))
+        min_support_ok = (
+            metrics["min_support_fs"] is None
+            or float(metrics["min_support_fs"]) >= acceptance_min_support_fs
+        )
+        min_glue_ok = (
+            metrics["min_glue_fs"] is None
+            or float(metrics["min_glue_fs"]) >= acceptance_min_glue_fs
+        )
+        min_primary_ok = float(metrics.get("min_fs_primary", 0.0) or 0.0) >= acceptance_min_primary_fs
+        min_design_ok = float(metrics.get("min_fs_design", 0.0) or 0.0) >= target_fs
+        break_ok = predicted_break >= acceptance_min_break_kgf
+
         feasible = (
-            metrics["solver_status"] == "regular"
-            and metrics["min_fs_primary"] >= target_fs
-            and metrics["mass_g"] <= max_mass
+            solver_regular
+            and competition_mass_ok
             and equilibrium_ok
-            and predicted_break >= target_load_kgf
-            and (
-                metrics["min_support_fs"] is None
-                or metrics["min_support_fs"] >= 1.0
-            )
+            and break_ok
+            and min_primary_ok
+            and min_support_ok
+            and min_glue_ok
+            and ((not use_target_hard) or min_design_ok)
+            and ((not enforce_stick_budget) or stick_budget_ok)
+            and ((not enforce_wet_glue_budget) or wet_glue_budget_ok)
         )
         metrics["feasible"] = feasible
+        metrics["solver_regular"] = solver_regular
         metrics["equilibrium_ok"] = equilibrium_ok
         metrics["equilibrium_tol_N"] = eq_tol_N
         metrics["group_min_fs"] = group_min_fs
         metrics["evaluation_warnings"] = eval_warnings
-        # Annotate with mass compliance flag for downstream consumers.
-        assert_mass_compliant(metrics, cfg, source="evaluate_config")
+        mass_val = safe_float(metrics.get("competition_mass_g", metrics.get("mass_g")), None)
+        mass_limit = safe_float(metrics.get("mass_limit_effective_g"), None)
+        if mass_val is not None and mass_limit is not None:
+            metrics["mass_limit_g"] = mass_limit
+            metrics["mass_margin_g"] = mass_limit - mass_val
+            metrics["mass_constraint_passed"] = bool(metrics.get("mass_compliant"))
+            if mass_val > mass_limit + 1.0e-6:
+                metrics["mass_violation_reason"] = (
+                    f"mass_above_effective_limit:{mass_val:.3f}>{mass_limit:.3f}"
+                )
+            else:
+                metrics["mass_violation_reason"] = ""
         return metrics
 
     @staticmethod
@@ -1065,6 +1453,38 @@ class ActiveDesignPlanner:
             "nenhuma": "none",
         }
         return alias.get(raw, raw)
+
+    @classmethod
+    def _topology_family(cls, name: Any) -> str:
+        norm = cls._normalize_topology_name(name)
+        if norm in {"pratt_symmetric"}:
+            return "pratt"
+        if norm in {"warren_symmetric"}:
+            return "warren"
+        if norm in {"warren_mid_braced"}:
+            return "warren_with_verticals"
+        if norm in {"howe", "howe_inverted"}:
+            return "howe"
+        if norm in {"k_symmetric"}:
+            return "k"
+        if norm in {"x"}:
+            return "x"
+        if norm in {"none"}:
+            return "none"
+        return norm
+
+    @classmethod
+    def _canonical_topology_label(cls, family: str) -> str:
+        mp = {
+            "pratt": "Pratt_symmetric",
+            "warren": "Warren_symmetric",
+            "warren_with_verticals": "Warren_mid_braced",
+            "howe": "Howe_inverted",
+            "k": "K_symmetric",
+            "x": "X",
+            "none": "none",
+        }
+        return mp.get(str(family), str(family))
 
     def _is_symmetry_compliant_candidate(self, cfg: Dict, candidate: Dict) -> tuple[bool, str]:
         analysis = cfg.get("analysis", {})
@@ -1155,11 +1575,44 @@ class ActiveDesignPlanner:
         member_results: List[Dict],
         member_checks: List[Dict],
     ) -> Dict[int, MemberSizingDecision]:
-        analysis = cfg.get("analysis", {})
+        analysis = cfg.get("analysis", {}) or {}
+        planner = cfg.get("planner", {}) or {}
+        local = planner.get("local_sizing", {}) or {}
         target_fs = float(analysis.get("target_min_fs", 2.0))
         min_sticks = max(1, int(analysis.get("planner_min_sticks_per_group", 1)))
         max_sticks = max(min_sticks, int(analysis.get("planner_max_sticks_per_group", 12)))
         max_by_group = analysis.get("planner_max_sticks_per_group_by_group", {}) or {}
+
+        zero_tol = float(
+            local.get(
+                "zero_force_tolerance_N",
+                cfg.get("detail_model", {}).get("near_zero_force_tolerance_N", 8.0),
+            )
+        )
+        low_ratio = float(local.get("low_force_ratio", 0.12))
+        moderate_ratio = float(local.get("moderate_force_ratio", 0.35))
+        high_ratio = float(local.get("high_force_ratio", 0.65))
+        allow_optional_removal = bool(local.get("allow_optional_member_removal", False))
+        min_structural = max(1, int(local.get("min_sticks_structural_member", 1)))
+        min_primary = max(min_structural, int(local.get("min_sticks_primary_member", 2)))
+        structural_floor_ratio = max(
+            0.0,
+            min(1.0, float(local.get("structural_floor_ratio_primary", 0.50))),
+        )
+        require_topology_after_removal = bool(
+            local.get("require_topology_validation_after_removal", True)
+        )
+        donor_fs_threshold = float(local.get("donor_fs_threshold", 3.0))
+        never_reinforce_if_fs_above = float(local.get("never_reinforce_if_fs_above", 3.0))
+        never_reinforce_tension_if_fs_above = float(
+            local.get("never_reinforce_tension_if_fs_above", 3.0)
+        )
+        allow_primary_lightening = bool(
+            local.get("allow_primary_member_lightening_if_topology_ok", True)
+        )
+        min_primary_by_group = local.get("min_sticks_primary_member_by_group", {}) or {}
+        stick_mass_g = float(cfg.get("material", {}).get("stick_mass_g", 1.4))
+        stick_len_mm = max(1.0, float(cfg.get("material", {}).get("stick_length_mm", 115.0)))
 
         def max_for(group: str) -> int:
             v = safe_float(max_by_group.get(group), None)
@@ -1167,10 +1620,22 @@ class ActiveDesignPlanner:
                 return max_sticks
             return max(min_sticks, int(v))
 
-        res_map = {int(r.get("member_id")): r for r in (member_results or []) if r.get("member_id") is not None}
-        chk_map = {int(r.get("member_id")): r for r in (member_checks or []) if r.get("member_id") is not None}
-        max_abs_n = max((abs(safe_float(r.get("N_N"), 0.0) or 0.0) for r in res_map.values()), default=0.0)
+        res_map = {
+            int(r.get("member_id")): r
+            for r in (member_results or [])
+            if r.get("member_id") is not None
+        }
+        chk_map = {
+            int(r.get("member_id")): r
+            for r in (member_checks or [])
+            if r.get("member_id") is not None
+        }
+        max_abs_n = max(
+            (abs(safe_float(r.get("N_N"), 0.0) or 0.0) for r in res_map.values()),
+            default=0.0,
+        )
         max_abs_n = max(1.0e-9, max_abs_n)
+        enforce_symmetry = bool(analysis.get("enforce_symmetry", True))
 
         primary_groups = set(
             analysis.get(
@@ -1186,72 +1651,444 @@ class ActiveDesignPlanner:
                 ],
             )
         )
-        partners = self.map_member_to_symmetry_partners(cfg, nodes, members)
+        required_groups = set(
+            local.get(
+                "required_groups",
+                [
+                    "top_chord",
+                    "bottom_chord",
+                    "support_pad",
+                    "top_transverse",
+                    "bottom_transverse",
+                ],
+            )
+        )
+        optional_groups = set(
+            local.get(
+                "optional_groups",
+                [
+                    "top_bracing",
+                    "bottom_bracing",
+                    "cross_frame_bracing",
+                    "chord_lacing",
+                ],
+            )
+        )
+        base_group_sticks = cfg.get("member_sticks_by_group", {}) or {}
 
-        decisions: Dict[int, MemberSizingDecision] = {}
+        member_by_id = {int(m.id): m for m in members}
+        partners = self.map_member_to_symmetry_partners(cfg, nodes, members)
+        orbit_by_member: Dict[int, List[int]] = {}
+        orbit_id_by_member: Dict[int, int] = {}
         for m in members:
             mid = int(m.id)
-            chk = chk_map.get(mid, {})
-            res = res_map.get(mid, {})
-            n_cur = max(1, int(getattr(m, "n_sticks", 1)))
-            n_force = abs(safe_float(res.get("N_N"), 0.0) or 0.0)
-            ratio = n_force / max_abs_n
-            fs_min = safe_float(chk.get("FS_min"), target_fs) or target_fs
-            group = str(getattr(m, "group", ""))
-            role = "primary" if group in primary_groups else "secondary"
-            mode = str(chk.get("governing_mode", "") or "")
+            if enforce_symmetry:
+                orbit = sorted(set([mid] + list(partners.get(mid, []))))
+            else:
+                orbit = [mid]
+            oid = int(min(orbit))
+            for pid in orbit:
+                orbit_by_member[pid] = orbit
+                orbit_id_by_member[pid] = oid
 
-            action = "keep"
-            n_new = n_cur
-            reason = "stable_load_band"
-            if ratio >= 0.40 or fs_min < target_fs:
-                action = "reinforce"
-                inc = 2 if (fs_min < max(1.0, 0.8 * target_fs) or ratio >= 0.7) else 1
-                n_new = min(max_for(group), n_cur + inc)
-                reason = "high_axial_ratio_or_low_fs"
-            elif ratio < 0.15 and fs_min >= target_fs * 1.6:
-                action = "lighten"
-                dec = 1 if role == "primary" else 2
-                n_new = max(1, n_cur - dec)
-                reason = "very_low_ratio_high_fs"
+        def force_band(abs_force: float, ratio: float, utilization_value: float) -> str:
+            if abs_force <= zero_tol:
+                return "near_zero"
+            if utilization_value >= 1.0:
+                return "critical"
+            if utilization_value >= 0.75:
+                return "high"
+            if utilization_value >= 0.45:
+                return "moderate"
+            if utilization_value < 0.25:
+                return "low"
+            if ratio <= max(0.01, low_ratio * 0.35):
+                return "near_zero"
+            if ratio <= low_ratio:
+                return "low"
+            return "moderate"
 
-            if role == "primary" and fs_min < target_fs and n_new == n_cur:
-                n_new = min(max_for(group), n_cur + 1)
-                action = "reinforce"
-                reason = "primary_member_guard"
+        def simplify_joint_for(force_value: float) -> str:
+            return "single_lap_tala" if force_value >= 0.0 else "single_lap"
 
-            sym_ids = partners.get(mid, [])
-            apply_ids = [mid] + sym_ids if bool(analysis.get("enforce_symmetry", True)) else [mid]
-            decisions[mid] = MemberSizingDecision(
-                member_id=mid,
-                original_group=group,
-                effective_group=group,
-                n_sticks_current=n_cur,
-                n_sticks_recommended=n_new,
-                axial_force_N=n_force,
-                axial_force_ratio=ratio,
-                FS_min=fs_min,
-                governing_mode=mode,
-                action=action,
-                reason=reason,
-                symmetry_partner_ids=sym_ids,
-                applied_to_member_ids=apply_ids,
+        def structural_floor_for_group(
+            group: str,
+            n_current: int,
+            structurally_required: bool,
+        ) -> int:
+            if not structurally_required:
+                return min_structural
+            base_n = max(1, int(base_group_sticks.get(group, n_current)))
+            floor_rel = int(math.ceil(base_n * structural_floor_ratio))
+            floor_group = safe_float(min_primary_by_group.get(group), None)
+            floor_group_i = int(floor_group) if floor_group is not None else min_primary
+            floor_n = max(floor_group_i, floor_rel)
+            if group in {"top_chord", "bottom_chord", "support_pad"}:
+                floor_n = max(floor_n, 2)
+            return min(max_for(group), max(min_structural, floor_n))
+
+        def removal_keeps_topology(orbit_ids: List[int]) -> bool:
+            trial = copy.deepcopy(cfg)
+            active_map = trial.setdefault("member_active_by_id", {})
+            for rid in orbit_ids:
+                active_map[str(int(rid))] = False
+            try:
+                t_nodes, t_members, t_supports, t_loads = self.geometry.generate(trial)
+                topo = self.topology.validate(
+                    trial,
+                    t_nodes,
+                    t_members,
+                    t_supports,
+                    t_loads,
+                    solver=self.solver if require_topology_after_removal else None,
+                )
+                return bool(topo.get("is_valid"))
+            except (TypeError, ValueError, KeyError, RuntimeError):
+                return False
+
+        decisions: Dict[int, MemberSizingDecision] = {}
+        processed_orbits: Set[int] = set()
+        for m in sorted(members, key=lambda x: int(x.id)):
+            mid = int(m.id)
+            oid = int(orbit_id_by_member.get(mid, mid))
+            if oid in processed_orbits:
+                continue
+            processed_orbits.add(oid)
+            orbit_ids = orbit_by_member.get(mid, [mid])
+            orbit_members = [member_by_id[i] for i in orbit_ids if i in member_by_id]
+            if not orbit_members:
+                continue
+
+            group = str(getattr(orbit_members[0], "group", ""))
+            abs_forces = []
+            signed_forces = []
+            utilizations = []
+            fs_values = []
+            worst_mode = ""
+            worst_mid = mid
+            for om in orbit_members:
+                rid = int(om.id)
+                res = res_map.get(rid, {})
+                chk = chk_map.get(rid, {})
+                n_val = safe_float(res.get("N_N"), 0.0) or 0.0
+                signed_forces.append(float(n_val))
+                abs_forces.append(abs(n_val))
+                util = safe_float(chk.get("utilization"), 0.0) or 0.0
+                utilizations.append(float(util))
+                fs_i = safe_float(chk.get("FS_min"), None)
+                if fs_i is not None:
+                    fs_values.append(float(fs_i))
+                    if (not worst_mode) or fs_i <= min(fs_values):
+                        worst_mode = str(chk.get("governing_mode", "") or "")
+                        worst_mid = rid
+
+            n_current = max(1, max(int(getattr(om, "n_sticks", 1)) for om in orbit_members))
+            abs_force = max(abs_forces) if abs_forces else 0.0
+            signed_force = 0.0
+            if signed_forces:
+                signed_force = max(signed_forces, key=lambda v: abs(v))
+            ratio = abs_force / max_abs_n
+            fs_min = min(fs_values) if fs_values else target_fs
+            util_max = max(utilizations) if utilizations else 0.0
+            band = force_band(abs_force, ratio, util_max)
+            orbit_length_mm = max(float(getattr(om, "L", 0.0) or 0.0) for om in orbit_members)
+
+            structurally_required = (
+                group in required_groups
+                or group in primary_groups
+                or group in {"top_chord", "bottom_chord", "support_pad"}
             )
+            can_disable = bool((group in optional_groups) and (not structurally_required))
+            structural_floor = structural_floor_for_group(
+                group,
+                n_current,
+                structurally_required,
+            )
+            target = n_current
+            action = "keep"
+            reason = "stable"
+            joint_before = "auto"
+            joint_after = joint_before
+            role_target_fs = target_fs if structurally_required else max(1.0, target_fs * 0.90)
+            if band == "near_zero":
+                role_target_fs = max(1.0, min(role_target_fs, 1.15))
+            reinforce_locked = False
+            if fs_min >= never_reinforce_if_fs_above:
+                reinforce_locked = True
+            if signed_force >= 0.0 and fs_min >= never_reinforce_tension_if_fs_above:
+                reinforce_locked = True
+
+            if band == "near_zero":
+                joint_after = simplify_joint_for(signed_force)
+                if can_disable and allow_optional_removal:
+                    candidate_disable = 0
+                    if removal_keeps_topology(orbit_ids):
+                        target = candidate_disable
+                        action = "disable"
+                        reason = "near_zero_optional_removed"
+                        joint_after = "none"
+                    else:
+                        target = structural_floor if structurally_required else min(n_current, min_structural)
+                        action = "lighten" if target < n_current else "simplify_joint"
+                        reason = "near_zero_optional_removal_rejected"
+                else:
+                    target = structural_floor if structurally_required else min(n_current, min_structural)
+                    if target > n_current:
+                        action = "reinforce"
+                        reason = "near_zero_but_structural_floor"
+                    else:
+                        action = "lighten" if target < n_current else "simplify_joint"
+                        reason = "near_zero_keep_min_structural"
+            elif fs_min < 1.0 or util_max >= 1.0:
+                target = min(max_for(group), n_current + 1)
+                action = "reinforce" if target > n_current else "keep"
+                reason = "critical_utilization"
+            elif fs_min < role_target_fs or util_max >= 0.75:
+                if reinforce_locked:
+                    action = "keep"
+                    reason = "reinforcement_locked_high_fs"
+                else:
+                    target = min(max_for(group), n_current + 1)
+                    action = "reinforce" if target > n_current else "keep"
+                    reason = "high_utilization_or_low_fs"
+            elif band == "low":
+                if (
+                    fs_min >= donor_fs_threshold
+                    and util_max < 0.35
+                    and n_current > structural_floor
+                ):
+                    if structurally_required and not allow_primary_lightening:
+                        action = "keep"
+                        reason = "primary_lightening_disabled"
+                    else:
+                        target = max(structural_floor, n_current - 1)
+                        action = "lighten" if target < n_current else "keep"
+                        reason = "mass_donor_candidate"
+                elif fs_min >= target_fs * 1.25 and n_current > structural_floor:
+                    target = max(structural_floor, n_current - 1)
+                    action = "lighten"
+                    reason = "low_force_high_fs_relief"
+            else:
+                action = "keep"
+                reason = "adequate_utilization"
+
+            if structurally_required and target < structural_floor:
+                target = structural_floor
+                if action == "disable":
+                    action = "lighten"
+                    reason += "|structural_guard"
+
+            for orbit_mid in orbit_ids:
+                om = member_by_id.get(int(orbit_mid))
+                if om is None:
+                    continue
+                res = res_map.get(int(orbit_mid), {})
+                chk = chk_map.get(int(orbit_mid), {})
+                n_val = safe_float(res.get("N_N"), 0.0) or 0.0
+                fs_val = safe_float(chk.get("FS_min"), fs_min) or fs_min
+                util_val = safe_float(chk.get("utilization"), util_max) or util_max
+                old_n = max(1, int(getattr(om, "n_sticks", 1)))
+                old_mass = old_n * orbit_length_mm / stick_len_mm * stick_mass_g
+                new_mass = max(0, int(target)) * orbit_length_mm / stick_len_mm * stick_mass_g
+                delta_mass = new_mass - old_mass
+                new_util_est = util_val * (old_n / max(1, int(target))) if int(target) > 0 else util_val * 2.0
+                can_be_donor = (
+                    fs_val >= donor_fs_threshold
+                    and util_val < 0.35
+                    and abs(n_val) <= max(zero_tol * 4.0, 0.2 * max_abs_n)
+                    and int(target) <= old_n
+                )
+                donor_rank = (
+                    fs_val / max(0.05, util_val + 0.05)
+                    if can_be_donor
+                    else 0.0
+                )
+                reinforce_eff = (
+                    ((util_val - new_util_est) / max(0.05, delta_mass))
+                    if action == "reinforce" and delta_mass > 0
+                    else 0.0
+                )
+                decisions[int(orbit_mid)] = MemberSizingDecision(
+                    member_id=int(orbit_mid),
+                    original_group=group,
+                    effective_group=group,
+                    symmetry_orbit_id=oid,
+                    quarter_member_id=oid,
+                    n_sticks_current=old_n,
+                    n_sticks_recommended=int(target),
+                    force_N=float(n_val),
+                    axial_force_N=float(abs(n_val)),
+                    abs_force_N=float(abs(n_val)),
+                    axial_force_ratio=float(abs(n_val) / max_abs_n),
+                    force_band=band,
+                    utilization=float(util_val),
+                    FS_min=float(fs_val),
+                    governing_mode=str(chk.get("governing_mode", worst_mode) or worst_mode),
+                    action=action,
+                    reason=f"{reason}|orbit={oid}|worst_member={worst_mid}",
+                    is_structurally_required=bool(structurally_required),
+                    can_disable=bool(can_disable),
+                    joint_before=joint_before,
+                    joint_after=joint_after,
+                    symmetry_partner_ids=[i for i in orbit_ids if int(i) != int(orbit_mid)],
+                    applied_to_member_ids=list(orbit_ids),
+                    old_mass_est_g=float(old_mass),
+                    new_mass_est_g=float(new_mass),
+                    delta_mass_g=float(delta_mass),
+                    old_utilization=float(util_val),
+                    new_estimated_utilization=float(new_util_est),
+                    estimated_capacity_gain_ratio=float(max(1, int(target)) / max(1, old_n)),
+                    governing_mode_before=str(chk.get("governing_mode", worst_mode) or worst_mode),
+                    governing_mode_after_est=str(chk.get("governing_mode", worst_mode) or worst_mode),
+                    can_be_mass_donor=bool(can_be_donor),
+                    donor_rank=float(donor_rank),
+                    reinforcement_efficiency_score=float(reinforce_eff),
+                )
+
+        # Mass donor pass: reduce conservative donors before reinforcing remaining criticals.
+        orbit_reps: Dict[int, MemberSizingDecision] = {}
+        for d in decisions.values():
+            orbit_reps.setdefault(int(d.symmetry_orbit_id), d)
+
+        donor_reps = sorted(
+            [
+                d for d in orbit_reps.values()
+                if d.can_be_mass_donor and d.n_sticks_recommended > 0
+            ],
+            key=lambda d: d.donor_rank,
+            reverse=True,
+        )
+        critical_reps = sorted(
+            [
+                d for d in orbit_reps.values()
+                if (d.FS_min < 1.0 or d.utilization >= 0.75)
+                and d.action != "reinforce"
+            ],
+            key=lambda d: (d.FS_min, -d.utilization),
+        )
+
+        donor_idx = 0
+        for crit in critical_reps:
+            while donor_idx < len(donor_reps):
+                donor = donor_reps[donor_idx]
+                donor_floor = structural_floor_for_group(
+                    donor.original_group,
+                    donor.n_sticks_current,
+                    donor.is_structurally_required,
+                )
+                if donor.n_sticks_recommended > donor_floor:
+                    donor.n_sticks_recommended -= 1
+                    donor.action = "lighten"
+                    donor.reason += "|donor_pass_reduced"
+                    crit.n_sticks_recommended = min(
+                        max_for(crit.original_group),
+                        max(crit.n_sticks_recommended, crit.n_sticks_current) + 1,
+                    )
+                    crit.action = "reinforce"
+                    crit.reason += "|donor_pass_reallocated"
+                    break
+                donor_idx += 1
+
+        # Repropagate per-orbit adjustments to all partner members.
+        for d in orbit_reps.values():
+            for mid in d.applied_to_member_ids:
+                if int(mid) in decisions:
+                    decisions[int(mid)].n_sticks_recommended = int(d.n_sticks_recommended)
+                    decisions[int(mid)].action = d.action
+                    decisions[int(mid)].reason = d.reason
         return decisions
+
+    def select_member_design_option(
+        self,
+        cfg: Dict,
+        member: Member,
+        result: Dict[str, Any] | None,
+        check: Dict[str, Any] | None,
+        role: str,
+        mass_context: Dict[str, Any] | None = None,
+    ) -> MemberSizingDecision:
+        """Select a local discrete option for one member using utilization-driven rules."""
+        check = check or {}
+        result = result or {}
+        mass_context = mass_context or {}
+        n_current = max(1, int(getattr(member, "n_sticks", 1)))
+        fs_min = safe_float(check.get("FS_min"), 9.9) or 9.9
+        util = safe_float(check.get("utilization"), 0.0) or 0.0
+        n_val = safe_float(result.get("N_N"), 0.0) or 0.0
+        target_fs = float(cfg.get("analysis", {}).get("target_min_fs", 2.0))
+        donor_fs = float(
+            cfg.get("planner", {}).get("local_sizing", {}).get("donor_fs_threshold", 3.0)
+        )
+        can_donor = fs_min >= donor_fs and util < 0.35
+        can_reinforce = fs_min < target_fs or util >= 0.75
+        target_n = n_current + 1 if can_reinforce else (max(1, n_current - 1) if can_donor else n_current)
+        action = "reinforce" if target_n > n_current else ("lighten" if target_n < n_current else "keep")
+        stick_mass = float(cfg.get("material", {}).get("stick_mass_g", 1.4))
+        stick_len = max(1.0, float(cfg.get("material", {}).get("stick_length_mm", 115.0)))
+        old_mass = n_current * float(member.L) / stick_len * stick_mass
+        new_mass = target_n * float(member.L) / stick_len * stick_mass
+        delta = new_mass - old_mass
+        new_util = util * (n_current / max(1, target_n))
+        eff = ((util - new_util) / max(0.05, delta)) if action == "reinforce" and delta > 0 else 0.0
+        return MemberSizingDecision(
+            member_id=int(member.id),
+            original_group=str(member.group),
+            effective_group=str(member.group),
+            symmetry_orbit_id=int(member.id),
+            quarter_member_id=int(member.id),
+            n_sticks_current=n_current,
+            n_sticks_recommended=int(target_n),
+            force_N=float(n_val),
+            axial_force_N=float(abs(n_val)),
+            abs_force_N=float(abs(n_val)),
+            axial_force_ratio=safe_float(mass_context.get("axial_force_ratio"), 0.0) or 0.0,
+            force_band="critical" if util >= 1.0 else ("high" if util >= 0.75 else "moderate"),
+            utilization=float(util),
+            FS_min=float(fs_min),
+            governing_mode=str(check.get("governing_mode", "") or ""),
+            action=action,
+            reason="single_member_option_search",
+            is_structurally_required=bool(role in {"primary", "support"}),
+            can_disable=False,
+            joint_before="auto",
+            joint_after="auto",
+            symmetry_partner_ids=[],
+            applied_to_member_ids=[int(member.id)],
+            old_mass_est_g=float(old_mass),
+            new_mass_est_g=float(new_mass),
+            delta_mass_g=float(delta),
+            old_utilization=float(util),
+            new_estimated_utilization=float(new_util),
+            estimated_capacity_gain_ratio=float(target_n / max(1, n_current)),
+            governing_mode_before=str(check.get("governing_mode", "") or ""),
+            governing_mode_after_est=str(check.get("governing_mode", "") or ""),
+            can_be_mass_donor=bool(can_donor),
+            donor_rank=float(fs_min / max(0.05, util + 0.05)) if can_donor else 0.0,
+            reinforcement_efficiency_score=float(eff),
+        )
 
     def apply_member_sizing_plan(self, cfg: Dict, plan: Dict[int, MemberSizingDecision]) -> Dict:
         out = copy.deepcopy(cfg)
         by_id = out.setdefault("member_sticks_by_id", {})
-        by_group = out.setdefault("member_sticks_by_group", {})
+        active_map = out.setdefault("member_active_by_id", {})
+        disabled = {
+            int(v)
+            for v in (out.get("disabled_member_ids", []) or [])
+            if str(v).strip()
+        }
         for d in plan.values():
-            target = max(1, int(d.n_sticks_recommended))
+            target = int(d.n_sticks_recommended)
             for mid in d.applied_to_member_ids:
-                by_id[str(int(mid))] = int(target)
-            cur_group = int(by_group.get(d.effective_group, d.n_sticks_current))
-            if d.action == "reinforce":
-                by_group[d.effective_group] = max(cur_group, target)
-            elif d.action == "lighten":
-                by_group[d.effective_group] = max(1, min(cur_group, target))
+                mid_int = int(mid)
+                if target <= 0 or str(d.action) == "disable":
+                    active_map[str(mid_int)] = False
+                    disabled.add(mid_int)
+                    by_id.pop(str(mid_int), None)
+                else:
+                    active_map[str(mid_int)] = True
+                    by_id[str(mid_int)] = int(max(1, target))
+                    disabled.discard(mid_int)
+        out["disabled_member_ids"] = sorted(disabled)
         return self.config.normalize(out)
 
     @staticmethod
@@ -1261,6 +2098,8 @@ class ActiveDesignPlanner:
             "total_members": len(rows),
             "reinforce": sum(1 for r in rows if r.get("action") == "reinforce"),
             "lighten": sum(1 for r in rows if r.get("action") == "lighten"),
+            "disable": sum(1 for r in rows if r.get("action") == "disable"),
+            "simplify_joint": sum(1 for r in rows if r.get("action") == "simplify_joint"),
             "keep": sum(1 for r in rows if r.get("action") == "keep"),
             "rows": rows,
         }
@@ -1338,6 +2177,21 @@ class ActiveDesignPlanner:
             internal_vals = [v for v in internal_vals if self._normalize_topology_name(v) != "none"] or ["X"]
             top_chord_vals = [v for v in top_chord_vals if self._normalize_topology_name(v) != "none"] or ["X"]
             bottom_chord_vals = [v for v in bottom_chord_vals if self._normalize_topology_name(v) != "none"] or ["X"]
+            panel_min = float(planner.get("panel_min_mm", cfg["bridge"]["panel_mm"]))
+            panel_max = float(planner.get("panel_max_mm", cfg["bridge"]["panel_mm"]))
+            symmetry_panel_vals: List[float] = []
+            for span_v in span_vals:
+                symmetry_panel_vals.extend(
+                    self._symmetry_panel_values(
+                        span_v,
+                        panel_min,
+                        panel_max,
+                        n_panels_min=6,
+                        n_panels_max=24,
+                    )
+                )
+            # Evita colapso de busca em um único valor de painel (ex.: 60 mm para span=1200).
+            panel_vals = sorted(set(symmetry_panel_vals)) or panel_vals
         reinforce_vals = list(self._reinforcement_profiles().keys())
         detail = cfg.get("detail_model", {})
         tension_models = list(detail.get("joint_model_rank_tension", [])) or ["double_lap_reinforced", "double_lap", "single_lap_tala", "single_lap", "butt_plain"]
@@ -1355,6 +2209,39 @@ class ActiveDesignPlanner:
         t_cap = float(cfg.get("material", {}).get("tension_capacity_per_stick_kgf", 72.0))
         c_cap = max(1.0e-6, float(cfg.get("material", {}).get("compression_capacity_two_sticks_kgf", 11.0)) / 2.0)
         tc_ratio = t_cap / c_cap
+        prefer_by_material = bool(planner.get("prefer_truss_by_material", True))
+
+        # Normaliza aliases e reduz redundância por família.
+        family_order = [
+            "pratt",
+            "warren",
+            "warren_with_verticals",
+            "howe",
+            "k",
+            "x",
+        ]
+        seen_family = set()
+        normalized_side: List[str] = []
+        for raw in side_vals:
+            fam = self._topology_family(raw)
+            if fam in seen_family:
+                continue
+            seen_family.add(fam)
+            normalized_side.append(self._canonical_topology_label(fam))
+        side_vals = normalized_side or side_vals
+
+        # Pré-filtro por material antes da S0.
+        if prefer_by_material and tc_ratio >= 6.0:
+            side_vals = [
+                v
+                for v in side_vals
+                if self._topology_family(v) not in {"howe"}
+            ]
+            side_vals = side_vals or ["Pratt_symmetric", "Warren_symmetric"]
+        else:
+            # Mantém ordem de famílias conhecida para evitar duplicidade de aliases.
+            fam_to_value = {self._topology_family(v): v for v in side_vals}
+            side_vals = [fam_to_value[f] for f in family_order if f in fam_to_value] or side_vals
 
         def weighted_choice(options: List[str], weights_map: Dict[str, float], default_w: float = 1.0) -> str:
             ws = [max(0.01, float(weights_map.get(o, default_w))) for o in options]
@@ -1362,7 +2249,17 @@ class ActiveDesignPlanner:
 
         side_weights = {o: 1.0 for o in side_vals}
         if tc_ratio >= 6.0:
-            side_weights.update({"Pratt": 3.2, "Parker": 2.2, "Baltimore": 2.2, "Warren": 1.2, "K": 1.4, "Howe": 0.55})
+            side_weights.update(
+                {
+                    "Pratt_symmetric": 3.2,
+                    "Warren_symmetric": 1.2,
+                    "Warren_mid_braced": 1.4,
+                    "K_symmetric": 1.3,
+                    "X": 1.0,
+                    "Howe_inverted": 0.4,
+                    "Howe": 0.4,
+                }
+            )
 
         top_weights = {o: 1.0 for o in top_vals}
         top_weights.update({"triangular_peak": 1.8, "parker_plateau": 1.6, "shallow_arch": 1.3, "flat": 0.7})
@@ -1374,14 +2271,30 @@ class ActiveDesignPlanner:
         chord_weights.update({"X": 2.2, "Warren": 1.6, "Pratt": 1.25, "K": 1.25, "N": 1.1, "Howe": 0.9, "none": 0.4})
 
         reinforce_weights = {o: 1.0 for o in reinforce_vals}
-        reinforce_weights.update({
-            "balanced": 1.8,
-            "strong_top": 2.1,
-            "strong": 1.7,
-            "ultra_compression": 1.5,
-            "ultra_pratt": 2.2 if tc_ratio >= 6.0 else 1.2,
-            "light": 0.4,
-        })
+        mass_limit = float(planner.get("max_bridge_mass_g", cfg.get("material", {}).get("mass_limit_g", 1000.0)))
+        if mass_limit <= 1200.0:
+            # Quando o orçamento de massa é apertado, favorece perfis leves/balanceados.
+            reinforce_weights.update(
+                {
+                    "light": 1.4,
+                    "balanced": 2.2,
+                    "strong_top": 1.1,
+                    "strong": 0.8,
+                    "ultra_compression": 0.45,
+                    "ultra_pratt": 0.60 if tc_ratio >= 6.0 else 0.45,
+                }
+            )
+        else:
+            reinforce_weights.update(
+                {
+                    "balanced": 1.8,
+                    "strong_top": 2.1,
+                    "strong": 1.7,
+                    "ultra_compression": 1.5,
+                    "ultra_pratt": 2.2 if tc_ratio >= 6.0 else 1.2,
+                    "light": 0.4,
+                }
+            )
         tension_weights = {m: max(0.2, 1.0 + 0.08 * (len(tension_models) - i)) for i, m in enumerate(tension_models)}
         compression_weights = {m: max(0.2, 1.0 + 0.12 * (len(compression_models) - i)) for i, m in enumerate(compression_models)}
 
@@ -1427,13 +2340,22 @@ class ActiveDesignPlanner:
         for side in side_vals:
             for top in top_vals[:2]:
                 for span in (span_vals[0], span_vals[-1]):
+                    panel_anchor_vals = panel_vals
+                    if enforce_symmetry:
+                        panel_anchor_vals = self._symmetry_panel_values(
+                            span,
+                            float(planner.get("panel_min_mm", cfg["bridge"]["panel_mm"])),
+                            float(planner.get("panel_max_mm", cfg["bridge"]["panel_mm"])),
+                            n_panels_min=6,
+                            n_panels_max=24,
+                        ) or panel_vals
                     for height in (height_vals[0], height_vals[-1]):
                         add_candidate(
                             {
                                 "span_mm": span,
                                 "width_mm": width_vals[len(width_vals) // 2],
                                 "center_height_mm": height,
-                                "panel_mm": panel_vals[len(panel_vals) // 2],
+                                "panel_mm": panel_anchor_vals[len(panel_anchor_vals) // 2],
                                 "side_truss_type": side,
                                 "top_profile": top,
                                 "internal_truss_type": internal_vals[0],
@@ -1455,11 +2377,21 @@ class ActiveDesignPlanner:
                 break
 
             span_chosen = rng.choice(span_vals)
-            panel_chosen = rng.choice(panel_vals)
+            if enforce_symmetry:
+                panel_opts = self._symmetry_panel_values(
+                    span_chosen,
+                    float(planner.get("panel_min_mm", cfg["bridge"]["panel_mm"])),
+                    float(planner.get("panel_max_mm", cfg["bridge"]["panel_mm"])),
+                    n_panels_min=6,
+                    n_panels_max=24,
+                ) or panel_vals
+            else:
+                panel_opts = panel_vals
+            panel_chosen = rng.choice(panel_opts)
             if enforce_symmetry:
                 valid_panels = [
                     p
-                    for p in panel_vals
+                    for p in panel_opts
                     if abs((span_chosen / max(1.0, p)) - round(span_chosen / max(1.0, p))) <= 1.0e-6
                     and int(round(span_chosen / max(1.0, p))) % 2 == 0
                 ]
@@ -1526,16 +2458,42 @@ class ActiveDesignPlanner:
             "equilibrium_error_N": metrics.get("equilibrium_error_N"),
             "min_fs_primary": metrics.get("min_fs_primary"),
             "min_fs_all": metrics.get("min_fs_all"),
+            "min_fs_all_raw": metrics.get("min_fs_all_raw"),
+            "min_fs_design": metrics.get("min_fs_design"),
             "min_support_fs": metrics.get("min_support_fs"),
-            "mass_g": metrics.get("mass_g"),
+            "min_glue_fs": metrics.get("min_glue_fs"),
+            "mass_g": metrics.get("competition_mass_g", metrics.get("mass_g")),
+            "competition_mass_g": metrics.get("competition_mass_g", metrics.get("mass_g")),
+            "installed_stick_mass_g": metrics.get("installed_stick_mass_g"),
+            "wet_glue_mass_g": metrics.get("wet_glue_mass_g"),
+            "cured_glue_mass_g": metrics.get("cured_glue_mass_g"),
+            "assembly_procurement_mass_g": metrics.get("assembly_procurement_mass_g"),
+            "mass_limit_g": metrics.get("mass_limit_effective_g"),
+            "mass_margin_g": metrics.get("mass_margin_g"),
+            "mass_constraint_passed": metrics.get("mass_compliant"),
+            "competition_mass_compliant": metrics.get("competition_mass_compliant"),
+            "stick_budget_compliant": metrics.get("stick_budget_compliant"),
+            "wet_glue_budget_compliant": metrics.get("wet_glue_budget_compliant"),
+            "mass_violation_reason": metrics.get("mass_violation_reason"),
             "quick_mass_g": metrics.get("quick_mass_g"),
             "estimated_sticks": metrics.get("estimated_sticks"),
-            "predicted_breaking_load_kgf": metrics.get("estimated_breaking_load_kgf"),
+            "predicted_breaking_load_kgf": metrics.get(
+                "predicted_breaking_load_kgf",
+                metrics.get("estimated_breaking_load_kgf"),
+            ),
+            "predicted_breaking_load_primary_kgf": metrics.get("predicted_breaking_load_primary_kgf"),
+            "predicted_breaking_load_all_kgf": metrics.get("predicted_breaking_load_all_kgf"),
+            "predicted_breaking_load_design_kgf": metrics.get("predicted_breaking_load_design_kgf"),
+            "metric_strength_to_weight": metrics.get("metric_strength_to_weight"),
+            "metric_break_margin_kgf": metrics.get("metric_break_margin_kgf"),
             "inactive_support_count": metrics.get("inactive_support_count"),
+            "inactive_tension_only_member_count": metrics.get("inactive_tension_only_member_count"),
             "critical_members": metrics.get("critical_members"),
             "critical_groups": critical_groups,
             "glue_mass_g": metrics.get("glue_mass_g"),
             "weak_glue_joints": metrics.get("weak_glue_joints"),
+            "quarter_model_used": metrics.get("quarter_model_used"),
+            "quarter_model_fallback_reason": metrics.get("quarter_model_fallback_reason"),
             "config": cfg,
         }
         return row
@@ -1547,6 +2505,71 @@ class ActiveDesignPlanner:
             key=lambda r: safe_float(r.get("score"), -1.0e99) or -1.0e99,
             reverse=True,
         )
+
+    def _candidate_quick_merit(self, cfg: Dict, candidate: Dict) -> float:
+        span = max(1.0, float(candidate.get("span_mm", cfg.get("bridge", {}).get("span_mm", 1200.0))))
+        height = max(1.0, float(candidate.get("center_height_mm", cfg.get("bridge", {}).get("center_height_mm", 250.0))))
+        panel = max(1.0, float(candidate.get("panel_mm", cfg.get("bridge", {}).get("panel_mm", 100.0))))
+        hs = height / span
+        ph = panel / height
+        side = self._topology_family(candidate.get("side_truss_type"))
+        top = str(candidate.get("top_profile", "")).lower()
+        profile = str(candidate.get("reinforcement_profile", "balanced")).lower()
+
+        score = 0.0
+        score += 2.2 * max(0.0, min(1.0, (hs - 0.12) / 0.20))
+        score += 1.2 * max(0.0, min(1.0, (2.2 - ph) / 1.5))
+        score += {
+            "ultra_pratt": 1.3,
+            "ultra_compression": 1.1,
+            "strong_top": 0.8,
+            "strong": 0.7,
+            "balanced": 0.5,
+            "light": -0.8,
+        }.get(profile, 0.0)
+        score += {
+            "pratt": 0.9,
+            "warren_with_verticals": 0.5,
+            "k": 0.4,
+            "warren": 0.25,
+            "x": 0.2,
+            "howe": -0.4,
+        }.get(side, 0.0)
+        score += {
+            "triangular_peak": 0.55,
+            "parker_plateau": 0.45,
+            "shallow_arch": 0.30,
+            "flat": -0.35,
+        }.get(top, 0.0)
+        return float(score)
+
+    def _select_stage1_shortlist(self, cfg: Dict, candidates: List[Dict], max_items: int) -> List[Dict]:
+        if len(candidates) <= max_items:
+            return list(candidates)
+
+        # Mantém diversidade por família de treliça lateral.
+        buckets: Dict[str, List[tuple[float, Dict]]] = {}
+        for cand in candidates:
+            fam = self._topology_family(cand.get("side_truss_type"))
+            buckets.setdefault(fam, []).append((self._candidate_quick_merit(cfg, cand), cand))
+        for fam in list(buckets.keys()):
+            buckets[fam].sort(key=lambda t: t[0], reverse=True)
+
+        chosen: List[Dict] = []
+        families = sorted(buckets.keys())
+        while len(chosen) < max_items:
+            progressed = False
+            for fam in families:
+                if len(chosen) >= max_items:
+                    break
+                if not buckets[fam]:
+                    continue
+                _, cand = buckets[fam].pop(0)
+                chosen.append(cand)
+                progressed = True
+            if not progressed:
+                break
+        return chosen[:max_items]
 
     @staticmethod
     def _mutate_sticks(
@@ -1745,11 +2768,20 @@ class ActiveDesignPlanner:
         stick_mass = float(material.get("stick_mass_g", 1.4))
         detail = cfg.get("detail_model", {})
         waste = float(detail.get("construction_waste_factor", 0.08))
-        fast_mass_scale = max(0.75, min(1.05, float(detail.get("fast_mass_scale", 0.90))))
+        fast_mass_scale = max(0.90, min(1.25, float(detail.get("fast_mass_scale", 1.00))))
         # Aproximação rápida alinhada ao detalhamento: sem reserva fixa de cola.
         approx_mass = approx_sticks * stick_mass * (1.0 + waste) * fast_mass_scale
         mass_limit = float(effective_mass_limit_g(cfg))
-        if approx_mass > mass_limit * 1.35:
+        analysis = cfg.get("analysis", {}) or {}
+        mass_factor_cfg = safe_float(analysis.get("planner_prefilter_mass_factor"), None)
+        strict_mass = bool(analysis.get("strict_mass_acceptance", True))
+        mass_factor = (
+            float(mass_factor_cfg)
+            if mass_factor_cfg is not None
+            else (1.18 if strict_mass else 1.35)
+        )
+        mass_factor = max(1.02, min(2.0, mass_factor))
+        if approx_mass > mass_limit * mass_factor:
             return False, "PF8_massa_preliminar_excessiva"
 
         # Filtro mecânico rápido para compressão no banzo superior:
@@ -1782,6 +2814,24 @@ class ActiveDesignPlanner:
         right_overhang = abs(float(bridge.get("right_support_overhang_mm", 100.0)))
         if left_overhang > 100.0 or right_overhang > 100.0:
             return False, "PF11_apoio_excede_100mm"
+
+        # PF12 pode ser caro (gera/valida malha completa). Mantemos opcional
+        # para acelerar S0/S1; etapas posteriores ainda validam via solver/detalhamento.
+        analysis = cfg.get("analysis", {})
+        if bool(analysis.get("planner_prefilter_topology_check", False)):
+            try:
+                topo_cfg = self._apply_candidate_geometry(cfg, candidate)
+                profile = str(candidate.get("reinforcement_profile", "balanced"))
+                self._apply_reinforcement_profile(topo_cfg, profile)
+                topo_cfg = self.config.normalize(topo_cfg)
+                t_nodes, t_members, t_supports, t_loads = self.geometry.generate(topo_cfg)
+                topo = self.topology.validate(topo_cfg, t_nodes, t_members, t_supports, t_loads)
+                if not bool(topo.get("is_valid")):
+                    errors = topo.get("errors", []) or []
+                    first_error = str(errors[0]) if errors else "unknown"
+                    return False, f"PF12_topologia_invalida:{first_error}"
+            except (TypeError, ValueError, KeyError, RuntimeError) as exc:
+                return False, f"PF12A_topology_check_error:{exc!r}"
 
         return True, "OK"
 
@@ -1932,6 +2982,37 @@ class ActiveDesignPlanner:
         log_callback: Callable[[str], None] | None = None,
         debug_logger: Any | None = None,
     ) -> Dict:
+        base = self.config.normalize(cfg)
+        mode = str((base.get("planner_pipeline", {}) or {}).get("mode", "staged_fidelity_funnel")).strip().lower()
+        funnel_enabled = bool(base.get("analysis", {}).get("staged_fidelity_funnel_enabled", True))
+
+        if funnel_enabled and mode == "staged_fidelity_funnel":
+            planner = StagedFidelityFunnelPlanner(self)
+            return planner.run(
+                base,
+                out_dir,
+                progress_callback=progress_callback,
+                log_callback=log_callback,
+                debug_logger=debug_logger,
+            )
+
+        return self._run_legacy(
+            base,
+            out_dir,
+            progress_callback=progress_callback,
+            log_callback=log_callback,
+            debug_logger=debug_logger,
+        )
+
+    def _run_legacy(
+        self,
+        cfg: Dict,
+        out_dir: str | Path,
+        *,
+        progress_callback: Callable[[float, str], None] | None = None,
+        log_callback: Callable[[str], None] | None = None,
+        debug_logger: Any | None = None,
+    ) -> Dict:
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
 
@@ -1974,6 +3055,18 @@ class ActiveDesignPlanner:
         stage2a_top_k = int(analysis.get("planner_stage2a_top_k", 220))
         stage2b_top_k = int(analysis.get("planner_stage2b_top_k", 80))
         stage3_top_k = int(analysis.get("planner_stage3_top_k", 6))
+        stage2_seed_cap = max(
+            1,
+            int(analysis.get("planner_stage2_seed_cap", min(stage1_top_k, 12))),
+        )
+        stage1_eval_cap = max(
+            stage1_top_k,
+            int(analysis.get("planner_stage1_eval_cap", min(stage1_n, 180))),
+        )
+        stage2b_eval_cap = max(
+            stage2_top_k,
+            int(analysis.get("planner_stage2b_eval_cap", min(stage2b_top_k, 60))),
+        )
         worker_count = self._worker_count(analysis)
 
         stage1_rows: List[Dict] = []
@@ -2046,6 +3139,17 @@ class ActiveDesignPlanner:
             f"S0 filtros iniciais: aprovadas={len(filtered_candidates)} | "
             f"descartadas={len(discarded_rows)}."
         )
+        if len(filtered_candidates) > stage1_eval_cap:
+            filtered_candidates = self._select_stage1_shortlist(
+                base,
+                filtered_candidates,
+                stage1_eval_cap,
+            )
+            emit_log(
+                "S0 shortlist rápido aplicado: "
+                f"S1 avaliará {len(filtered_candidates)} candidatos "
+                f"(cap={stage1_eval_cap})."
+            )
         prefilter_discard_count = len(discarded_rows)
         for reason, qty in sorted(prefilter_discarded_by_reason.items(), key=lambda kv: kv[1], reverse=True):
             emit_log(f"  - {reason}: {qty}")
@@ -2066,7 +3170,7 @@ class ActiveDesignPlanner:
             dbg("s1_solver_finished", stage="s1", candidate_id=f"S1-{idx:04d}", metrics={"solver_status": metrics.get("solver_status"), "score": metrics.get("score")})
             row = self._stage_row("s1", idx, cand, metrics, vcfg)
             if (
-                metrics.get("solver_status") != "regular"
+                (not self._solver_is_regular(metrics.get("solver_status")))
                 and (safe_float(metrics.get("min_fs_primary"), 0.0) or 0.0) < 0.20
             ):
                 row["discard_reason"] = "PF12_solver_irregular_fs_extremamente_baixo"
@@ -2106,10 +3210,11 @@ class ActiveDesignPlanner:
 
         stage1_rows = self._sort_rows(stage1_rows)
         stage1_top = stage1_rows[:max(1, stage1_top_k)]
+        stage1_top_for_s2 = stage1_top[:stage2_seed_cap]
         emit_log(
             f"S1 concluída: avaliadas={len(filtered_candidates)} | "
             f"descartadas_pós_solver={s1_discard_post_solver} | válidas={len(stage1_rows)} | "
-            f"selecionadas para S2={len(stage1_top)}"
+            f"selecionadas para S2={len(stage1_top_for_s2)} (de {len(stage1_top)} do top S1)"
         )
         if s1_discard_post_solver:
             emit_log("  - PF12_solver_irregular_fs_extremamente_baixo: " + str(s1_discard_post_solver))
@@ -2124,7 +3229,7 @@ class ActiveDesignPlanner:
         s2a_discard_mass = 0
         s2a_discard_no_gain = 0
 
-        for seed_row in stage1_top:
+        for seed_row in stage1_top_for_s2:
             seed_cfg = self.config.normalize(seed_row["config"])
             seed_metrics = self._evaluate_config(seed_cfg, include_detail=False)
             seed_base = self._solve_and_check_base(seed_cfg)
@@ -2215,6 +3320,8 @@ class ActiveDesignPlanner:
         s2a_preselected = sorted(s2a_preselected, key=lambda t: t[0], reverse=True)
         if len(s2a_preselected) > stage2a_top_k:
             s2a_preselected = s2a_preselected[:stage2a_top_k]
+        if len(s2a_preselected) > stage2b_eval_cap:
+            s2a_preselected = s2a_preselected[:stage2b_eval_cap]
         emit_log(
             f"S2A concluída: geradas={s2_generated_variants} | aprovadas_rapido={len(s2a_preselected)} | "
             f"desc_massa={s2a_discard_mass} | desc_sem_ganho={s2a_discard_no_gain}"
@@ -2430,7 +3537,11 @@ class ActiveDesignPlanner:
         pick_pool = stage4_rows or stage3_rows or stage2_rows or stage1_rows
         feasible = [r for r in pick_pool if r.get("feasible")]
         planner_cfg = base.get("planner", {})
-        strict_mass = bool(analysis.get("strict_mass_acceptance", True))
+        allow_infeasible_recommendation = bool(
+            analysis.get("planner_allow_infeasible_recommendation", False)
+        )
+        # Restrição dura: solução recomendada nunca pode exceder o limite de massa.
+        strict_mass = True
         # use global effective mass limit here instead of mixing planner and material limits
         max_mass = effective_mass_limit_g(base)
         mass_limited_pool = [
@@ -2457,7 +3568,13 @@ class ActiveDesignPlanner:
                 ),
             )[0]
         else:
-            if strict_mass and not mass_limited_pool:
+            if not allow_infeasible_recommendation:
+                best = None
+                emit_log(
+                    "Nenhuma proposta viável foi encontrada. "
+                    "Fallback para configuração inviável desativado."
+                )
+            elif strict_mass and not mass_limited_pool:
                 best = None
                 emit_log("Nenhuma proposta ficou dentro do limite de massa. Resultado não aceito.")
             else:
@@ -2489,6 +3606,23 @@ class ActiveDesignPlanner:
         GeometryService.write_csv(out / "active_stage4_trace.csv", self._for_csv(stage4_trace_rows))
         GeometryService.write_csv(out / "active_stage4.csv", self._for_csv(stage4_rows))
         GeometryService.write_csv(out / "active_prefilter_discarded.csv", discarded_rows)
+        GeometryService.write_csv(out / "mass_reallocation_trace.csv", self._for_csv(stage4_trace_rows))
+        donor_actions = [
+            r for r in self._for_csv(stage4_trace_rows)
+            if "adaptive_actions" in r and any(k in str(r.get("adaptive_actions", "")).lower() for k in ["alívio", "alivio", "redução", "reducao", "lighten"])
+        ]
+        critical_actions = [
+            r for r in self._for_csv(stage4_trace_rows)
+            if "adaptive_actions" in r and any(k in str(r.get("adaptive_actions", "")).lower() for k in ["refor", "reinforce"])
+        ]
+        rejected_repairs = [
+            r for r in (discarded_rows or [])
+            if str(r.get("stage", "")).startswith("s4")
+            or "s4" in str(r.get("discard_reason", "")).lower()
+        ]
+        GeometryService.write_csv(out / "donor_members.csv", donor_actions)
+        GeometryService.write_csv(out / "critical_repair_actions.csv", critical_actions)
+        GeometryService.write_csv(out / "rejected_repair_attempts.csv", rejected_repairs)
         GeometryService.write_csv(
             out / "active_candidates_all.csv",
             self._for_csv(stage1_rows + stage2_rows + stage3_rows + stage4_trace_rows + stage4_rows),
@@ -2563,13 +3697,13 @@ class ActiveDesignPlanner:
 
                 # evaluate each final variant against the global mass limit
                 max_mass_limit = effective_mass_limit_g(base)
-                if strict_mass:
-                    accepted_labels = [
-                        k for k, row in final_variants.items()
-                        if (safe_float(row.get("mass_g"), 1.0e99) or 1.0e99) <= max_mass_limit
-                    ]
-                else:
-                    accepted_labels = list(final_variants.keys())
+                accepted_labels = [
+                    k for k, row in final_variants.items()
+                    if (
+                        bool(row.get("feasible"))
+                        and (safe_float(row.get("mass_g"), 1.0e99) or 1.0e99) <= max_mass_limit
+                    )
+                ]
                 if accepted_labels:
                     accepted_rows = [final_variants[k] for k in accepted_labels]
                     best_final = sorted(

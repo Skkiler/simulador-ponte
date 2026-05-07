@@ -107,8 +107,38 @@ class GeometryService:
         else:
             add_member(nid(x0, y, "top") if c <= mid else nid(x0, y, "bottom"), nid(x1, y, "bottom") if c <= mid else nid(x1, y, "top"), "diagonal")
 
+    def _side_truss_uses_intermediate_verticals(self, truss_type: str) -> bool:
+        """Treliça Warren pura evita montantes intermediários."""
+        typ = self._normalize_truss_mode(truss_type)
+        return typ not in {"warren", "warren_symmetric"}
 
-    def _add_plane_bracing(self, mode: str, idx: int, x0: float, x1: float, ys: List[float], level: str, nid, add_member, group: str) -> None:
+    @staticmethod
+    def _panel_mode_from_map(
+        pattern_map: Dict[str, str] | Dict[int, str] | None,
+        panel_idx: int,
+        default_mode: str,
+    ) -> str:
+        if not pattern_map:
+            return default_mode
+        raw = pattern_map.get(str(panel_idx))
+        if raw is None:
+            raw = pattern_map.get(panel_idx)
+        return str(raw) if raw is not None else default_mode
+
+
+    def _add_plane_bracing(
+        self,
+        mode: str,
+        idx: int,
+        x0: float,
+        x1: float,
+        ys: List[float],
+        level: str,
+        nid,
+        add_member,
+        group: str,
+        mid_x: float | None = None,
+    ) -> None:
         mode = self._normalize_truss_mode(mode)
         if mode == "none":
             return
@@ -120,6 +150,14 @@ class GeometryService:
         elif mode == "warren_mid_braced":
             add_member(nid(x0, ys[0], level), nid(x1, ys[1], level), group)
             add_member(nid(x0, ys[1], level), nid(x1, ys[0], level), group)
+        elif mode in {"pratt", "pratt_symmetric"}:
+            # Em Pratt/N, a diagonal converge para o meio do vão.
+            c = 0.5 * (float(x0) + float(x1))
+            mid = float(mid_x) if mid_x is not None else c
+            if c <= mid:
+                add_member(nid(x0, ys[1], level), nid(x1, ys[0], level), group)
+            else:
+                add_member(nid(x0, ys[0], level), nid(x1, ys[1], level), group)
         elif mode == "howe":
             add_member(nid(x0, ys[1], level), nid(x1, ys[0], level), group)
         elif mode == "howe_inverted":
@@ -195,6 +233,9 @@ class GeometryService:
                 cfg["bridge"].get("cross_frame_truss_type", "X"),
             )
         )
+        side_panel_pattern = cfg["bridge"].get("panel_side_truss_pattern", {}) or {}
+        top_panel_pattern = cfg["bridge"].get("panel_top_chord_pattern", {}) or {}
+        bottom_panel_pattern = cfg["bridge"].get("panel_bottom_chord_pattern", {}) or {}
 
         def add_node(x: float, y: float, z: float, level: str) -> int:
             key = (round(float(x), 6), round(float(y), 6), level)
@@ -226,25 +267,51 @@ class GeometryService:
                 i, j = j, i
             members_raw.append((i, j, group))
 
-        def has_group_connection(node_id: int, group: str) -> bool:
-            for i, j, g in members_raw:
-                if g != group:
-                    continue
-                if i == node_id or j == node_id:
-                    return True
-            return False
+        side_mode = self._normalize_truss_mode(side_truss_type)
+        span = float(cfg["bridge"]["span_mm"])
+        left_overhang_x = -float(cfg["bridge"]["left_support_overhang_mm"])
+        right_overhang_x = span + float(cfg["bridge"]["right_support_overhang_mm"])
+
+        panel_modes = [
+            self._normalize_truss_mode(
+                self._panel_mode_from_map(side_panel_pattern, idx_panel, side_truss_type)
+            )
+            for idx_panel, _ in enumerate(zip(xs[:-1], xs[1:]))
+        ]
+        side_has_non_warren = any(
+            pm not in {"warren", "warren_symmetric"} for pm in panel_modes
+        )
+        all_side_warren = bool(panel_modes) and all(
+            pm in {"warren", "warren_symmetric"} for pm in panel_modes
+        )
 
         for y in ys:
             for x0, x1 in zip(xs[:-1], xs[1:]):
                 add_member(nid(x0, y, "bottom"), nid(x1, y, "bottom"), "bottom_chord")
                 add_member(nid(x0, y, "top"), nid(x1, y, "top"), "top_chord")
-            for x in xs:
-                add_member(nid(x, y, "bottom"), nid(x, y, "top"), "vertical")
-            mid = float(cfg["bridge"]["span_mm"]) / 2.0
+            if self._side_truss_uses_intermediate_verticals(side_truss_type) or side_has_non_warren:
+                for x in xs:
+                    add_member(nid(x, y, "bottom"), nid(x, y, "top"), "vertical")
+            else:
+                # Warren puro: manter apenas postes de extremidade/apoio.
+                for x in xs:
+                    if (
+                        abs(float(x) - left_overhang_x) <= 1.0e-6
+                        or abs(float(x) - 0.0) <= 1.0e-6
+                        or abs(float(x) - span) <= 1.0e-6
+                        or abs(float(x) - right_overhang_x) <= 1.0e-6
+                    ):
+                        add_member(nid(x, y, "bottom"), nid(x, y, "top"), "vertical")
+            mid = span / 2.0
             for idx_panel, (x0, x1) in enumerate(zip(xs[:-1], xs[1:])):
-                if x1 < 0 or x0 > float(cfg["bridge"]["span_mm"]):
+                if x1 < 0 or x0 > span:
                     continue
-                self._add_side_diagonal(side_truss_type, idx_panel, x0, x1, y, mid, nid, add_member)
+                side_mode_panel = self._panel_mode_from_map(
+                    side_panel_pattern,
+                    idx_panel,
+                    side_truss_type,
+                )
+                self._add_side_diagonal(side_mode_panel, idx_panel, x0, x1, y, mid, nid, add_member)
                 chord_type = legacy_chord_truss_type.lower()
                 if legacy_chord_lacing_enabled and chord_type not in {"none", "sem", "nenhuma"}:
                     self._add_side_diagonal(
@@ -257,29 +324,22 @@ class GeometryService:
                         nid,
                         lambda a, b, g: add_member(a, b, "chord_lacing"),
                     )
-
-        # Warren clássico pode deixar nós de ponta sem diagonal direta quando há
-        # avanços de apoio e/ou número ímpar de painéis. Garante amarração nas
-        # pontas para evitar "treliça flutuante" e subestimação de massa.
-        side_mode = self._normalize_truss_mode(side_truss_type)
-        if side_mode in {"warren", "warren_symmetric"}:
-            span = float(cfg["bridge"]["span_mm"])
-            in_span_xs = [x for x in xs if 0.0 <= float(x) <= span]
-            if len(in_span_xs) >= 2:
-                left_x = min(in_span_xs)
-                right_x = max(in_span_xs)
-                left_adj = min((x for x in in_span_xs if x > left_x), default=left_x)
-                right_adj = max((x for x in in_span_xs if x < right_x), default=right_x)
-                for y in ys:
-                    for x_end, x_adj in ((left_x, left_adj), (right_x, right_adj)):
-                        if abs(float(x_end) - float(x_adj)) <= 1.0e-9:
-                            continue
-                        bottom_end = nid(x_end, y, "bottom")
-                        top_end = nid(x_end, y, "top")
-                        if not has_group_connection(bottom_end, "diagonal"):
-                            add_member(bottom_end, nid(x_adj, y, "top"), "diagonal")
-                        if not has_group_connection(top_end, "diagonal"):
-                            add_member(top_end, nid(x_adj, y, "bottom"), "diagonal")
+            if side_mode in {"warren", "warren_symmetric"} or all_side_warren:
+                # Garantir fechamento de ponta no Warren (topo e fundo conectados por diagonais).
+                left_inner = [x for x in xs if 0.0 < float(x) <= span + 1.0e-6]
+                right_inner = [x for x in xs if -1.0e-6 <= float(x) < span]
+                if left_inner:
+                    add_member(
+                        nid(0.0, y, "bottom"),
+                        nid(min(left_inner), y, "top"),
+                        "diagonal",
+                    )
+                if right_inner:
+                    add_member(
+                        nid(span, y, "bottom"),
+                        nid(max(right_inner), y, "top"),
+                        "diagonal",
+                    )
 
         for x in xs:
             add_member(nid(x, ys[0], "bottom"), nid(x, ys[1], "bottom"), "bottom_transverse")
@@ -287,9 +347,41 @@ class GeometryService:
 
         for idx_panel, (x0, x1) in enumerate(zip(xs[:-1], xs[1:])):
             if cfg["bridge"].get("include_bottom_x_bracing", True):
-                self._add_plane_bracing(bottom_chord_truss_type, idx_panel, x0, x1, ys, "bottom", nid, add_member, "bottom_bracing")
+                bottom_mode_panel = self._panel_mode_from_map(
+                    bottom_panel_pattern,
+                    idx_panel,
+                    bottom_chord_truss_type,
+                )
+                self._add_plane_bracing(
+                    bottom_mode_panel,
+                    idx_panel,
+                    x0,
+                    x1,
+                    ys,
+                    "bottom",
+                    nid,
+                    add_member,
+                    "bottom_bracing",
+                    mid_x=span / 2.0,
+                )
             if cfg["bridge"].get("include_top_x_bracing", True):
-                self._add_plane_bracing(top_chord_truss_type, idx_panel, x0, x1, ys, "top", nid, add_member, "top_bracing")
+                top_mode_panel = self._panel_mode_from_map(
+                    top_panel_pattern,
+                    idx_panel,
+                    top_chord_truss_type,
+                )
+                self._add_plane_bracing(
+                    top_mode_panel,
+                    idx_panel,
+                    x0,
+                    x1,
+                    ys,
+                    "top",
+                    nid,
+                    add_member,
+                    "top_bracing",
+                    mid_x=span / 2.0,
+                )
 
         if cfg["bridge"].get("include_cross_frame_bracing", True):
             for idx_x, x in enumerate(xs):
@@ -313,14 +405,34 @@ class GeometryService:
         members: List[Member] = []
         member_sticks_by_id = cfg.get("member_sticks_by_id", {}) or {}
         member_sticks_by_group = cfg.get("member_sticks_by_group", {}) or {}
+        member_active_by_id = cfg.get("member_active_by_id", {}) or {}
+        disabled_member_ids = {
+            int(v)
+            for v in (cfg.get("disabled_member_ids", []) or [])
+            if str(v).strip()
+        }
         for idx, (i, j, group) in enumerate(unique, 1):
+            enabled = bool(
+                member_active_by_id.get(
+                    str(idx),
+                    member_active_by_id.get(idx, True),
+                )
+            )
+            if (idx in disabled_member_ids) or (not enabled):
+                continue
             n_sticks = int(
                 member_sticks_by_id.get(
                     str(idx),
                     member_sticks_by_id.get(idx, member_sticks_by_group.get(group, 1)),
                 )
             )
-            layout_cfg = cfg.get("section_layout_by_group", {}).get(group, {"layout": "stacked"})
+            layout_cfg = dict(
+                cfg.get("section_layout_by_group", {}).get(group, {"layout": "stacked"})
+            )
+            layout_cfg.setdefault(
+                "composite_action",
+                cfg.get("detail_model", {}).get("composite_action", {}),
+            )
             sec = self.sections.composite_section(n_sticks, mat, layout_cfg)
             L = self.sections.member_length_mm(node_by_id[i], node_by_id[j])
             k = cfg.get("effective_length_factor_by_group", {}).get(group, {})

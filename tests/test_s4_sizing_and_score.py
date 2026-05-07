@@ -56,11 +56,60 @@ def test_member_sizing_plan_reinforce_lighten_and_symmetry(base_cfg: dict) -> No
     assert plan[3].action == "lighten"
     assert plan[3].n_sticks_recommended < plan[3].n_sticks_current
     assert 2 in plan[1].applied_to_member_ids
+    assert plan[1].n_sticks_recommended == plan[2].n_sticks_recommended
 
     cfg2 = planner.apply_member_sizing_plan(cfg, plan)
     sid_1 = int(cfg2["member_sticks_by_id"]["1"])
     sid_2 = int(cfg2["member_sticks_by_id"]["2"])
     assert sid_1 == sid_2
+
+
+def test_local_sizing_zero_force_member_does_not_inherit_group_reinforcement(base_cfg: dict) -> None:
+    cfg = base_cfg
+    cfg["analysis"]["enforce_symmetry"] = False
+    cfg["analysis"]["target_min_fs"] = 2.0
+    cfg["member_sticks_by_group"]["vertical"] = 4
+    cfg.setdefault("planner", {}).setdefault("local_sizing", {})
+    cfg["planner"]["local_sizing"]["allow_optional_member_removal"] = False
+
+    nodes = [
+        Node(1, 0.0, 0.0, 0.0, "bottom", "R", 0.0),
+        Node(2, 100.0, 0.0, 0.0, "bottom", "R", 100.0),
+        Node(3, 0.0, 0.0, 80.0, "top", "R", 0.0),
+        Node(4, 100.0, 0.0, 80.0, "top", "R", 100.0),
+    ]
+    members = [
+        _member(1, 1, 3, "vertical", 4),
+        _member(2, 2, 4, "vertical", 4),
+    ]
+    member_results = [
+        {"member_id": 1, "N_N": -1200.0},
+        {"member_id": 2, "N_N": 0.0},
+    ]
+    member_checks = [
+        {"member_id": 1, "FS_min": 0.9, "governing_mode": "compression_buckling", "utilization": 0.95},
+        {"member_id": 2, "FS_min": 8.0, "governing_mode": "tension_capacity", "utilization": 0.01},
+    ]
+
+    planner = ActiveDesignPlanner()
+    plan = planner.build_member_sizing_plan(cfg, nodes, members, member_results, member_checks)
+    cfg2 = planner.apply_member_sizing_plan(cfg, plan)
+
+    assert plan[1].action == "reinforce"
+    assert plan[2].action in {"lighten", "simplify_joint"}
+    assert int(cfg2["member_sticks_by_id"]["1"]) >= 4
+    assert int(cfg2["member_sticks_by_id"]["2"]) >= 2
+    assert int(cfg2["member_sticks_by_group"]["vertical"]) == 4
+
+
+def test_cache_key_changes_when_member_sticks_by_id_changes(base_cfg: dict) -> None:
+    planner = ActiveDesignPlanner()
+    cfg_a = base_cfg
+    cfg_b = {**base_cfg, "member_sticks_by_id": {"10": 2}}
+
+    key_a = planner._cfg_cache_key(cfg_a)
+    key_b = planner._cfg_cache_key(cfg_b)
+    assert key_a != key_b
 
 
 def test_score_prefers_stronger_solution_within_mass(base_cfg: dict) -> None:
@@ -96,4 +145,3 @@ def test_score_prefers_stronger_solution_within_mass(base_cfg: dict) -> None:
     weak_score = planner._score_candidate(cfg, weak)
     strong_score = planner._score_candidate(cfg, strong)
     assert strong_score > weak_score
-

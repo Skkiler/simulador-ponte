@@ -122,13 +122,13 @@ class SpliceStaggeringService:
         clusters = self.detect_aligned_splice_clusters(full_glue_joints, tol)
         if not clusters:
             for row in full_glue_joints or []:
-                row["aligned_cluster_id"] = ""
+                row["aligned_cluster_id"] = None
                 row["alignment_risk"] = "low"
             return full_glue_joints
 
         for row in full_glue_joints or []:
             pos = safe_float(row.get("splice_center_mm"), None)
-            row["aligned_cluster_id"] = ""
+            row["aligned_cluster_id"] = None
             row["alignment_risk"] = "low"
             if pos is None:
                 continue

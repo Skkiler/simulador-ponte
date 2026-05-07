@@ -487,6 +487,11 @@ class VisualizationService:
         *,
         highlight_member_colors: Dict[int, str] | None = None,
         scale_mode: str = "real",
+        color_mode: str = "group",
+        member_results: List[Dict] | None = None,
+        member_checks: List[Dict] | None = None,
+        selected_member_ids: Iterable[int] | None = None,
+        highlight_selected: bool = True,
     ) -> go.Figure:
         """
         Gera visualização 3D interativa.
@@ -497,7 +502,19 @@ class VisualizationService:
             "cube"      -> cubo Plotly, útil só para inspecionar conexões.
         """
         node_by_id = {n.id: n for n in nodes}
-        highlight_ids = {int(v) for v in (highlight_member_ids or [])}
+        selected_ids = {int(v) for v in (selected_member_ids or [])}
+        selected_ids |= {int(v) for v in (highlight_member_ids or [])}
+        color_mode = str(color_mode or "group").strip().lower()
+        res_map = {
+            int(r.get("member_id")): r
+            for r in (member_results or [])
+            if r.get("member_id") is not None
+        }
+        chk_map = {
+            int(r.get("member_id")): r
+            for r in (member_checks or [])
+            if r.get("member_id") is not None
+        }
 
         xs_all = [n.x for n in nodes]
         ys_all = [n.y for n in nodes]
@@ -531,83 +548,169 @@ class VisualizationService:
 
         fig = go.Figure()
 
+        palette = [
+            "#1f77b4",
+            "#ff7f0e",
+            "#2ca02c",
+            "#d62728",
+            "#9467bd",
+            "#8c564b",
+            "#e377c2",
+            "#7f7f7f",
+            "#bcbd22",
+            "#17becf",
+        ]
         groups = sorted(set(m.group for m in members))
+        group_color = {g: palette[i % len(palette)] for i, g in enumerate(groups)}
 
-        for g in groups:
-            xs, ys, zs = [], [], []
+        max_abs_force = max(
+            [safe_abs_float((res_map.get(int(m.id), {}) or {}).get("N_N"), 0.0) for m in members] or [1.0]
+        )
+        max_abs_force = max(max_abs_force, 1.0e-9)
+        max_util = max(
+            [safe_float((chk_map.get(int(m.id), {}) or {}).get("utilization"), 0.0) or 0.0 for m in members] or [1.0]
+        )
+        max_util = max(max_util, 1.0e-9)
 
-            for m in [m for m in members if m.group == g and m.id not in highlight_ids]:
-                ni, nj = node_by_id[m.i], node_by_id[m.j]
-                xs += [ni.x, nj.x, None]
-                ys += [ni.y, nj.y, None]
-                zs += [ni.z, nj.z, None]
+        def _interp(c1: tuple[int, int, int], c2: tuple[int, int, int], t: float) -> str:
+            tt = max(0.0, min(1.0, float(t)))
+            r = int(round(c1[0] + (c2[0] - c1[0]) * tt))
+            g = int(round(c1[1] + (c2[1] - c1[1]) * tt))
+            b = int(round(c1[2] + (c2[2] - c1[2]) * tt))
+            return f"rgb({r},{g},{b})"
 
-            if xs:
-                fig.add_trace(
-                    go.Scatter3d(
-                        x=xs,
-                        y=ys,
-                        z=zs,
-                        mode="lines",
-                        name=g,
-                        line={"width": 3},
-                        opacity=0.75,
-                    )
-                )
+        def _force_color(value: float) -> str:
+            abs_v = abs(float(value))
+            if abs_v <= max(2.0, 0.02 * max_abs_force):
+                return "rgb(156,163,175)"  # neutro para quase zero
+            t = min(1.0, abs_v / max_abs_force)
+            if value >= 0.0:
+                return _interp((147, 197, 253), (30, 64, 175), t)   # tração (azul)
+            return _interp((254, 178, 76), (185, 28, 28), t)        # compressão (vermelho)
 
-        if highlight_ids:
-            # If specific colors are provided per member, plot each
-            # individually.  Otherwise fallback to a single red trace
-            if highlight_member_colors:
-                for mid in highlight_ids:
-                    color = highlight_member_colors.get(mid, "red")
-                    hx, hy, hz, htext = [], [], [], []
-                    for m in [m for m in members if m.id == mid]:
-                        ni, nj = node_by_id[m.i], node_by_id[m.j]
-                        hx += [ni.x, nj.x, None]
-                        hy += [ni.y, nj.y, None]
-                        hz += [ni.z, nj.z, None]
-                        htext += [
-                            f"Membro {m.id}<br>Grupo: {m.group}<br>{m.i} → {m.j}",
-                            f"Membro {m.id}<br>Grupo: {m.group}<br>{m.i} → {m.j}",
-                            None,
-                        ]
+        def _util_color(value: float) -> str:
+            u = max(0.0, float(value))
+            if u <= 0.8:
+                return _interp((34, 197, 94), (251, 191, 36), u / 0.8)
+            if u <= 1.0:
+                return _interp((251, 191, 36), (249, 115, 22), (u - 0.8) / 0.2)
+            return _interp((249, 115, 22), (185, 28, 28), min(1.0, (u - 1.0) / 0.7))
+
+        def _fs_color(value: float | None) -> str:
+            if value is None:
+                return "rgb(156,163,175)"
+            fs = float(value)
+            if fs < 1.0:
+                return _interp((251, 113, 133), (185, 28, 28), min(1.0, 1.0 - fs))
+            if fs < 2.0:
+                return _interp((249, 115, 22), (245, 158, 11), min(1.0, fs - 1.0))
+            return _interp((22, 163, 74), (21, 128, 61), min(1.0, (fs - 2.0) / 3.0))
+
+        member_line_color: Dict[int, str] = {}
+
+        def _line_color_for_member(mid: int, group: str) -> str:
+            if color_mode == "force":
+                val = safe_float((res_map.get(mid, {}) or {}).get("N_N"), 0.0) or 0.0
+                return _force_color(float(val))
+            if color_mode == "utilization":
+                val = safe_float((chk_map.get(mid, {}) or {}).get("utilization"), 0.0) or 0.0
+                return _util_color(float(val))
+            if color_mode == "safety_factor":
+                fs = safe_float((chk_map.get(mid, {}) or {}).get("FS_min"), None)
+                return _fs_color(fs)
+            return group_color.get(group, "#4b5563")
+
+        if color_mode == "group":
+            for g in groups:
+                xs, ys, zs = [], [], []
+                for m in [m for m in members if m.group == g]:
+                    ni, nj = node_by_id[m.i], node_by_id[m.j]
+                    xs += [ni.x, nj.x, None]
+                    ys += [ni.y, nj.y, None]
+                    zs += [ni.z, nj.z, None]
+                    member_line_color[int(m.id)] = group_color.get(g, "#4b5563")
+
+                if xs:
                     fig.add_trace(
                         go.Scatter3d(
-                            x=hx,
-                            y=hy,
-                            z=hz,
-                            mode="lines+markers",
-                            name=f"membro {mid}",
-                            text=htext,
-                            hoverinfo="text",
-                            line={"width": 10, "color": color},
-                            marker={"size": 5, "color": color},
+                            x=xs,
+                            y=ys,
+                            z=zs,
+                            mode="lines",
+                            name=g,
+                            line={"width": 3, "color": group_color.get(g, "#4b5563")},
+                            opacity=0.75,
                         )
                     )
-            else:
-                hx, hy, hz, htext = [], [], [], []
-                for m in [m for m in members if m.id in highlight_ids]:
-                    ni, nj = node_by_id[m.i], node_by_id[m.j]
-                    hx += [ni.x, nj.x, None]
-                    hy += [ni.y, nj.y, None]
-                    hz += [ni.z, nj.z, None]
-                    htext += [
-                        f"Membro {m.id}<br>Grupo: {m.group}<br>{m.i} → {m.j}",
-                        f"Membro {m.id}<br>Grupo: {m.group}<br>{m.i} → {m.j}",
-                        None,
-                    ]
+        else:
+            for m in members:
+                ni, nj = node_by_id[m.i], node_by_id[m.j]
+                mid = int(m.id)
+                color = _line_color_for_member(mid, str(m.group))
+                member_line_color[mid] = color
+                res = res_map.get(mid, {})
+                chk = chk_map.get(mid, {})
+                n_val = safe_float(res.get("N_N"), 0.0) or 0.0
+                util = safe_float(chk.get("utilization"), None)
+                fs = safe_float(chk.get("FS_min"), None)
+                hover = (
+                    f"Membro {mid}<br>"
+                    f"Grupo: {m.group}<br>"
+                    f"N = {n_val:.2f} N<br>"
+                    f"Utilização = {util:.3f}" if util is not None else f"Membro {mid}<br>Grupo: {m.group}<br>N = {n_val:.2f} N"
+                )
+                if fs is not None:
+                    hover += f"<br>FS = {fs:.3f}"
                 fig.add_trace(
                     go.Scatter3d(
-                        x=hx,
-                        y=hy,
-                        z=hz,
-                        mode="lines+markers",
-                        name="membro destacado",
-                        text=htext,
+                        x=[ni.x, nj.x],
+                        y=[ni.y, nj.y],
+                        z=[ni.z, nj.z],
+                        mode="lines",
+                        name=f"membro_{mid}",
+                        hovertext=hover,
                         hoverinfo="text",
-                        line={"width": 10, "color": "red"},
-                        marker={"size": 5, "color": "red"},
+                        line={"width": 4, "color": color},
+                        opacity=0.85,
+                        showlegend=False,
+                    )
+                )
+            if color_mode == "force":
+                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(30,64,175)", "width": 5}, name="Tração"))
+                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(185,28,28)", "width": 5}, name="Compressão"))
+                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(156,163,175)", "width": 5}, name="Quase zero"))
+            elif color_mode == "utilization":
+                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(34,197,94)", "width": 5}, name="Baixa utilização"))
+                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(185,28,28)", "width": 5}, name="Utilização crítica"))
+            elif color_mode == "safety_factor":
+                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(22,163,74)", "width": 5}, name="FS alto"))
+                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(185,28,28)", "width": 5}, name="FS baixo"))
+
+        if selected_ids and highlight_selected:
+            for mid in sorted(selected_ids):
+                m = next((mm for mm in members if int(mm.id) == int(mid)), None)
+                if m is None:
+                    continue
+                ni, nj = node_by_id[m.i], node_by_id[m.j]
+                color = (
+                    highlight_member_colors.get(int(mid), member_line_color.get(int(mid), "black"))
+                    if highlight_member_colors
+                    else member_line_color.get(int(mid), "black")
+                )
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=[ni.x, nj.x],
+                        y=[ni.y, nj.y],
+                        z=[ni.z, nj.z],
+                        mode="lines+markers+text",
+                        text=[f"M{mid}", ""],
+                        textposition="top center",
+                        hoverinfo="text",
+                        hovertext=f"Membro {mid}<br>Grupo: {m.group}<br>{m.i} → {m.j}",
+                        line={"width": 10, "color": color},
+                        marker={"size": 5, "color": color, "symbol": "circle"},
+                        name=f"selecionado {mid}",
+                        showlegend=False,
                     )
                 )
 

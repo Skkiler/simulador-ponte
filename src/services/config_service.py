@@ -116,6 +116,7 @@ class ConfigService:
             analysis["use_quarter_model"] = bool(analysis.get("enforce_symmetry", True))
         analysis.setdefault("quarter_model_mode", "strict")
         analysis.setdefault("quarter_model_debug", False)
+        analysis.setdefault("quarter_model_finalize_with_full", True)
 
         # Perfil legado -> perfil atual
         top_profile_legacy = str(bridge.get("top_profile", "parker_plateau")).strip().lower()
@@ -182,6 +183,8 @@ class ConfigService:
         bridge.setdefault("plateau_start_mm", bridge["span_mm"] / 3.0)
         bridge.setdefault("plateau_end_mm", 2.0 * bridge["span_mm"] / 3.0)
         bridge.setdefault("load_total_kgf", 120.0)
+        bridge.setdefault("tension_only_bracing_solver_enabled", True)
+        bridge.setdefault("tension_only_bracing_interpretation", True)
         bridge["load_total_N"] = float(bridge["load_total_kgf"]) * 9.80665
 
         bridge["load_distribution_x_mm"] = self._normalize_load_distribution_x_mm(bridge)
@@ -202,12 +205,22 @@ class ConfigService:
         mat.setdefault("stick_thickness_mm", 1.5)
         mat.setdefault("stick_mass_g", 1.4)
         mat.setdefault("mass_limit_g", 1000.0)
+        mat.setdefault("nominal_competition_limit_g", 1000.0)
+        mat.setdefault("stick_budget_g", 900.0)
+        mat.setdefault("wet_glue_budget_g", 100.0)
         mat.setdefault("glue_reserved_g", 100.0)
         vol = max(1e-9, float(mat["stick_length_mm"]) * float(mat["stick_width_mm"]) * float(mat["stick_thickness_mm"]))
         mat["density_g_per_mm3"] = float(mat.get("density_g_per_mm3", float(mat["stick_mass_g"]) / vol))
         mat.setdefault("tension_capacity_per_stick_kgf", 72.0)
         mat.setdefault("compression_capacity_one_stick_kgf", 4.0)
         mat.setdefault("compression_capacity_two_sticks_kgf", 11.0)
+        mat.setdefault(
+            "compression_capacity_table_kgf",
+            {"1": 4.0, "2": 11.0},
+        )
+        mat.setdefault("compression_capacity_model", "experimental_table_with_efficiency")
+        mat.setdefault("bending_strength_MPa", 55.0)
+        mat.setdefault("compression_strength_MPa", 32.0)
 
         support_check = cfg.setdefault("support_check", {})
         support_check.setdefault("contact_length_per_support_node_mm", 50.0)
@@ -225,6 +238,7 @@ class ConfigService:
         detail.setdefault("glue_shear_strength_MPa", 3.5)
         detail.setdefault("glue_spread_g_per_m2", 160.0)
         detail.setdefault("glue_mass_efficiency", 0.65)
+        detail.setdefault("glue_cure_solids_fraction", 0.50)
         detail.setdefault("default_joint_safety_factor", 2.0)
         joint_alias = {
             "single_lap": "single_lap",
@@ -290,6 +304,7 @@ class ConfigService:
         detail.setdefault("joint_efficiency_decay_per_splice_tension", 0.03)
         detail.setdefault("joint_efficiency_decay_per_splice_compression", 0.04)
         detail.setdefault("construction_waste_factor", 0.08)
+        detail.setdefault("fast_mass_scale", 1.0)
         detail.setdefault("saw_kerf_mm", 1.0)
         detail.setdefault("imperfection_eccentricity_mm", 2.0)
         detail.setdefault("splice_stagger_enabled", True)
@@ -302,8 +317,27 @@ class ConfigService:
         detail.setdefault("allow_recommend_removal_if_fs_gt", 8.0)
         detail.setdefault("reinforce_if_fs_lt", 2.0)
         detail.setdefault("tension_only_stabilizers", True)
+        detail.setdefault(
+            "composite_action",
+            {
+                "enabled": True,
+                "default_eta_I": 0.70,
+                "eta_I_by_joint_quality": {
+                    "weak": 0.55,
+                    "normal": 0.70,
+                    "laced": 0.85,
+                    "continuous_box": 0.90,
+                },
+                "eta_A": 1.00,
+            },
+        )
         detail.setdefault("generate_member_templates", True)
         detail.setdefault("generate_piece_views", True)
+        glue_cure = float(detail.get("glue_cure_solids_fraction", 0.50))
+        if not (0.30 <= glue_cure <= 0.80):
+            raise ValueError(
+                "Config inválida: detail_model.glue_cure_solids_fraction deve estar entre 0.30 e 0.80."
+            )
 
         cfg.setdefault("section_layout_by_group", {})
         layout = cfg["section_layout_by_group"]
@@ -334,16 +368,35 @@ class ConfigService:
         cfg.setdefault("analysis", {})
         cfg["analysis"].setdefault("max_optimizer_variants", 180)
         cfg["analysis"].setdefault("active_planner_enabled", True)
+        cfg["analysis"].setdefault("staged_fidelity_funnel_enabled", True)
         cfg["analysis"].setdefault("target_min_fs", 2.0)
-        cfg["analysis"].setdefault("planner_stage1_variants", 220)
-        cfg["analysis"].setdefault("planner_stage1_top_k", 42)
-        cfg["analysis"].setdefault("planner_stage2_top_k", 14)
-        cfg["analysis"].setdefault("planner_stage3_top_k", 6)
-        cfg["analysis"].setdefault("planner_stage2a_top_k", 220)
-        cfg["analysis"].setdefault("planner_stage2b_top_k", 80)
+        cfg["analysis"].setdefault("acceptance_min_primary_fs", 1.05)
+        cfg["analysis"].setdefault("acceptance_min_support_fs", 1.00)
+        cfg["analysis"].setdefault("acceptance_min_glue_fs", 1.50)
+        cfg["analysis"].setdefault("acceptance_min_design_breaking_load_kgf", 80.0)
+        cfg["analysis"].setdefault("use_target_min_fs_as_hard_acceptance", False)
+        cfg["analysis"].setdefault(
+            "tension_only_groups",
+            ["top_bracing", "bottom_bracing", "cross_frame_bracing", "chord_lacing"],
+        )
+        cfg["analysis"].setdefault("planner_stage1_variants", 160)
+        cfg["analysis"].setdefault("planner_stage1_top_k", 30)
+        cfg["analysis"].setdefault("planner_stage2_top_k", 12)
+        cfg["analysis"].setdefault("planner_stage3_top_k", 5)
+        cfg["analysis"].setdefault("planner_stage2a_top_k", 100)
+        cfg["analysis"].setdefault("planner_stage2b_top_k", 40)
+        cfg["analysis"].setdefault("planner_stage2_seed_cap", 12)
+        cfg["analysis"].setdefault("planner_stage1_eval_cap", 180)
+        cfg["analysis"].setdefault("planner_stage2b_eval_cap", 60)
+        cfg["analysis"].setdefault("planner_fallback_validation_cap", 24)
+        cfg["analysis"].setdefault("planner_fallback_min_fs_ratio", 0.00)
+        cfg["analysis"].setdefault("planner_fallback_min_break_ratio", 0.00)
+        cfg["analysis"].setdefault("planner_prefilter_topology_check", False)
+        cfg["analysis"].setdefault("planner_prefilter_mass_factor", 1.18)
         cfg["analysis"].setdefault("planner_adaptive_refinement", True)
         cfg["analysis"].setdefault("planner_stage4_seed_top_k", 4)
-        cfg["analysis"].setdefault("planner_stage4_iterations", 12)
+        cfg["analysis"].setdefault("planner_stage4_iterations", 10)
+        cfg["analysis"].setdefault("planner_auto_section_layout", True)
         cfg["analysis"].setdefault("planner_max_sticks_per_group", 16)
         cfg["analysis"].setdefault("planner_min_sticks_per_group", 1)
         cfg["analysis"].setdefault(
@@ -364,11 +417,12 @@ class ConfigService:
         )
         cfg["analysis"].setdefault("planner_threads", 0)
         cfg["analysis"].setdefault("strict_mass_acceptance", True)
-        cfg["analysis"].setdefault("planner_objective_profile", "balanced")
+        cfg["analysis"].setdefault("planner_objective_profile", "max_strength_per_competition_mass")
         cfg["analysis"].setdefault("planner_objective_weight_fs", 0.65)
         cfg["analysis"].setdefault("planner_objective_weight_break", 0.25)
         cfg["analysis"].setdefault("planner_objective_weight_mass_target", 0.07)
         cfg["analysis"].setdefault("planner_objective_weight_mass_limit", 0.03)
+        cfg["analysis"].setdefault("planner_allow_infeasible_recommendation", False)
         cfg["analysis"].setdefault("planner_debug_enabled", True)
         cfg["analysis"].setdefault("final_variants_enabled", True)
         cfg["analysis"].setdefault("final_round_step_length_mm", 5.0)
@@ -376,6 +430,90 @@ class ConfigService:
         cfg["analysis"].setdefault("final_round_step_mass_g", 0.1)
         cfg["analysis"].setdefault("primary_groups", ["bottom_chord", "top_chord", "vertical", "diagonal", "top_transverse", "bottom_transverse", "support_pad", "chord_lacing"])
         cfg["analysis"].setdefault("stabilizer_groups", ["top_bracing", "bottom_bracing", "cross_frame_bracing"])
+
+        # Novo funil de fidelidade crescente (S0..S8).
+        pipeline_cfg = cfg.setdefault("planner_pipeline", {})
+        pipeline_cfg.setdefault("mode", "staged_fidelity_funnel")
+        pipeline_cfg.setdefault("macro_candidates_count", 10)
+        pipeline_cfg.setdefault("fast_screening_keep_top_k", 3)
+        pipeline_cfg.setdefault("multi_loadcase_keep_top_k", 2)
+        pipeline_cfg.setdefault("geometry_refinement_keep_top_k", 1)
+        pipeline_cfg.setdefault("allow_top2_full_detailing", False)
+        pipeline_cfg.setdefault("preserve_diversity_in_fast_screening", True)
+        pipeline_cfg.setdefault("defer_fabrication_detailing_until_stage", "S7")
+        pipeline_cfg.setdefault("defer_topology_mutation_until_stage", "S6")
+        pipeline_cfg.setdefault("defer_member_position_fine_tuning_until_stage", "S4")
+        pipeline_cfg.setdefault("defer_glue_and_cut_calculation_until_stage", "S7")
+
+        fast_screening = cfg.setdefault("fast_screening", {})
+        fast_screening.setdefault("enabled", True)
+        fast_screening.setdefault("use_single_load_case", True)
+        fast_screening.setdefault("use_simplified_sections", True)
+        fast_screening.setdefault("compute_mass_proxy_only", True)
+        fast_screening.setdefault("compute_glue", False)
+        fast_screening.setdefault("compute_cut_list", False)
+        fast_screening.setdefault("compute_detailed_joint_model", False)
+
+        multi_loadcase = cfg.setdefault("multi_loadcase_screening", {})
+        multi_loadcase.setdefault("enabled", True)
+        multi_loadcase.setdefault(
+            "load_cases",
+            [
+                "center",
+                "left_offset",
+                "right_offset",
+                "torsion_60_40",
+                "lateral_imperfection",
+                "self_weight",
+            ],
+        )
+        multi_loadcase.setdefault("compute_preliminary_buckling", True)
+        multi_loadcase.setdefault("compute_preliminary_tension_only", True)
+        multi_loadcase.setdefault("compute_zero_force_diagnostics", True)
+
+        geom_refine = cfg.setdefault("local_geometry_refinement", {})
+        geom_refine.setdefault("enabled", True)
+        geom_refine.setdefault("method", "trust_region_local_search")
+        geom_refine.setdefault("max_iterations", 30)
+        geom_refine.setdefault("patience", 6)
+        geom_refine.setdefault("initial_delta_height_mm", 30.0)
+        geom_refine.setdefault("initial_delta_panel_x_mm", 15.0)
+        geom_refine.setdefault("initial_delta_width_mm", 20.0)
+        geom_refine.setdefault("shrink_factor", 0.5)
+        geom_refine.setdefault("expand_factor", 1.25)
+        geom_refine.setdefault("min_delta_mm", 2.0)
+        geom_refine.setdefault("max_candidates_per_iteration", 12)
+
+        member_sizing_cfg = cfg.setdefault("member_sizing", {})
+        member_sizing_cfg.setdefault("enabled", True)
+        member_sizing_cfg.setdefault("method", "utilization_based_discrete_sizing")
+        member_sizing_cfg.setdefault("never_reinforce_if_fs_above", 3.0)
+        member_sizing_cfg.setdefault("never_reinforce_tension_if_fs_above", 3.0)
+        member_sizing_cfg.setdefault("donor_fs_threshold", 4.0)
+        member_sizing_cfg.setdefault("use_mass_donor_pass", True)
+        member_sizing_cfg.setdefault("reinforce_by_gain_per_gram", True)
+
+        topology_cleanup = cfg.setdefault("topology_cleanup", {})
+        topology_cleanup.setdefault("enabled", True)
+        topology_cleanup.setdefault("run_after_stage", "S5")
+        topology_cleanup.setdefault("allow_mixed_truss_patterns", True)
+        topology_cleanup.setdefault("allow_member_removal", True)
+        topology_cleanup.setdefault("allow_panel_pattern_mutation", True)
+        topology_cleanup.setdefault("require_all_load_cases_for_removal", True)
+        topology_cleanup.setdefault("max_topology_iterations", 80)
+        topology_cleanup.setdefault("patience", 10)
+        topology_cleanup.setdefault("near_zero_force_threshold_N", 2.0)
+        topology_cleanup.setdefault("near_zero_force_relative_threshold", 0.01)
+        topology_cleanup.setdefault("preserve_stability", True)
+        topology_cleanup.setdefault("preserve_load_paths", True)
+        topology_cleanup.setdefault("preserve_lateral_bracing_or_update_K", True)
+
+        fabrication_detailing = cfg.setdefault("fabrication_detailing", {})
+        fabrication_detailing.setdefault("run_after_stage", "S6")
+        fabrication_detailing.setdefault("compute_cut_list", True)
+        fabrication_detailing.setdefault("compute_glue", True)
+        fabrication_detailing.setdefault("compute_cured_glue_mass", True)
+        fabrication_detailing.setdefault("compute_competition_mass", True)
 
         span = float(bridge["span_mm"])
         width = float(bridge["width_mm"])
@@ -390,13 +528,53 @@ class ConfigService:
         planner.setdefault("width_min_mm", 100.0)
         planner.setdefault("width_max_mm", 200.0)
         planner.setdefault("height_min_mm", 50.0)
-        planner.setdefault("height_max_mm", min(700.0, center_height * 1.25))
-        planner.setdefault("panel_min_mm", max(40.0, min(120.0, panel * 0.75)))
-        planner.setdefault("panel_max_mm", min(260.0, max(180.0, panel * 2.0)))
+        planner.setdefault("height_max_mm", min(700.0, max(420.0, center_height * 2.0)))
+        planner.setdefault("panel_min_mm", max(40.0, min(140.0, panel * 0.60)))
+        planner.setdefault("panel_max_mm", min(280.0, max(200.0, panel * 2.50)))
         planner.setdefault("target_load_kgf", load_kgf)
-        planner.setdefault("target_breaking_load_kgf", load_kgf)
+        planner.setdefault("target_breaking_load_kgf", max(80.0, load_kgf))
+        planner.setdefault("stretch_breaking_load_kgf", 120.0)
         planner.setdefault("max_bridge_mass_g", mass_limit)
         planner.setdefault("target_bridge_mass_g", min(mass_limit, max(200.0, mass_limit * 0.85)))
+        planner.setdefault("target_installed_stick_mass_g", float(mat.get("stick_budget_g", 900.0)))
+        planner.setdefault("target_wet_glue_mass_g", float(mat.get("wet_glue_budget_g", 100.0)))
+        planner.setdefault("local_sizing", {})
+        local_sizing = planner["local_sizing"]
+        local_sizing.setdefault("zero_force_tolerance_N", 8.0)
+        local_sizing.setdefault("low_force_ratio", 0.12)
+        local_sizing.setdefault("moderate_force_ratio", 0.35)
+        local_sizing.setdefault("high_force_ratio", 0.65)
+        local_sizing.setdefault("allow_optional_member_removal", False)
+        local_sizing.setdefault("min_sticks_structural_member", 1)
+        local_sizing.setdefault("min_sticks_primary_member", 2)
+        local_sizing.setdefault("structural_floor_ratio_primary", 0.34)
+        local_sizing.setdefault("max_local_iterations", 6)
+        local_sizing.setdefault("donor_fs_threshold", 3.0)
+        local_sizing.setdefault("never_reinforce_if_fs_above", 3.0)
+        local_sizing.setdefault("never_reinforce_tension_if_fs_above", 3.0)
+        local_sizing.setdefault("allow_primary_member_lightening_if_topology_ok", True)
+        local_sizing.setdefault("allow_optional_member_removal", True)
+        local_sizing.setdefault("require_topology_validation_after_removal", True)
+        local_sizing.setdefault(
+            "min_sticks_primary_member_by_group",
+            {
+                "top_chord": 2,
+                "bottom_chord": 2,
+                "vertical": 1,
+                "diagonal": 1,
+                "top_transverse": 1,
+                "bottom_transverse": 1,
+                "support_pad": 2,
+            },
+        )
+        local_sizing.setdefault(
+            "required_groups",
+            ["top_chord", "bottom_chord", "support_pad", "top_transverse", "bottom_transverse"],
+        )
+        local_sizing.setdefault(
+            "optional_groups",
+            ["top_bracing", "bottom_bracing", "cross_frame_bracing", "chord_lacing"],
+        )
         planner.setdefault("consider_top_profiles", ["parker_plateau", "triangular_peak", "shallow_arch", "flat"])
         planner.setdefault(
             "consider_side_trusses",

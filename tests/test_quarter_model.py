@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
+from src.services.active_design_planner import ActiveDesignPlanner
 from src.services.geometry_service import GeometryService
 from src.services.quarter_model_service import QuarterModelService
 
@@ -37,3 +40,34 @@ def test_quarter_model_build_and_replicate_geometry(base_cfg: dict) -> None:
     replicated_fz = sum(float(l.Fz) for l in rep["loads"])
     assert abs(original_fz - replicated_fz) < 1.0e-6
 
+
+def test_planner_uses_quarter_model_when_enabled(base_cfg: dict) -> None:
+    cfg = deepcopy(base_cfg)
+    cfg["analysis"]["use_quarter_model"] = True
+    cfg["analysis"]["enforce_symmetry"] = True
+
+    planner = ActiveDesignPlanner()
+    base = planner._solve_and_check_base(cfg)
+    if bool(base.get("quarter_model_used")):
+        assert int(base.get("quarter_member_count", 0)) > 0
+        assert isinstance(base.get("quarter_member_map", {}), dict)
+    else:
+        # Se o solver do quarto-modelo ficar singular/fora de equilíbrio,
+        # o planejador deve cair para o modelo completo de forma segura.
+        reason = str(base.get("quarter_model_fallback_reason") or "")
+        assert reason.startswith("quarter_model_solution_invalid:")
+
+
+def test_planner_records_quarter_fallback_reason(base_cfg: dict, monkeypatch) -> None:
+    cfg = deepcopy(base_cfg)
+    cfg["analysis"]["use_quarter_model"] = True
+
+    planner = ActiveDesignPlanner()
+
+    def _fake_validate(*args, **kwargs):
+        return {"is_valid": False, "reasons": ["forced_invalid"], "warnings": []}
+
+    monkeypatch.setattr(planner.quarter_model, "validate_quarter_symmetry", _fake_validate)
+    base = planner._solve_and_check_base(cfg)
+    assert bool(base.get("quarter_model_used")) is False
+    assert str(base.get("quarter_model_fallback_reason")) == "symmetry_validation_failed"

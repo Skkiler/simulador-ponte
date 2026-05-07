@@ -538,24 +538,47 @@ class QuarterModelService:
 
         active_nodes = set()
         inactive_nodes = set()
+        inactive_tension_only_members = set()
         q_active = set(int(v) for v in quarter_result.active_support_node_ids)
         q_inactive = set(int(v) for v in quarter_result.inactive_support_node_ids)
+        q_tension_inactive = set(
+            int(v) for v in getattr(quarter_result, "inactive_tension_only_member_ids", set())
+        )
         q2f = mirror_maps.get("quarter_node_to_full", {}) or {}
+        q2f_member = mirror_maps.get("quarter_member_to_full", {}) or {}
         for qn_str, full_ids in q2f.items():
             qn = int(qn_str)
             if qn in q_active:
                 active_nodes.update(int(fid) for fid in full_ids)
             if qn in q_inactive:
                 inactive_nodes.update(int(fid) for fid in full_ids)
+        for qm_str, full_ids in q2f_member.items():
+            qm = int(qm_str)
+            if qm in q_tension_inactive:
+                inactive_tension_only_members.update(int(fid) for fid in full_ids)
 
         return {
             "node_results": [full_node_results[k] for k in sorted(full_node_results)],
             "member_results": [full_member_results[k] for k in sorted(full_member_results)],
             "active_support_node_ids": active_nodes,
             "inactive_support_node_ids": inactive_nodes,
+            "inactive_tension_only_member_ids": inactive_tension_only_members,
             "status": quarter_result.status,
             "iterations": quarter_result.iterations,
             "equilibrium_error_N": (safe_float(quarter_result.equilibrium_error_N, 0.0) or 0.0) * 4.0,
+            "tension_only_iterations": int(getattr(quarter_result, "tension_only_iterations", 0) or 0),
+            "tension_only_compression_released_N_total": (
+                safe_float(
+                    getattr(quarter_result, "tension_only_compression_released_N_total", 0.0),
+                    0.0,
+                )
+                or 0.0
+            )
+            * 4.0,
+            "tension_only_converged": bool(getattr(quarter_result, "tension_only_converged", True)),
+            "instability_due_to_tension_only_bracing": bool(
+                getattr(quarter_result, "instability_due_to_tension_only_bracing", False)
+            ),
         }
 
     def solve_quarter_and_replicate(
@@ -570,6 +593,16 @@ class QuarterModelService:
             quarter_model.supports,
             quarter_model.loads,
             unilateral_supports=bool(cfg.get("bridge", {}).get("unilateral_supports", True)),
+            tension_only_solver_enabled=bool(
+                cfg.get("bridge", {}).get("tension_only_bracing_solver_enabled", False)
+            ),
+            tension_only_groups=cfg.get("analysis", {}).get(
+                "tension_only_groups",
+                ["top_bracing", "bottom_bracing", "cross_frame_bracing", "chord_lacing"],
+            ),
+            tension_only_compression_tolerance_N=float(
+                cfg.get("analysis", {}).get("tension_only_compression_tolerance_N", 1.0e-6)
+            ),
         )
         geom = self.replicate_quarter_geometry(
             cfg,
@@ -584,9 +617,14 @@ class QuarterModelService:
             rep["member_results"],
             rep["active_support_node_ids"],
             rep["inactive_support_node_ids"],
+            rep.get("inactive_tension_only_member_ids", set()),
             rep["status"],
             rep["iterations"],
             rep["equilibrium_error_N"],
+            int(rep.get("tension_only_iterations", 0) or 0),
+            float(rep.get("tension_only_compression_released_N_total", 0.0) or 0.0),
+            bool(rep.get("tension_only_converged", True)),
+            bool(rep.get("instability_due_to_tension_only_bracing", False)),
         )
         return FullModelResult(
             geom["nodes"],

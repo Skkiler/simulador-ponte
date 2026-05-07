@@ -11,6 +11,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from src.core.numeric import safe_float
 from src.services.cache_cleanup_service import CacheCleanupService
 from src.services.config_service import ConfigService
 from src.services.mass_guard import resolve_mass_limits
@@ -339,12 +340,24 @@ def _as_dataframe(data: Any) -> pd.DataFrame:
         return pd.DataFrame()
 
     if isinstance(data, pd.DataFrame):
-        return data.copy()
+        df = data.copy()
+    else:
+        try:
+            df = pd.DataFrame(data)
+        except (TypeError, ValueError):
+            return pd.DataFrame()
 
-    try:
-        return pd.DataFrame(data)
-    except (TypeError, ValueError):
-        return pd.DataFrame()
+    # Evita falhas de serialização Arrow em colunas object com tipos mistos
+    # (ex.: int + string vazia). Nestes casos forçamos string homogênea.
+    for col in df.columns:
+        if df[col].dtype != "object":
+            continue
+        non_null = df[col].dropna()
+        if non_null.empty:
+            continue
+        if len({type(v) for v in non_null}) > 1:
+            df[col] = df[col].astype(str)
+    return df
 
 
 def _coerce_numeric(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
@@ -1085,11 +1098,14 @@ with aba_simulacao:
     stage_counts = opt.get("stage_counts") or {}
     final_variants = opt.get("final_variants") or {}
     mass_limits = resolve_mass_limits(r.get("cfg", {}))
+    strict_mass_ui = bool(r.get("cfg", {}).get("analysis", {}).get("strict_mass_acceptance", True))
 
     model_label = (
         f"{best.get('side_truss_type', r.get('cfg', {}).get('bridge', {}).get('side_truss_type', '—'))} / "
         f"{_translate_top_profile(best.get('top_profile', r.get('cfg', {}).get('bridge', {}).get('top_profile', '—')))}"
     )
+    if strict_mass_ui and not bool(metrics.get("mass_constraint_passed", True)):
+        model_label = "Sem solução conforme massa"
 
     cols = st.columns(8)
     cols[0].metric("Modelo", model_label)
@@ -1127,8 +1143,18 @@ with aba_simulacao:
             "(FS, massa, apoio e equilíbrio). A solução exibida é a melhor aproximação "
             "encontrada dentro da busca."
         )
+    elif not best and bool(r.get("cfg", {}).get("analysis", {}).get("optimize_variants", True)):
+        st.warning(
+            "O planejador não retornou candidato final. O modelo exibido é diagnóstico "
+            "da configuração executada, não uma proposta final aprovada."
+        )
     max_mass_ui = float(mass_limits.get("effective_limit_g", 1000.0))
     best_mass_ui = float(best.get("mass_g", dsum.get("estimated_total_mass_g", 0.0)) or 0.0) if best else 0.0
+    if not bool(metrics.get("mass_constraint_passed", True)):
+        st.error(
+            "A massa estimada do modelo exibido excede o limite efetivo configurado. "
+            "Este resultado não pode ser aceito como proposta final."
+        )
     if best and best_mass_ui > max_mass_ui + 1e-6:
         st.error(
             "A proposta retornada excede o limite de massa configurado. "
@@ -1149,14 +1175,14 @@ with aba_simulacao:
     viz = VisualizationService()
 
     result_sections = [
-        "Resumo e Recomendações",
-        "Etapas de Busca",
-        "Visualizações 3D/2D",
-        "Membros Críticos",
-        "Montagem e Cola",
-        "Relatório Técnico",
-        "Logs e Auditoria",
-        "Frame3DD e Downloads",
+        "Resumo",
+        "Por que esta treliça?",
+        "Cargas e membros críticos",
+        "Geometria 3D",
+        "Montagem real",
+        "Detalhamento técnico",
+        "Logs e auditoria",
+        "Frame3DD e downloads",
     ]
     result_view = st.radio(
         "Navegação dos resultados",
@@ -1166,7 +1192,7 @@ with aba_simulacao:
     )
     st.caption("Modo leve: apenas a seção selecionada é renderizada, reduzindo recálculo de UI.")
 
-    if result_view == "Resumo e Recomendações":
+    if result_view == "Resumo":
         suggestions = recommendations.get("suggestions", [])
         proposal_desc = recommendations.get("proposal_description", "")
         comparison_notes = recommendations.get("comparison_notes", [])
@@ -1187,8 +1213,8 @@ with aba_simulacao:
         else:
             st.info("Nenhuma recomendação textual foi gerada.")
 
-        st.subheader("Configuração escolhida")
-        st.json(r.get("cfg", {}), expanded=False)
+        with st.expander("Mostrar configuração completa", expanded=False):
+            st.json(r.get("cfg", {}), expanded=False)
 
         if final_variants:
             st.subheader("Versões finais da sugestão")
@@ -1197,7 +1223,7 @@ with aba_simulacao:
                 row = final_variants.get(label)
                 if not row:
                     continue
-                cfg_mass_limit = float(r.get("cfg", {}).get("planner", {}).get("max_bridge_mass_g", 1000.0))
+                cfg_mass_limit = float(mass_limits.get("effective_limit_g", 1000.0))
                 final_rows.append(
                     {
                         "versão": label,
@@ -1216,7 +1242,8 @@ with aba_simulacao:
 
             if final_rows:
                 table = _prepare_table(final_rows)
-                st.dataframe(_df_to_display_units(table, length_unit, force_unit), width="stretch")
+                with st.expander("Mostrar tabela detalhada das versões finais", expanded=False):
+                    st.dataframe(_df_to_display_units(table, length_unit, force_unit), width="stretch")
 
                 labels = [row["versão"] for row in final_rows]
                 chosen = st.radio("Comparar versão em destaque", labels, horizontal=True)
@@ -1225,7 +1252,53 @@ with aba_simulacao:
                 if chosen_full:
                     st.success(_describe_variant(chosen_full, length_unit, force_unit))
 
-    if result_view == "Etapas de Busca":
+    if result_view == "Por que esta treliça?":
+        proposal_desc = recommendations.get("proposal_description", "")
+        comparison_notes = recommendations.get("comparison_notes", [])
+        by_reason = stage_counts.get("stage0_prefilter_discarded_by_reason", {}) or {}
+        by_reason_all = stage_counts.get("discarded_by_reason", {}) or {}
+        mat_cfg = r.get("cfg", {}).get("material", {}) or {}
+        t_cap = float(mat_cfg.get("tension_capacity_per_stick_kgf", 72.0))
+        c_cap = max(1.0e-6, float(mat_cfg.get("compression_capacity_two_sticks_kgf", 11.0)) / 2.0)
+        tc_ratio = t_cap / c_cap
+
+        st.markdown("**Critério de escolha da solução**")
+        if proposal_desc:
+            st.info(proposal_desc)
+        else:
+            st.info("A seleção priorizou melhor equilíbrio entre fator de segurança, carga de ruptura prevista e massa limite.")
+
+        st.markdown(
+            "A influência do material foi considerada na triagem: "
+            f"relação tração/compressão aproximada = **{tc_ratio:.2f}**."
+        )
+        if tc_ratio >= 6.0:
+            st.caption(
+                "Como a tração está muito acima da compressão, a busca tende a favorecer famílias tipo Pratt "
+                "e reduzir famílias Howe, que penalizam diagonais comprimidas longas."
+            )
+
+        if comparison_notes:
+            st.markdown("**Comparação final (ideal/min/max)**")
+            for note in comparison_notes:
+                st.write(f"- {note}")
+
+        if by_reason:
+            st.markdown("**Topologias descartadas antes da S0/S1 (motivos principais)**")
+            top_rows = sorted(by_reason.items(), key=lambda kv: kv[1], reverse=True)[:12]
+            st.dataframe(
+                pd.DataFrame([{"motivo": k, "quantidade": v} for k, v in top_rows]),
+                width="stretch",
+            )
+        if by_reason_all:
+            with st.expander("Mostrar todos os descartes por motivo", expanded=False):
+                all_rows = sorted(by_reason_all.items(), key=lambda kv: kv[1], reverse=True)
+                st.dataframe(
+                    pd.DataFrame([{"motivo": k, "quantidade": v} for k, v in all_rows]),
+                    width="stretch",
+                )
+
+    if result_view == "Detalhamento técnico":
         stage_map = {
             "S1 - varredura": opt.get("stage1", []),
             "S2 - refinamento": opt.get("stage2", []),
@@ -1242,7 +1315,8 @@ with aba_simulacao:
         if stage_rows:
             table = _prepare_table([{k: v for k, v in row.items() if k != "config"} for row in stage_rows])
             table = _df_to_display_units(table, length_unit, force_unit)
-            st.dataframe(table, width="stretch")
+            with st.expander("Mostrar tabela completa da etapa", expanded=False):
+                st.dataframe(table, width="stretch")
 
             if {"pontuação", "massa_g", "FS_mín_principal"}.issubset(set(table.columns)):
                 plot_df = table.copy()
@@ -1277,7 +1351,7 @@ with aba_simulacao:
         else:
             st.info("Sem dados para a etapa selecionada.")
 
-    if result_view == "Visualizações 3D/2D":
+    if result_view == "Geometria 3D":
         v1, v2 = st.columns([2, 1])
 
         with v1:
@@ -1298,6 +1372,24 @@ with aba_simulacao:
                 & (member_df_visual["FS_min_num"] < 1.0)
             ].sort_values("FS_min_sort", ascending=True)
             rupture_ids = rupture_df["member_id"].drop_duplicates().astype(int).head(20).tolist()
+            rupture_details = metrics.get("rupture_details", {}) or {}
+            gov_member_raw = rupture_details.get("governing_member_id")
+            gov_member_id = int(gov_member_raw) if safe_float(gov_member_raw, None) is not None else None
+            if gov_member_id is not None and gov_member_id > 0 and gov_member_id not in rupture_ids:
+                rupture_ids = [gov_member_id] + rupture_ids
+
+            rupture_colors = {}
+            for _, row in rupture_df.head(40).iterrows():
+                mid = int(row.get("member_id", -1))
+                fs_val = safe_float(row.get("FS_min_num"), 10.0) or 10.0
+                if fs_val < 0.4:
+                    rupture_colors[mid] = "#ff2d2d"
+                elif fs_val < 0.7:
+                    rupture_colors[mid] = "#ff6b2c"
+                else:
+                    rupture_colors[mid] = "#ffb347"
+            if gov_member_id is not None and gov_member_id > 0:
+                rupture_colors[gov_member_id] = "#ff00ff"
 
             st.plotly_chart(
                 viz.plotly_geometry(
@@ -1306,13 +1398,21 @@ with aba_simulacao:
                     r["supports"],
                     r["loads"],
                     highlight_member_ids=rupture_ids,
+                    highlight_member_colors=rupture_colors,
                     scale_mode=scale_mode,
                 ),
                 width="stretch",
             )
+            if gov_member_id is not None and gov_member_id > 0:
+                st.info(
+                    "Membro governante da previsão de ruptura: "
+                    f"`M{gov_member_id}` | modo={rupture_details.get('governing_rupture_mode', '—')} "
+                    f"| FS governante={_format_float(rupture_details.get('governing_fs'), 2, '—')}."
+                )
             if rupture_ids:
                 st.caption(
-                    "Membros destacados em vermelho: possíveis pontos de ruptura (FS < 1,0). "
+                    "Membros destacados: possível ruptura (FS<1,0). "
+                    "Magenta = membro governante da estimativa de ruptura; tons quentes = criticidade por FS. "
                     "A análise detalhada está na seção Membros Críticos."
                 )
             else:
@@ -1369,7 +1469,7 @@ with aba_simulacao:
                         width="stretch",
                     )
 
-    if result_view == "Membros Críticos":
+    if result_view == "Cargas e membros críticos":
         member_df = _prepare_member_checks(r.get("member_checks", []))
 
         if member_df.empty:
@@ -1395,7 +1495,8 @@ with aba_simulacao:
 
             show_df = member_df[show_cols].copy()
             show_df = _df_to_display_units(show_df, length_unit, force_unit)
-            st.dataframe(show_df.head(100), width="stretch")
+            with st.expander("Mostrar tabela de membros (detalhada)", expanded=False):
+                st.dataframe(show_df.head(200), width="stretch")
 
             critical_first = (
                 member_df[member_df["member_id"] >= 0]
@@ -1416,48 +1517,28 @@ with aba_simulacao:
                     help="Selecione um ou mais IDs de membro para destacá-los na visualização 3D.",
                 )
 
-                highlight_colors: Dict[int, str] = {}
-                # Define a colour scale based on the axial load (N_N) of each selected member.
-                # Members with higher absolute axial force appear in red, and those with lower force
-                # appear in green.  The thresholds below map the relative load to discrete colours.
-                if selected:
-                    # Compute the maximum absolute axial force across all members for normalization.
-                    try:
-                        abs_loads = member_df["N_N"].apply(lambda x: abs(float(x)) if x is not None else 0.0)
-                        max_abs_load = abs_loads.max() if not abs_loads.empty else 0.0
-                    except (TypeError, ValueError):
-                        max_abs_load = 0.0
-                    for mid in selected:
-                        row = member_df[member_df["member_id"] == int(mid)].iloc[0]
-                        try:
-                            n_val = abs(float(row.get("N_N", 0.0)))
-                        except (TypeError, ValueError):
-                            n_val = 0.0
-                        # Normalize the load.  If max_abs_load == 0, everything is set to 0.
-                        ratio = n_val / max_abs_load if max_abs_load > 1e-9 else 0.0
-                        # Map the ratio to a discrete colour (red=high load, orange, yellow, green, blue=very low).
-                        if ratio >= 0.8:
-                            color = "red"
-                        elif ratio >= 0.5:
-                            color = "orange"
-                        elif ratio >= 0.3:
-                            color = "yellow"
-                        elif ratio >= 0.1:
-                            color = "green"
-                        else:
-                            color = "blue"
-                        highlight_colors[int(mid)] = color
-
-                # Render geometry highlighting selected members.  If no
-                # selection, simply show the full geometry without highlights.
+                color_mode_critical = st.radio(
+                    "Cor da visualização crítica",
+                    ["força axial", "utilização", "fator de segurança"],
+                    horizontal=True,
+                    index=0,
+                )
+                color_mode_map = {
+                    "força axial": "force",
+                    "utilização": "utilization",
+                    "fator de segurança": "safety_factor",
+                }
                 st.plotly_chart(
                     viz.plotly_geometry(
                         r["nodes"],
                         r["members"],
                         r["supports"],
                         r["loads"],
-                        highlight_member_ids=[int(m) for m in selected] if selected else None,
-                        highlight_member_colors=highlight_colors if selected else None,
+                        color_mode=color_mode_map[color_mode_critical],
+                        member_results=r.get("solver_result").member_results if r.get("solver_result") else [],
+                        member_checks=r.get("member_checks", []),
+                        selected_member_ids=[int(m) for m in selected] if selected else None,
+                        highlight_selected=True,
                         scale_mode="didactic",
                     ),
                     width="stretch",
@@ -1475,10 +1556,11 @@ with aba_simulacao:
                         width="stretch",
                     )
 
-    if result_view == "Montagem e Cola":
+    if result_view == "Montagem real":
         pieces_all = r.get("detailed", {}).get("stick_pieces", [])
         assembly_groups = r.get("detailed", {}).get("assembly_groups", [])
         assembly_summary = r.get("detailed", {}).get("assembly_summary", {})
+        assembly_tutorial = r.get("detailed", {}).get("assembly_tutorial", {}) or {}
         render_mode = st.radio(
             "Render dos palitos",
             ["prismas reais", "prismas exagerados", "linhas leves"],
@@ -1486,6 +1568,35 @@ with aba_simulacao:
             index=0,
             key="stick_render_mode",
         )
+
+        tutorial_steps = assembly_tutorial.get("assembly_steps", []) or []
+        if tutorial_steps:
+            st.markdown("**Tutorial de montagem por etapas**")
+            for step in tutorial_steps:
+                st.markdown(
+                    f"**{step.get('step_id', '')} - {step.get('title', '')}**  \n"
+                    f"Palitos estimados: {step.get('stick_count', 0)} | "
+                    f"Massa estimada: {_format_float(step.get('estimated_mass_g'), 2, '0')} g  \n"
+                    f"{step.get('instruction', '')}"
+                )
+            with st.expander("Mostrar listas de corte e emenda do tutorial", expanded=False):
+                cut_df = _prepare_table(assembly_tutorial.get("cut_list", []))
+                joint_df = _prepare_table(assembly_tutorial.get("joint_list", []))
+                by_member_df = _prepare_table(
+                    [
+                        {"member_id": k, "stick_count": v}
+                        for k, v in (assembly_tutorial.get("stick_count_by_member", {}) or {}).items()
+                    ]
+                )
+                if not cut_df.empty:
+                    st.markdown("**Lista de cortes**")
+                    st.dataframe(_df_to_display_units(cut_df, length_unit, force_unit), width="stretch")
+                if not joint_df.empty:
+                    st.markdown("**Lista de juntas**")
+                    st.dataframe(_df_to_display_units(joint_df, length_unit, force_unit), width="stretch")
+                if not by_member_df.empty:
+                    st.markdown("**Palitos por membro**")
+                    st.dataframe(by_member_df, width="stretch")
 
         # Show assembly group overview first if available
         if assembly_groups:
@@ -1637,7 +1748,7 @@ with aba_simulacao:
                     width="stretch",
                 )
 
-    if result_view == "Relatório Técnico":
+    if result_view == "Detalhamento técnico":
         st.subheader("Verificação contra critérios eliminatórios (edital)")
         checks_df = _prepare_table(r.get("edital_checks", []))
         if not checks_df.empty:
@@ -1782,7 +1893,7 @@ with aba_simulacao:
             resumo_df["valor"] = resumo_df["valor"].astype(str)
         st.dataframe(resumo_df, width="stretch")
 
-    if result_view == "Logs e Auditoria":
+    if result_view == "Logs e auditoria":
         st.markdown("**Resumo numérico da busca**")
         stage_resume = pd.DataFrame(
             [
@@ -1856,7 +1967,7 @@ with aba_simulacao:
             st.markdown("**Propostas descartadas (auditoria de filtros)**")
             st.dataframe(_df_to_display_units(discarded_df, length_unit, force_unit), width="stretch")
 
-    if result_view == "Frame3DD e Downloads":
+    if result_view == "Frame3DD e downloads":
         st.subheader("Frame3DD")
         st.json(frame3dd_result)
 

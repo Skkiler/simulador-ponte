@@ -36,7 +36,13 @@ class ReportService:
         right_support = abs(float(b.get("right_support_overhang_mm", 0.0)))
         width = float(b.get("width_mm", 0.0))
         height = float(b.get("center_height_mm", 0.0))
-        mass_g = safe_float(dsum.get("estimated_total_mass_g"), safe_float(metrics.get("estimated_total_mass_g"), 0.0)) or 0.0
+        mass_g = safe_float(
+            dsum.get("competition_mass_g"),
+            safe_float(
+                dsum.get("estimated_total_mass_g"),
+                safe_float(metrics.get("competition_mass_g"), safe_float(metrics.get("estimated_total_mass_g"), 0.0)),
+            ),
+        ) or 0.0
         limits = resolve_mass_limits(cfg)
         effective_limit = float(limits["effective_limit_g"])
         nominal_limit = float(limits["nominal_limit_g"])
@@ -169,11 +175,14 @@ class ReportService:
         suggestions_md = "\n".join(f"- {s}" for s in suggestions) if suggestions else "- Sem recomendações adicionais."
 
         quarter_used = bool(metrics.get("quarter_model_used"))
+        quarter_fallback = str(metrics.get("quarter_model_fallback_reason") or "").strip()
         quarter_text = (
             "Projeto analisado por 1/4 e replicado por simetria."
             if quarter_used
             else "Análise executada no modelo completo."
         )
+        if (not quarter_used) and quarter_fallback:
+            quarter_text += f" Fallback: {quarter_fallback}."
         symmetry_text = (
             "Simetria estrutural imposta."
             if bool(cfg.get("analysis", {}).get("enforce_symmetry", True))
@@ -229,15 +238,16 @@ class ReportService:
 - Verificações consideradas: tração, compressão direta, flambagem por Euler e reações de apoio.
 
 ## 5) Peso, dimensões e consumo
-- Massa total estimada: {self._fmt(dsum.get('estimated_total_mass_g'), 1, ' g')}
-- Margem de massa: {self._fmt(dsum.get('mass_margin_g'), 1, ' g')}
-- Limite nominal (edital): {self._fmt(limits.get('nominal_limit_g'), 1, ' g')}
-- Limite efetivo aplicado: {self._fmt(limits.get('effective_limit_g'), 1, ' g')} ({limits.get('effective_source', '—')})
-- Palitos estimados (com perdas): {dsum.get('estimated_total_sticks_with_waste', '—')}
-- Peças individuais: {dsum.get('total_piece_instances', '—')}
-- Área total de cola estimada: {self._fmt(dsum.get('estimated_glue_area_mm2'), 1, ' mm²')}
-- Massa de cola estimada: {self._fmt(dsum.get('estimated_glue_mass_g'), 1, ' g')}
-- Incremento de corte aplicado: {self._fmt(dsum.get('cut_increment_mm'), 1, ' mm')}
+- Massa de palitos instalados: {self._fmt(dsum.get('installed_stick_mass_g'), 1, ' g')}
+- Massa de cola úmida: {self._fmt(dsum.get('wet_glue_mass_g'), 1, ' g')}
+- Massa de cola curada: {self._fmt(dsum.get('cured_glue_mass_g'), 1, ' g')}
+- Água evaporada estimada: {self._fmt(dsum.get('evaporated_glue_water_g'), 1, ' g')}
+- Massa competitiva final: {self._fmt(dsum.get('competition_mass_g', dsum.get('estimated_total_mass_g')), 1, ' g')}
+- Margem até o limite efetivo: {self._fmt(dsum.get('mass_margin_g'), 1, ' g')}
+- Palitos brutos comprados (estimados): {dsum.get('purchased_blank_sticks_needed', dsum.get('estimated_total_sticks_with_waste', '—'))}
+- Descarte de corte estimado: {self._fmt(dsum.get('cutting_scrap_mass_g'), 1, ' g')}
+- Massa de compra/produção: {self._fmt(dsum.get('assembly_procurement_mass_g'), 1, ' g')}
+- Observação: descarte de corte e sobra de compra não entram na massa final competitiva.
 
 ## 6) Dimensionamento por membro e emendas
 - Membros com ajuste local de sticks: {sizing_changed}

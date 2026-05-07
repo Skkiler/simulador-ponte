@@ -1,32 +1,9 @@
-"""
-Utility functions for enforcing a global effective mass limit across the system.
+"""Mass constraints and compliance utilities.
 
-The simulator permits multiple configuration sections to specify a mass limit.  In
-practice this led to subtle divergence between the planner, material model,
-report generator and other modules.  To avoid the situation where a design
-passes a limit in one place but is rejected in another, this module provides
-two small helpers:
-
-* ``effective_mass_limit_g(cfg)`` resolves a single mass limit for a given
-  configuration.  It inspects both ``cfg['planner']['max_bridge_mass_g']``
-  and ``cfg['material']['mass_limit_g']`` and returns whichever is more
-  restrictive (i.e. the lower value).  When only one limit is present the
-  defined value is returned.  If neither is specified a sensible default of
-  1000 grams is used.
-
-* ``assert_mass_compliant(row_or_metrics, cfg, source)`` inspects a metrics
-  dictionary or row dictionary and annotates it with a boolean flag
-  ``mass_compliant``.  If a numeric ``mass_g`` or ``estimated_total_mass_g``
-  field exceeds the effective mass limit plus an optional tolerance, the flag
-  is set to ``False``.  Otherwise it is set to ``True``.  An optional tolerance
-  may be provided via ``cfg['analysis']['mass_tolerance_g']``; when not
-  defined it defaults to zero.  Consumers can use this flag to prevent
-  overweight designs from being promoted to recommended configurations.
-
-These functions are deliberately free of side effects.  They do not raise
-exceptions, log or emit progress, but simply compute and annotate data.  This
-allows them to be used in tight loops (e.g. during candidate evaluation) with
-minimal overhead.
+Key semantics:
+- ``competition_mass_g`` is the final bridge mass criterion (installed sticks + cured glue).
+- Procurement/cutting masses are informational and must not drive rejection when
+  competition mass is available.
 """
 
 from __future__ import annotations
@@ -37,13 +14,14 @@ from src.core.numeric import safe_float
 
 
 def resolve_mass_limits(cfg: Dict[str, Any], *, nominal_limit_g: float = 1000.0) -> Dict[str, float | str | None]:
-    """Resolve nominal/material/planner/effective mass limits for one config."""
+    """Resolve nominal/material/planner/effective competition mass limits."""
     planner = cfg.get("planner", {}) or {}
     material = cfg.get("material", {}) or {}
 
     planner_limit = safe_float(planner.get("max_bridge_mass_g"), None)
     material_limit = safe_float(material.get("mass_limit_g"), None)
-    nominal_limit = max(1.0, float(nominal_limit_g))
+    nominal_cfg = safe_float(material.get("nominal_competition_limit_g"), None)
+    nominal_limit = max(1.0, nominal_cfg if nominal_cfg is not None else float(nominal_limit_g))
 
     candidates = [x for x in (planner_limit, material_limit) if x is not None]
     if candidates:
@@ -68,51 +46,89 @@ def resolve_mass_limits(cfg: Dict[str, Any], *, nominal_limit_g: float = 1000.0)
 
 
 def effective_mass_limit_g(cfg: Dict[str, Any]) -> float:
-    """Determine the global mass limit in grams for a configuration.
-
-    The planner section (``cfg['planner']['max_bridge_mass_g']``) and the
-    material section (``cfg['material']['mass_limit_g']``) may both define
-    mass limits.  If both are present the smaller of the two is returned
-    because exceeding either should render a design non‑compliant.  If only
-    one is present it is returned.  When neither is specified a default of
-    1000 grams (the typical competition limit) is assumed.
-    """
+    """Return effective competition mass limit in grams."""
     return float(resolve_mass_limits(cfg)["effective_limit_g"])
 
 
-def assert_mass_compliant(row_or_metrics: Dict[str, Any], cfg: Dict[str, Any], source: str = "") -> Dict[str, Any]:
-    """Annotate a metrics or row dict with a ``mass_compliant`` flag.
+def _resolve_budget_defaults(cfg: Dict[str, Any]) -> Dict[str, float]:
+    mat = cfg.get("material", {}) or {}
+    planner = cfg.get("planner", {}) or {}
 
-    The function reads ``mass_g`` or ``estimated_total_mass_g`` from the
-    provided dictionary.  If neither field is present or cannot be converted
-    to a float the check is skipped and the dictionary is returned unchanged.
-    Otherwise the value is compared against the effective mass limit (plus an
-    optional tolerance).  The tolerance may be supplied in
-    ``cfg['analysis']['mass_tolerance_g']`` and defaults to zero.  A new
-    boolean key ``mass_compliant`` is inserted into the dictionary
-    indicating whether the mass is within the permitted limit.  Callers
-    should use this flag to reject overweight designs during candidate
-    selection.
+    stick_budget = safe_float(mat.get("stick_budget_g"), None)
+    if stick_budget is None:
+        stick_budget = safe_float(planner.get("target_installed_stick_mass_g"), 900.0)
 
-    ``source`` is an optional string used for debugging; it is ignored by
-    this function but may be logged by callers if desired.
-    """
-    # Extract a candidate mass from known fields
-    mass = None
+    wet_glue_budget = safe_float(mat.get("wet_glue_budget_g"), None)
+    if wet_glue_budget is None:
+        wet_glue_budget = safe_float(planner.get("target_wet_glue_mass_g"), 100.0)
+
+    return {
+        "stick_budget_g": max(1.0, float(stick_budget or 900.0)),
+        "wet_glue_budget_g": max(1.0, float(wet_glue_budget or 100.0)),
+    }
+
+
+def _extract_competition_mass(row_or_metrics: Dict[str, Any]) -> tuple[float | None, str]:
+    comp = safe_float(row_or_metrics.get("competition_mass_g"), None)
+    if comp is not None:
+        return comp, "competition_mass_g"
+
     for key in ("mass_g", "estimated_total_mass_g", "mass"):
-        val = row_or_metrics.get(key)
-        mass = safe_float(val, None)
-        if mass is not None:
-            break
-    if mass is None:
-        # cannot determine mass; leave untouched
+        val = safe_float(row_or_metrics.get(key), None)
+        if val is not None:
+            return val, key
+    return None, ""
+
+
+def assert_mass_compliant(
+    row_or_metrics: Dict[str, Any],
+    cfg: Dict[str, Any],
+    source: str = "",
+) -> Dict[str, Any]:
+    """Annotate competition/stick/glue mass compliance flags."""
+    comp_mass, comp_source = _extract_competition_mass(row_or_metrics)
+    if comp_mass is None:
         return row_or_metrics
+
     limits = resolve_mass_limits(cfg)
     limit = float(limits["effective_limit_g"])
     tolerance = safe_float(cfg.get("analysis", {}).get("mass_tolerance_g"), 0.0) or 0.0
-    row_or_metrics["mass_compliant"] = (mass <= limit + tolerance)
+    budgets = _resolve_budget_defaults(cfg)
+
+    installed_mass = safe_float(row_or_metrics.get("installed_stick_mass_g"), None)
+    wet_glue_mass = safe_float(row_or_metrics.get("wet_glue_mass_g"), None)
+    procurement_mass = safe_float(row_or_metrics.get("assembly_procurement_mass_g"), None)
+
+    competition_mass_compliant = comp_mass <= limit + tolerance
+    stick_budget_compliant = (
+        True
+        if installed_mass is None
+        else installed_mass <= budgets["stick_budget_g"] + tolerance
+    )
+    wet_glue_budget_compliant = (
+        True
+        if wet_glue_mass is None
+        else wet_glue_mass <= budgets["wet_glue_budget_g"] + tolerance
+    )
+
+    row_or_metrics["mass_reference_g"] = comp_mass
+    row_or_metrics["mass_reference_source"] = comp_source
+    row_or_metrics["mass_compliant"] = competition_mass_compliant
+    row_or_metrics["competition_mass_compliant"] = competition_mass_compliant
+    row_or_metrics["stick_budget_compliant"] = stick_budget_compliant
+    row_or_metrics["wet_glue_budget_compliant"] = wet_glue_budget_compliant
+    row_or_metrics["procurement_mass_warning_only"] = (
+        procurement_mass is not None and procurement_mass > limit + tolerance
+    )
+    row_or_metrics["stick_budget_g"] = budgets["stick_budget_g"]
+    row_or_metrics["wet_glue_budget_g"] = budgets["wet_glue_budget_g"]
     row_or_metrics["mass_limit_effective_g"] = limit
     row_or_metrics["mass_limit_nominal_g"] = float(limits["nominal_limit_g"])
     row_or_metrics["mass_limit_planner_g"] = limits["planner_limit_g"]
     row_or_metrics["mass_limit_material_g"] = limits["material_limit_g"]
+    row_or_metrics["mass_margin_g"] = limit - comp_mass
+    if installed_mass is not None:
+        row_or_metrics["stick_budget_margin_g"] = budgets["stick_budget_g"] - installed_mass
+    if wet_glue_mass is not None:
+        row_or_metrics["wet_glue_budget_margin_g"] = budgets["wet_glue_budget_g"] - wet_glue_mass
     return row_or_metrics
