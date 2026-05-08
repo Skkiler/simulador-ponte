@@ -16,6 +16,8 @@
     "plateau_start_mm": 400.0,
     "plateau_end_mm": 800.0,
     "load_total_kgf": 80.0,
+    "tension_only_bracing_solver_enabled": false,
+    "tension_only_bracing_interpretation": false,
     "load_distribution_x_mm": [
       400,
       500,
@@ -40,8 +42,6 @@
     "include_cross_frame_bracing": true,
     "include_support_pad_members": true,
     "unilateral_supports": true,
-    "tension_only_bracing_interpretation": true,
-    "tension_only_bracing_solver_enabled": true,
     "truss_type": "Parker",
     "top_profile": "parker_plateau",
     "internal_truss_type": "X",
@@ -181,12 +181,9 @@
     "acceptance_min_design_breaking_load_kgf": 80.0,
     "use_target_min_fs_as_hard_acceptance": false,
     "planner_objective_profile": "max_strength_per_competition_mass",
-    "tension_only_groups": [
-      "top_bracing",
-      "bottom_bracing",
-      "cross_frame_bracing",
-      "chord_lacing"
-    ],
+    "tension_only_groups": [],
+    "enable_tension_only_solver_globally": false,
+    "enable_tension_only_solver_in_funnel": false,
     "primary_groups": [
       "bottom_chord",
       "top_chord",
@@ -237,24 +234,25 @@
   },
   "section_layout_by_group": {
     "bottom_chord": {
-      "layout": "stacked",
-      "spacing_y_mm": 0,
-      "spacing_z_mm": 0
+      "layout": "box",
+      "spacing_y_mm": 10,
+      "spacing_z_mm": 8
     },
     "top_chord": {
       "layout": "box",
-      "spacing_y_mm": 12,
-      "spacing_z_mm": 12
+      "spacing_y_mm": 14,
+      "spacing_z_mm": 14
     },
     "vertical": {
-      "layout": "stacked",
-      "spacing_y_mm": 0,
-      "spacing_z_mm": 0
+      "layout": "box",
+      "spacing_y_mm": 10,
+      "spacing_z_mm": 10
     },
     "diagonal": {
-      "layout": "stacked",
-      "spacing_y_mm": 0,
-      "spacing_z_mm": 0
+      "layout": "double_stack",
+      "columns": 2,
+      "spacing_y_mm": 8,
+      "spacing_z_mm": 6
     },
     "top_transverse": {
       "layout": "stacked",

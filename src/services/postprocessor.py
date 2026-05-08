@@ -20,6 +20,8 @@ class PostProcessor:
         mat = cfg["material"]
         detail = cfg.get("detail_model", {})
         primary = set(cfg["analysis"].get("primary_groups", []))
+        global_failure = set(cfg["analysis"].get("global_failure_groups", primary))
+        local_check_only = set(cfg["analysis"].get("local_check_only_groups", []))
         stabilizers = set(cfg["analysis"].get("stabilizer_groups", []))
         tension_only_bracing = bool(
             cfg.get("bridge", {}).get("tension_only_bracing_interpretation", True)
@@ -155,16 +157,24 @@ class PostProcessor:
             utilization = (1.0 / fs_min_clean) if (fs_min_clean is not None and fs_min_clean > 1.0e-12) else None
 
             group = r["group"]
-            if group in primary:
+
+            if group in global_failure:
                 role = "primary"
-            elif group in stabilizers:
+            elif group in stabilizers or group in local_check_only:
                 role = "stabilizer"
             else:
                 role = "secondary"
 
             released_tension_only = bool(r.get("tension_only_released", False))
             tension_only_compressed = bool(role == "stabilizer" and N < 0 and tension_only_bracing)
-            design_relevant = not (released_tension_only or tension_only_compressed)
+            local_failure_only = group in local_check_only
+
+            design_relevant = (
+                group in global_failure
+                and not released_tension_only
+                and not tension_only_compressed
+            )
+
             fs_design = fs_min_clean if design_relevant else None
             utilization_design = utilization if design_relevant else None
 

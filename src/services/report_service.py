@@ -24,6 +24,44 @@ class ReportService:
         if v is None:
             return "—"
         return f"{v:.{decimals}f}{suffix}"
+    
+    @staticmethod
+    def _stick_dimension_rule(cfg: Dict) -> str:
+        rules = cfg.get("competition_rules", {}) or {}
+        if not bool(rules.get("enforce_nominal_stick_dimensions", False)):
+            return "configurável; dimensões devem ser > 0"
+
+        parts = []
+        for key, tol_key, label in (
+            ("required_stick_length_mm", "stick_length_tolerance_mm", "compr."),
+            ("required_stick_thickness_mm", "stick_thickness_tolerance_mm", "esp."),
+            ("required_stick_width_mm", "stick_width_tolerance_mm", "larg."),
+        ):
+            required = rules.get(key)
+            if required is None:
+                parts.append(f"{label}=config.")
+            else:
+                parts.append(f"{label}={float(required):.2f}±{float(rules.get(tol_key, 0.2)):.2f} mm")
+        return "; ".join(parts)
+
+    @staticmethod
+    def _stick_dimension_ok(cfg: Dict) -> bool:
+        mat = cfg.get("material", {}) or {}
+        rules = cfg.get("competition_rules", {}) or {}
+        length = float(mat.get("stick_length_mm", 0.0))
+        thickness = float(mat.get("stick_thickness_mm", 0.0))
+        width = float(mat.get("stick_width_mm", 0.0))
+        if length <= 0.0 or thickness <= 0.0 or width <= 0.0:
+            return False
+        if not bool(rules.get("enforce_nominal_stick_dimensions", False)):
+            return True
+
+        checks = (
+            (length, rules.get("required_stick_length_mm"), float(rules.get("stick_length_tolerance_mm", 0.5))),
+            (thickness, rules.get("required_stick_thickness_mm"), float(rules.get("stick_thickness_tolerance_mm", 0.2))),
+            (width, rules.get("required_stick_width_mm"), float(rules.get("stick_width_tolerance_mm", 0.2))),
+        )
+        return all(required is None or abs(value - float(required)) <= tol for value, required, tol in checks)
 
     def _criterios_edital(self, cfg: Dict, metrics: Dict, detailed: Dict | None = None) -> List[Dict]:
         detailed = detailed or {}
@@ -90,12 +128,8 @@ class ReportService:
                     f"{float(m.get('stick_width_mm', 0.0)):.2f} mm"
                 ),
                 # Reference for stick dimensions uses 115 mm × 1.5 mm × 7.0 mm
-                "regra": "115 x 1,5 x 7,0 mm",
-                "conforme": (
-                    abs(float(m.get("stick_length_mm", 0.0)) - 115.0) <= 1e-6
-                    and abs(float(m.get("stick_thickness_mm", 0.0)) - 1.5) <= 1e-6
-                    and abs(float(m.get("stick_width_mm", 0.0)) - 7.0) <= 1e-6
-                ),
+                "regra": self._stick_dimension_rule(cfg),
+                "conforme": self._stick_dimension_ok(cfg),
             },
             {
                 "critério": "Compressão 1 palito",

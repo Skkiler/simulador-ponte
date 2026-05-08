@@ -218,6 +218,32 @@ class ActiveDesignPlanner:
                 "support_pad": 2,
                 "chord_lacing": 1,
             },
+            "compression_box_light": {
+                "top_chord": 4,
+                "bottom_chord": 2,
+                "diagonal": 2,
+                "vertical": 2,
+                "top_transverse": 1,
+                "bottom_transverse": 1,
+                "support_pad": 2,
+                "chord_lacing": 1,
+                "top_bracing": 1,
+                "bottom_bracing": 1,
+                "cross_frame_bracing": 1,
+            },
+            "compression_box": {
+                "top_chord": 7,
+                "bottom_chord": 4,
+                "diagonal": 3,
+                "vertical": 4,
+                "top_transverse": 1,
+                "bottom_transverse": 1,
+                "support_pad": 4,
+                "chord_lacing": 1,
+                "top_bracing": 1,
+                "bottom_bracing": 1,
+                "cross_frame_bracing": 1,
+            },
             "strong_top": {
                 "top_chord": 4,
                 "bottom_chord": 2,
@@ -265,12 +291,239 @@ class ActiveDesignPlanner:
         cfg: Dict,
         profile_name: str,
     ) -> None:
-        profile = self._reinforcement_profiles().get(profile_name, self._reinforcement_profiles()["balanced"])
-        sticks = cfg.setdefault("member_sticks_by_group", {})
-        sticks.update(profile)
+        profile_key = str(profile_name or "balanced").strip().lower()
 
-        for g in ("top_bracing", "bottom_bracing", "cross_frame_bracing"):
+        sticks = cfg.setdefault("member_sticks_by_group", {})
+        layout = cfg.setdefault("section_layout_by_group", {})
+        k_factors = cfg.setdefault("effective_length_factor_by_group", {})
+
+        if profile_key in {"compression_box", "compression_box_light"}:
+            # compression_box_light:
+            #   Usado em S1/S2 para gerar macroprojetos promissores sem estourar a massa.
+            #
+            # compression_box:
+            #   Usado quando o pipeline já sabe que precisa reforçar compressão,
+            #   preferencialmente depois de S3/S4/S5, não como macro inicial bruto.
+            #
+            # Filosofia:
+            #   - reforçar membros globais: top_chord, bottom_chord, diagonal, vertical, support_pad;
+            #   - manter travamentos locais leves;
+            #   - melhorar layout contra flambagem em vez de apenas aumentar n_sticks.
+
+            if profile_key == "compression_box_light":
+                sticks.update(
+                    {
+                        # Membros globais principais.
+                        "top_chord": 4,
+                        "bottom_chord": 2,
+                        "diagonal": 2,
+                        "vertical": 2,
+                        "support_pad": 2,
+
+                        # Membros locais/travamentos. Mantidos leves.
+                        "top_transverse": 1,
+                        "bottom_transverse": 1,
+                        "top_bracing": 1,
+                        "bottom_bracing": 1,
+                        "cross_frame_bracing": 1,
+                        "chord_lacing": 1,
+                    }
+                )
+
+                # Layouts moderados para S1/S2.
+                # O objetivo é aumentar rigidez contra flambagem sem gerar massa absurda.
+                layout["top_chord"] = {
+                    "layout": "box",
+                    "spacing_y_mm": 10.0,
+                    "spacing_z_mm": 10.0,
+                }
+                layout["bottom_chord"] = {
+                    "layout": "double_stack",
+                    "columns": 2,
+                    "spacing_y_mm": 6.0,
+                    "spacing_z_mm": 4.0,
+                }
+                layout["vertical"] = {
+                    "layout": "double_stack",
+                    "columns": 2,
+                    "spacing_y_mm": 6.0,
+                    "spacing_z_mm": 4.0,
+                }
+                layout["diagonal"] = {
+                    "layout": "double_stack",
+                    "columns": 2,
+                    "spacing_y_mm": 6.0,
+                    "spacing_z_mm": 5.0,
+                }
+
+                # Hipótese moderada de travamento efetivo.
+                # Não usar valores agressivos em macrotriagem.
+                k_factors["top_chord"] = {
+                    "Ky": 0.75,
+                    "Kz": 0.75,
+                }
+                k_factors["bottom_chord"] = {
+                    "Ky": 0.85,
+                    "Kz": 0.85,
+                }
+                k_factors["vertical"] = {
+                    "Ky": 0.85,
+                    "Kz": 0.85,
+                }
+                k_factors["diagonal"] = {
+                    "Ky": 0.90,
+                    "Kz": 0.90,
+                }
+
+            else:
+                sticks.update(
+                    {
+                        # Versão mais forte. Não usar como macro inicial padrão,
+                        # pois tende a estourar massa em S2.
+                        "top_chord": 7,
+                        "bottom_chord": 4,
+                        "diagonal": 3,
+                        "vertical": 4,
+                        "support_pad": 4,
+
+                        # Membros locais/travamentos. Continuam leves.
+                        "top_transverse": 1,
+                        "bottom_transverse": 1,
+                        "top_bracing": 1,
+                        "bottom_bracing": 1,
+                        "cross_frame_bracing": 1,
+                        "chord_lacing": 1,
+                    }
+                )
+
+                layout["top_chord"] = {
+                    "layout": "box",
+                    "spacing_y_mm": 12.0,
+                    "spacing_z_mm": 12.0,
+                }
+                layout["bottom_chord"] = {
+                    "layout": "box",
+                    "spacing_y_mm": 8.0,
+                    "spacing_z_mm": 6.0,
+                }
+                layout["vertical"] = {
+                    "layout": "box",
+                    "spacing_y_mm": 8.0,
+                    "spacing_z_mm": 8.0,
+                }
+                layout["diagonal"] = {
+                    "layout": "double_stack",
+                    "columns": 2,
+                    "spacing_y_mm": 6.0,
+                    "spacing_z_mm": 5.0,
+                }
+
+                # Versão mais otimista, mas ainda plausível para estrutura bem travada.
+                k_factors["top_chord"] = {
+                    "Ky": 0.65,
+                    "Kz": 0.65,
+                }
+                k_factors["bottom_chord"] = {
+                    "Ky": 0.80,
+                    "Kz": 0.80,
+                }
+                k_factors["vertical"] = {
+                    "Ky": 0.75,
+                    "Kz": 0.75,
+                }
+                k_factors["diagonal"] = {
+                    "Ky": 0.85,
+                    "Kz": 0.85,
+                }
+
+        else:
+            profiles = self._reinforcement_profiles()
+            profile = profiles.get(profile_key, profiles["balanced"])
+            sticks.update(profile)
+
+        # Garantias finais.
+        # Travamentos devem existir, mas não devem virar consumidores grandes de massa.
+        for g in (
+            "top_bracing",
+            "bottom_bracing",
+            "cross_frame_bracing",
+            "chord_lacing",
+        ):
             sticks.setdefault(g, 1)
+
+        # Transversais locais também devem existir, mas leves.
+        for g in (
+            "top_transverse",
+            "bottom_transverse",
+        ):
+            sticks.setdefault(g, 1)
+
+        # Apoios não podem sumir.
+        sticks.setdefault("support_pad", 2)
+
+        # Defaults mínimos de layout, caso algum perfil antigo não tenha definido.
+        layout.setdefault(
+            "top_chord",
+            {
+                "layout": "box",
+                "spacing_y_mm": 10.0,
+                "spacing_z_mm": 10.0,
+            },
+        )
+        layout.setdefault(
+            "bottom_chord",
+            {
+                "layout": "box",
+                "spacing_y_mm": 8.0,
+                "spacing_z_mm": 6.0,
+            },
+        )
+        layout.setdefault(
+            "vertical",
+            {
+                "layout": "stacked",
+                "spacing_y_mm": 0.0,
+                "spacing_z_mm": 0.0,
+            },
+        )
+        layout.setdefault(
+            "diagonal",
+            {
+                "layout": "stacked",
+                "spacing_y_mm": 0.0,
+                "spacing_z_mm": 0.0,
+            },
+        )
+
+        # Defaults mínimos de comprimento efetivo.
+        k_factors.setdefault(
+            "top_chord",
+            {
+                "Ky": 0.85,
+                "Kz": 0.85,
+            },
+        )
+        k_factors.setdefault(
+            "bottom_chord",
+            {
+                "Ky": 0.90,
+                "Kz": 0.90,
+            },
+        )
+        k_factors.setdefault(
+            "vertical",
+            {
+                "Ky": 1.00,
+                "Kz": 1.00,
+            },
+        )
+        k_factors.setdefault(
+            "diagonal",
+            {
+                "Ky": 1.00,
+                "Kz": 1.00,
+            },
+        )
 
     def _apply_candidate_geometry(self, cfg: Dict, candidate: Dict) -> Dict:
         v = copy.deepcopy(cfg)
@@ -318,12 +571,18 @@ class ActiveDesignPlanner:
             }
         )
 
+        existing_load_xs = list(b.get("load_distribution_x_mm") or [])
+
         load_xs = []
         x = b["plateau_start_mm"]
         while x <= b["plateau_end_mm"] + 1e-9:
             load_xs.append(round(x, 6))
             x += panel
-        b["load_distribution_x_mm"] = load_xs or [span / 2.0]
+
+        if bool(candidate.get("auto_load_distribution_from_plateau", False)) or not existing_load_xs:
+            b["load_distribution_x_mm"] = load_xs or [span / 2.0]
+        else:
+            b["load_distribution_x_mm"] = existing_load_xs
 
         p["target_load_kgf"] = float(p.get("target_load_kgf", b["load_total_kgf"]))
         p["target_breaking_load_kgf"] = float(
@@ -589,15 +848,23 @@ class ActiveDesignPlanner:
     def _solver_kwargs_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
         bridge = cfg.get("bridge", {}) or {}
         analysis = cfg.get("analysis", {}) or {}
+
+        tension_only_groups = [
+            str(g)
+            for g in (analysis.get("tension_only_groups") or [])
+            if str(g).strip()
+        ]
+
+        tension_only_enabled = (
+            bool(bridge.get("tension_only_bracing_solver_enabled", False))
+            and bool(tension_only_groups)
+            and bool(analysis.get("enable_tension_only_solver_globally", False))
+        )
+
         return {
             "unilateral_supports": bool(bridge.get("unilateral_supports", True)),
-            "tension_only_solver_enabled": bool(
-                bridge.get("tension_only_bracing_solver_enabled", False)
-            ),
-            "tension_only_groups": analysis.get(
-                "tension_only_groups",
-                ["top_bracing", "bottom_bracing", "cross_frame_bracing", "chord_lacing"],
-            ),
+            "tension_only_solver_enabled": tension_only_enabled,
+            "tension_only_groups": tension_only_groups,
             "tension_only_compression_tolerance_N": float(
                 analysis.get("tension_only_compression_tolerance_N", 1.0e-6)
             ),
@@ -804,7 +1071,17 @@ class ActiveDesignPlanner:
             if v is None:
                 return max_sticks
             return max(min_sticks, int(v))
-        target_fs = float(analysis.get("target_min_fs", 2.0))
+        acceptance_fs = float(analysis.get("acceptance_min_primary_fs", 1.05))
+        target_fs_raw = float(analysis.get("target_min_fs", 2.0))
+
+        # target_min_fs=2.0 é uma meta aspiracional; para sizing discreto inicial,
+        # usar 2.0 direto explode a massa. O sizing deve mirar aceitação + margem.
+        target_fs = float(
+            local.get(
+                "sizing_target_fs",
+                min(target_fs_raw, max(1.15, 1.15 * acceptance_fs)),
+            )
+        )
         max_mass = float(effective_mass_limit_g(c))
         current_mass = float(metrics.get("mass_g", 0.0) or 0.0)
 
@@ -1443,9 +1720,6 @@ class ActiveDesignPlanner:
             "howe": "howe",
             "howe_inverted": "howe_inverted",
             "howe invertida": "howe_inverted",
-            "k": "k_symmetric",
-            "k_symmetric": "k_symmetric",
-            "k simétrica": "k_symmetric",
             "x": "x",
             "n": "pratt_symmetric",
             "none": "none",
@@ -1465,8 +1739,6 @@ class ActiveDesignPlanner:
             return "warren_with_verticals"
         if norm in {"howe", "howe_inverted"}:
             return "howe"
-        if norm in {"k_symmetric"}:
-            return "k"
         if norm in {"x"}:
             return "x"
         if norm in {"none"}:
@@ -1480,7 +1752,6 @@ class ActiveDesignPlanner:
             "warren": "Warren_symmetric",
             "warren_with_verticals": "Warren_mid_braced",
             "howe": "Howe_inverted",
-            "k": "K_symmetric",
             "x": "X",
             "none": "none",
         }
@@ -1578,7 +1849,16 @@ class ActiveDesignPlanner:
         analysis = cfg.get("analysis", {}) or {}
         planner = cfg.get("planner", {}) or {}
         local = planner.get("local_sizing", {}) or {}
-        target_fs = float(analysis.get("target_min_fs", 2.0))
+
+        acceptance_fs = float(analysis.get("acceptance_min_primary_fs", 1.05))
+        target_fs_raw = float(analysis.get("target_min_fs", 2.0))
+        target_fs = float(
+            local.get(
+                "sizing_target_fs",
+                min(target_fs_raw, max(1.15, 1.15 * acceptance_fs)),
+            )
+        )
+
         min_sticks = max(1, int(analysis.get("planner_min_sticks_per_group", 1)))
         max_sticks = max(min_sticks, int(analysis.get("planner_max_sticks_per_group", 12)))
         max_by_group = analysis.get("planner_max_sticks_per_group_by_group", {}) or {}
@@ -1590,8 +1870,6 @@ class ActiveDesignPlanner:
             )
         )
         low_ratio = float(local.get("low_force_ratio", 0.12))
-        moderate_ratio = float(local.get("moderate_force_ratio", 0.35))
-        high_ratio = float(local.get("high_force_ratio", 0.65))
         allow_optional_removal = bool(local.get("allow_optional_member_removal", False))
         min_structural = max(1, int(local.get("min_sticks_structural_member", 1)))
         min_primary = max(min_structural, int(local.get("min_sticks_primary_member", 2)))
@@ -1610,9 +1888,79 @@ class ActiveDesignPlanner:
         allow_primary_lightening = bool(
             local.get("allow_primary_member_lightening_if_topology_ok", True)
         )
+
         min_primary_by_group = local.get("min_sticks_primary_member_by_group", {}) or {}
         stick_mass_g = float(cfg.get("material", {}).get("stick_mass_g", 1.4))
         stick_len_mm = max(1.0, float(cfg.get("material", {}).get("stick_length_mm", 115.0)))
+
+        primary_groups = set(
+            analysis.get(
+                "global_failure_groups",
+                analysis.get(
+                    "primary_groups",
+                    [
+                        "top_chord",
+                        "bottom_chord",
+                        "diagonal",
+                        "vertical",
+                        "support_pad",
+                    ],
+                ),
+            )
+        )
+
+        required_groups = set(
+            local.get(
+                "required_groups",
+                [
+                    "top_chord",
+                    "bottom_chord",
+                    "support_pad",
+                ],
+            )
+        )
+
+        optional_groups = set(
+            local.get(
+                "optional_groups",
+                [
+                    "top_bracing",
+                    "bottom_bracing",
+                    "cross_frame_bracing",
+                    "chord_lacing",
+                ],
+            )
+        )
+
+        local_check_only_groups = set(
+            analysis.get(
+                "local_check_only_groups",
+                [
+                    "top_transverse",
+                    "bottom_transverse",
+                    "top_bracing",
+                    "bottom_bracing",
+                    "cross_frame_bracing",
+                    "chord_lacing",
+                ],
+            )
+        )
+
+        stabilizer_groups = set(
+            analysis.get(
+                "stabilizer_groups",
+                [
+                    "top_transverse",
+                    "bottom_transverse",
+                    "top_bracing",
+                    "bottom_bracing",
+                    "cross_frame_bracing",
+                    "chord_lacing",
+                ],
+            )
+        )
+
+        base_group_sticks = cfg.get("member_sticks_by_group", {}) or {}
 
         def max_for(group: str) -> int:
             v = safe_float(max_by_group.get(group), None)
@@ -1630,66 +1978,33 @@ class ActiveDesignPlanner:
             for r in (member_checks or [])
             if r.get("member_id") is not None
         }
+
         max_abs_n = max(
             (abs(safe_float(r.get("N_N"), 0.0) or 0.0) for r in res_map.values()),
             default=0.0,
         )
         max_abs_n = max(1.0e-9, max_abs_n)
-        enforce_symmetry = bool(analysis.get("enforce_symmetry", True))
 
-        primary_groups = set(
-            analysis.get(
-                "primary_groups",
-                [
-                    "top_chord",
-                    "bottom_chord",
-                    "diagonal",
-                    "vertical",
-                    "top_transverse",
-                    "bottom_transverse",
-                    "support_pad",
-                ],
-            )
-        )
-        required_groups = set(
-            local.get(
-                "required_groups",
-                [
-                    "top_chord",
-                    "bottom_chord",
-                    "support_pad",
-                    "top_transverse",
-                    "bottom_transverse",
-                ],
-            )
-        )
-        optional_groups = set(
-            local.get(
-                "optional_groups",
-                [
-                    "top_bracing",
-                    "bottom_bracing",
-                    "cross_frame_bracing",
-                    "chord_lacing",
-                ],
-            )
-        )
-        base_group_sticks = cfg.get("member_sticks_by_group", {}) or {}
+        enforce_symmetry = bool(analysis.get("enforce_symmetry", True))
 
         member_by_id = {int(m.id): m for m in members}
         partners = self.map_member_to_symmetry_partners(cfg, nodes, members)
+
         orbit_by_member: Dict[int, List[int]] = {}
         orbit_id_by_member: Dict[int, int] = {}
+
         for m in members:
             mid = int(m.id)
             if enforce_symmetry:
                 orbit = sorted(set([mid] + list(partners.get(mid, []))))
             else:
                 orbit = [mid]
+
             oid = int(min(orbit))
+
             for pid in orbit:
-                orbit_by_member[pid] = orbit
-                orbit_id_by_member[pid] = oid
+                orbit_by_member[int(pid)] = orbit
+                orbit_id_by_member[int(pid)] = oid
 
         def force_band(abs_force: float, ratio: float, utilization_value: float) -> str:
             if abs_force <= zero_tol:
@@ -1718,20 +2033,44 @@ class ActiveDesignPlanner:
         ) -> int:
             if not structurally_required:
                 return min_structural
+
             base_n = max(1, int(base_group_sticks.get(group, n_current)))
             floor_rel = int(math.ceil(base_n * structural_floor_ratio))
             floor_group = safe_float(min_primary_by_group.get(group), None)
             floor_group_i = int(floor_group) if floor_group is not None else min_primary
             floor_n = max(floor_group_i, floor_rel)
+
             if group in {"top_chord", "bottom_chord", "support_pad"}:
                 floor_n = max(floor_n, 2)
+
             return min(max_for(group), max(min_structural, floor_n))
+
+        def target_sticks_for_fs(
+            group: str,
+            n_current: int,
+            fs_min_value: float,
+            required_fs: float,
+        ) -> int:
+            if fs_min_value <= 1.0e-9:
+                return min(max_for(group), n_current + 2)
+
+            multiplier = required_fs / max(1.0e-9, fs_min_value)
+            multiplier = max(1.0, min(3.0, multiplier))
+
+            desired = int(math.ceil(float(n_current) * multiplier))
+
+            if desired <= n_current:
+                desired = n_current + 1
+
+            return min(max_for(group), max(n_current + 1, desired))
 
         def removal_keeps_topology(orbit_ids: List[int]) -> bool:
             trial = copy.deepcopy(cfg)
             active_map = trial.setdefault("member_active_by_id", {})
+
             for rid in orbit_ids:
                 active_map[str(int(rid))] = False
+
             try:
                 t_nodes, t_members, t_supports, t_loads = self.geometry.generate(trial)
                 topo = self.topology.validate(
@@ -1746,168 +2085,100 @@ class ActiveDesignPlanner:
             except (TypeError, ValueError, KeyError, RuntimeError):
                 return False
 
-        decisions: Dict[int, MemberSizingDecision] = {}
-        processed_orbits: Set[int] = set()
-        for m in sorted(members, key=lambda x: int(x.id)):
-            mid = int(m.id)
-            oid = int(orbit_id_by_member.get(mid, mid))
-            if oid in processed_orbits:
-                continue
-            processed_orbits.add(oid)
-            orbit_ids = orbit_by_member.get(mid, [mid])
-            orbit_members = [member_by_id[i] for i in orbit_ids if i in member_by_id]
-            if not orbit_members:
-                continue
-
-            group = str(getattr(orbit_members[0], "group", ""))
-            abs_forces = []
-            signed_forces = []
-            utilizations = []
-            fs_values = []
-            worst_mode = ""
-            worst_mid = mid
-            for om in orbit_members:
-                rid = int(om.id)
-                res = res_map.get(rid, {})
-                chk = chk_map.get(rid, {})
-                n_val = safe_float(res.get("N_N"), 0.0) or 0.0
-                signed_forces.append(float(n_val))
-                abs_forces.append(abs(n_val))
-                util = safe_float(chk.get("utilization"), 0.0) or 0.0
-                utilizations.append(float(util))
-                fs_i = safe_float(chk.get("FS_min"), None)
-                if fs_i is not None:
-                    fs_values.append(float(fs_i))
-                    if (not worst_mode) or fs_i <= min(fs_values):
-                        worst_mode = str(chk.get("governing_mode", "") or "")
-                        worst_mid = rid
-
-            n_current = max(1, max(int(getattr(om, "n_sticks", 1)) for om in orbit_members))
-            abs_force = max(abs_forces) if abs_forces else 0.0
-            signed_force = 0.0
-            if signed_forces:
-                signed_force = max(signed_forces, key=lambda v: abs(v))
-            ratio = abs_force / max_abs_n
-            fs_min = min(fs_values) if fs_values else target_fs
-            util_max = max(utilizations) if utilizations else 0.0
-            band = force_band(abs_force, ratio, util_max)
-            orbit_length_mm = max(float(getattr(om, "L", 0.0) or 0.0) for om in orbit_members)
-
-            structurally_required = (
-                group in required_groups
-                or group in primary_groups
-                or group in {"top_chord", "bottom_chord", "support_pad"}
-            )
-            can_disable = bool((group in optional_groups) and (not structurally_required))
-            structural_floor = structural_floor_for_group(
-                group,
-                n_current,
-                structurally_required,
-            )
-            target = n_current
-            action = "keep"
-            reason = "stable"
-            joint_before = "auto"
-            joint_after = joint_before
-            role_target_fs = target_fs if structurally_required else max(1.0, target_fs * 0.90)
-            if band == "near_zero":
-                role_target_fs = max(1.0, min(role_target_fs, 1.15))
-            reinforce_locked = False
-            if fs_min >= never_reinforce_if_fs_above:
-                reinforce_locked = True
-            if signed_force >= 0.0 and fs_min >= never_reinforce_tension_if_fs_above:
-                reinforce_locked = True
-
-            if band == "near_zero":
-                joint_after = simplify_joint_for(signed_force)
-                if can_disable and allow_optional_removal:
-                    candidate_disable = 0
-                    if removal_keeps_topology(orbit_ids):
-                        target = candidate_disable
-                        action = "disable"
-                        reason = "near_zero_optional_removed"
-                        joint_after = "none"
-                    else:
-                        target = structural_floor if structurally_required else min(n_current, min_structural)
-                        action = "lighten" if target < n_current else "simplify_joint"
-                        reason = "near_zero_optional_removal_rejected"
-                else:
-                    target = structural_floor if structurally_required else min(n_current, min_structural)
-                    if target > n_current:
-                        action = "reinforce"
-                        reason = "near_zero_but_structural_floor"
-                    else:
-                        action = "lighten" if target < n_current else "simplify_joint"
-                        reason = "near_zero_keep_min_structural"
-            elif fs_min < 1.0 or util_max >= 1.0:
-                target = min(max_for(group), n_current + 1)
-                action = "reinforce" if target > n_current else "keep"
-                reason = "critical_utilization"
-            elif fs_min < role_target_fs or util_max >= 0.75:
-                if reinforce_locked:
-                    action = "keep"
-                    reason = "reinforcement_locked_high_fs"
-                else:
-                    target = min(max_for(group), n_current + 1)
-                    action = "reinforce" if target > n_current else "keep"
-                    reason = "high_utilization_or_low_fs"
-            elif band == "low":
-                if (
-                    fs_min >= donor_fs_threshold
-                    and util_max < 0.35
-                    and n_current > structural_floor
-                ):
-                    if structurally_required and not allow_primary_lightening:
-                        action = "keep"
-                        reason = "primary_lightening_disabled"
-                    else:
-                        target = max(structural_floor, n_current - 1)
-                        action = "lighten" if target < n_current else "keep"
-                        reason = "mass_donor_candidate"
-                elif fs_min >= target_fs * 1.25 and n_current > structural_floor:
-                    target = max(structural_floor, n_current - 1)
-                    action = "lighten"
-                    reason = "low_force_high_fs_relief"
-            else:
-                action = "keep"
-                reason = "adequate_utilization"
-
-            if structurally_required and target < structural_floor:
-                target = structural_floor
-                if action == "disable":
-                    action = "lighten"
-                    reason += "|structural_guard"
-
+        def emit_decisions_for_orbit(
+            *,
+            decisions: Dict[int, MemberSizingDecision],
+            orbit_ids: List[int],
+            member_by_id: Dict[int, Member],
+            res_map: Dict[int, Dict],
+            chk_map: Dict[int, Dict],
+            group: str,
+            oid: int,
+            target: int,
+            action: str,
+            reason: str,
+            signed_force: float,
+            abs_force: float,
+            max_abs_n: float,
+            band: str,
+            util_max: float,
+            fs_min: float,
+            worst_mode: str,
+            worst_mid: int,
+            structurally_required: bool,
+            can_disable: bool,
+            joint_before: str,
+            joint_after: str,
+            orbit_length_mm: float,
+        ) -> None:
             for orbit_mid in orbit_ids:
                 om = member_by_id.get(int(orbit_mid))
+
                 if om is None:
                     continue
+
                 res = res_map.get(int(orbit_mid), {})
                 chk = chk_map.get(int(orbit_mid), {})
+
                 n_val = safe_float(res.get("N_N"), 0.0) or 0.0
-                fs_val = safe_float(chk.get("FS_min"), fs_min) or fs_min
-                util_val = safe_float(chk.get("utilization"), util_max) or util_max
+
+                if structurally_required:
+                    fs_val = safe_float(chk.get("FS_design", chk.get("FS_min")), fs_min)
+                    util_val = safe_float(
+                        chk.get("utilization_design", chk.get("utilization")),
+                        util_max,
+                    )
+                else:
+                    fs_val = safe_float(chk.get("FS_design"), None)
+                    if fs_val is None:
+                        fs_val = max(fs_min, donor_fs_threshold)
+                    util_val = 0.0
+
+                fs_val = fs_val or fs_min
+                util_val = util_val or 0.0
+
+                low_force_all_cases = bool(
+                    res.get(
+                        "low_force_all_cases",
+                        chk.get("low_force_all_cases", abs(n_val) <= zero_tol),
+                    )
+                )
+
                 old_n = max(1, int(getattr(om, "n_sticks", 1)))
+                new_target = max(0, int(target))
+
                 old_mass = old_n * orbit_length_mm / stick_len_mm * stick_mass_g
-                new_mass = max(0, int(target)) * orbit_length_mm / stick_len_mm * stick_mass_g
+                new_mass = new_target * orbit_length_mm / stick_len_mm * stick_mass_g
                 delta_mass = new_mass - old_mass
-                new_util_est = util_val * (old_n / max(1, int(target))) if int(target) > 0 else util_val * 2.0
+
+                new_util_est = (
+                    util_val * (old_n / max(1, new_target))
+                    if new_target > 0
+                    else util_val * 2.0
+                )
+
                 can_be_donor = (
                     fs_val >= donor_fs_threshold
                     and util_val < 0.35
+                    and low_force_all_cases
                     and abs(n_val) <= max(zero_tol * 4.0, 0.2 * max_abs_n)
-                    and int(target) <= old_n
+                    and new_target <= old_n
                 )
+
                 donor_rank = (
                     fs_val / max(0.05, util_val + 0.05)
                     if can_be_donor
                     else 0.0
                 )
+
                 reinforce_eff = (
                     ((util_val - new_util_est) / max(0.05, delta_mass))
                     if action == "reinforce" and delta_mass > 0
                     else 0.0
                 )
+
+                governing_mode = str(chk.get("governing_mode", worst_mode) or worst_mode)
+
                 decisions[int(orbit_mid)] = MemberSizingDecision(
                     member_id=int(orbit_mid),
                     original_group=group,
@@ -1915,7 +2186,7 @@ class ActiveDesignPlanner:
                     symmetry_orbit_id=oid,
                     quarter_member_id=oid,
                     n_sticks_current=old_n,
-                    n_sticks_recommended=int(target),
+                    n_sticks_recommended=int(new_target),
                     force_N=float(n_val),
                     axial_force_N=float(abs(n_val)),
                     abs_force_N=float(abs(n_val)),
@@ -1923,7 +2194,7 @@ class ActiveDesignPlanner:
                     force_band=band,
                     utilization=float(util_val),
                     FS_min=float(fs_val),
-                    governing_mode=str(chk.get("governing_mode", worst_mode) or worst_mode),
+                    governing_mode=governing_mode,
                     action=action,
                     reason=f"{reason}|orbit={oid}|worst_member={worst_mid}",
                     is_structurally_required=bool(structurally_required),
@@ -1937,16 +2208,305 @@ class ActiveDesignPlanner:
                     delta_mass_g=float(delta_mass),
                     old_utilization=float(util_val),
                     new_estimated_utilization=float(new_util_est),
-                    estimated_capacity_gain_ratio=float(max(1, int(target)) / max(1, old_n)),
-                    governing_mode_before=str(chk.get("governing_mode", worst_mode) or worst_mode),
-                    governing_mode_after_est=str(chk.get("governing_mode", worst_mode) or worst_mode),
+                    estimated_capacity_gain_ratio=float(max(1, new_target) / max(1, old_n)),
+                    governing_mode_before=governing_mode,
+                    governing_mode_after_est=governing_mode,
                     can_be_mass_donor=bool(can_be_donor),
                     donor_rank=float(donor_rank),
                     reinforcement_efficiency_score=float(reinforce_eff),
                 )
 
-        # Mass donor pass: reduce conservative donors before reinforcing remaining criticals.
+        decisions: Dict[int, MemberSizingDecision] = {}
+        processed_orbits: Set[int] = set()
+
+        for m in sorted(members, key=lambda x: int(x.id)):
+            mid = int(m.id)
+            oid = int(orbit_id_by_member.get(mid, mid))
+
+            if oid in processed_orbits:
+                continue
+
+            processed_orbits.add(oid)
+
+            orbit_ids = orbit_by_member.get(mid, [mid])
+            orbit_members = [member_by_id[i] for i in orbit_ids if i in member_by_id]
+
+            if not orbit_members:
+                continue
+
+            group = str(getattr(orbit_members[0], "group", ""))
+
+            structurally_required_group = (
+                group in required_groups
+                or group in primary_groups
+                or group in {"top_chord", "bottom_chord", "support_pad"}
+            )
+
+            local_only_group = (
+                group in local_check_only_groups
+                or group in stabilizer_groups
+            ) and not structurally_required_group
+
+            abs_forces: List[float] = []
+            signed_forces: List[float] = []
+            utilizations: List[float] = []
+            fs_values: List[float] = []
+            low_force_flags: List[bool] = []
+
+            worst_mode = ""
+            worst_mid = mid
+
+            for om in orbit_members:
+                rid = int(om.id)
+                res = res_map.get(rid, {})
+                chk = chk_map.get(rid, {})
+
+                n_val = safe_float(res.get("N_N"), 0.0) or 0.0
+
+                signed_forces.append(float(n_val))
+                abs_forces.append(abs(n_val))
+
+                low_force_flags.append(
+                    bool(
+                        res.get(
+                            "low_force_all_cases",
+                            chk.get("low_force_all_cases", abs(n_val) <= zero_tol),
+                        )
+                    )
+                )
+
+                if structurally_required_group:
+                    util = safe_float(
+                        chk.get("utilization_design", chk.get("utilization")),
+                        0.0,
+                    ) or 0.0
+
+                    fs_i = safe_float(
+                        chk.get("FS_design", chk.get("FS_min")),
+                        None,
+                    )
+                else:
+                    # Travamentos e verificações locais não governam o sizing global.
+                    # Eles continuam modelados, mas não recebem reforço prioritário.
+                    util = 0.0
+                    fs_i = safe_float(chk.get("FS_design"), None)
+
+                    if fs_i is None:
+                        fs_i = donor_fs_threshold
+
+                utilizations.append(float(util))
+
+                if fs_i is not None:
+                    fs_values.append(float(fs_i))
+                    if (not worst_mode) or fs_i <= min(fs_values):
+                        worst_mode = str(chk.get("governing_mode", "") or "")
+                        worst_mid = rid
+
+            n_current = max(1, max(int(getattr(om, "n_sticks", 1)) for om in orbit_members))
+            abs_force = max(abs_forces) if abs_forces else 0.0
+
+            signed_force = 0.0
+            if signed_forces:
+                signed_force = max(signed_forces, key=lambda v: abs(v))
+
+            ratio = abs_force / max_abs_n
+            fs_min = min(fs_values) if fs_values else target_fs
+            util_max = max(utilizations) if utilizations else 0.0
+            band = force_band(abs_force, ratio, util_max)
+
+            low_force_all_cases_orbit = (
+                all(low_force_flags)
+                if low_force_flags
+                else abs_force <= zero_tol
+            )
+
+            orbit_length_mm = max(float(getattr(om, "L", 0.0) or 0.0) for om in orbit_members)
+
+            structurally_required = bool(structurally_required_group)
+            can_disable = bool((group in optional_groups) and (not structurally_required))
+            structural_floor = structural_floor_for_group(
+                group,
+                n_current,
+                structurally_required,
+            )
+
+            target = n_current
+            action = "keep"
+            reason = "stable"
+
+            joint_before = "auto"
+            joint_after = joint_before
+
+            role_target_fs = target_fs if structurally_required else max(1.0, target_fs * 0.90)
+
+            if band == "near_zero":
+                role_target_fs = max(1.0, min(role_target_fs, 1.15))
+
+            reinforce_locked = False
+
+            if fs_min >= never_reinforce_if_fs_above:
+                reinforce_locked = True
+
+            if signed_force >= 0.0 and fs_min >= never_reinforce_tension_if_fs_above:
+                reinforce_locked = True
+
+            # Regra nova e mais importante:
+            # grupos locais/travamentos não podem receber reforço global.
+            if local_only_group and not structurally_required:
+                if band == "near_zero" and n_current > structural_floor:
+                    target = max(structural_floor, n_current - 1)
+                    action = "lighten" if target < n_current else "keep"
+                    reason = "local_check_only_near_zero_lighten"
+                    joint_after = simplify_joint_for(signed_force)
+                else:
+                    target = n_current
+                    action = "keep"
+                    reason = "local_check_only_keep_no_global_reinforcement"
+
+                emit_decisions_for_orbit(
+                    decisions=decisions,
+                    orbit_ids=orbit_ids,
+                    member_by_id=member_by_id,
+                    res_map=res_map,
+                    chk_map=chk_map,
+                    group=group,
+                    oid=oid,
+                    target=target,
+                    action=action,
+                    reason=reason,
+                    signed_force=signed_force,
+                    abs_force=abs_force,
+                    max_abs_n=max_abs_n,
+                    band=band,
+                    util_max=util_max,
+                    fs_min=fs_min,
+                    worst_mode=worst_mode or "local_check_only",
+                    worst_mid=worst_mid,
+                    structurally_required=False,
+                    can_disable=False,
+                    joint_before=joint_before,
+                    joint_after=joint_after,
+                    orbit_length_mm=orbit_length_mm,
+                )
+                continue
+
+            if band == "near_zero":
+                joint_after = simplify_joint_for(signed_force)
+
+                if can_disable and allow_optional_removal:
+                    candidate_disable = 0
+
+                    if removal_keeps_topology(orbit_ids):
+                        target = candidate_disable
+                        action = "disable"
+                        reason = "near_zero_optional_removed"
+                        joint_after = "none"
+                    else:
+                        target = structural_floor if structurally_required else min(n_current, min_structural)
+                        action = "lighten" if target < n_current else "simplify_joint"
+                        reason = "near_zero_optional_removal_rejected"
+                else:
+                    target = structural_floor if structurally_required else min(n_current, min_structural)
+
+                    if target > n_current:
+                        action = "reinforce"
+                        reason = "near_zero_but_structural_floor"
+                    else:
+                        action = "lighten" if target < n_current else "simplify_joint"
+                        reason = "near_zero_keep_min_structural"
+
+            elif fs_min < 1.0 or util_max >= 1.0:
+                if reinforce_locked:
+                    action = "keep"
+                    reason = "reinforcement_locked_high_fs"
+                else:
+                    target = target_sticks_for_fs(
+                        group,
+                        n_current,
+                        fs_min,
+                        max(1.0, role_target_fs),
+                    )
+                    action = "reinforce" if target > n_current else "keep"
+                    reason = "critical_utilization"
+
+            elif fs_min < role_target_fs or util_max >= 0.75:
+                if reinforce_locked:
+                    action = "keep"
+                    reason = "reinforcement_locked_high_fs"
+                else:
+                    target = target_sticks_for_fs(
+                        group,
+                        n_current,
+                        fs_min,
+                        role_target_fs,
+                    )
+                    action = "reinforce" if target > n_current else "keep"
+                    reason = "high_utilization_or_low_fs"
+
+            elif band == "low":
+                if (
+                    fs_min >= donor_fs_threshold
+                    and util_max < 0.35
+                    and low_force_all_cases_orbit
+                    and n_current > structural_floor
+                ):
+                    if structurally_required and not allow_primary_lightening:
+                        action = "keep"
+                        reason = "primary_lightening_disabled"
+                    else:
+                        target = max(structural_floor, n_current - 1)
+                        action = "lighten" if target < n_current else "keep"
+                        reason = "mass_donor_candidate"
+
+                elif (
+                    fs_min >= target_fs * 1.25
+                    and low_force_all_cases_orbit
+                    and n_current > structural_floor
+                ):
+                    target = max(structural_floor, n_current - 1)
+                    action = "lighten"
+                    reason = "low_force_high_fs_relief"
+
+            else:
+                action = "keep"
+                reason = "adequate_utilization"
+
+            if structurally_required and target < structural_floor:
+                target = structural_floor
+                if action == "disable":
+                    action = "lighten"
+                    reason += "|structural_guard"
+
+            emit_decisions_for_orbit(
+                decisions=decisions,
+                orbit_ids=orbit_ids,
+                member_by_id=member_by_id,
+                res_map=res_map,
+                chk_map=chk_map,
+                group=group,
+                oid=oid,
+                target=target,
+                action=action,
+                reason=reason,
+                signed_force=signed_force,
+                abs_force=abs_force,
+                max_abs_n=max_abs_n,
+                band=band,
+                util_max=util_max,
+                fs_min=fs_min,
+                worst_mode=worst_mode,
+                worst_mid=worst_mid,
+                structurally_required=structurally_required,
+                can_disable=can_disable,
+                joint_before=joint_before,
+                joint_after=joint_after,
+                orbit_length_mm=orbit_length_mm,
+            )
+
+        # Mass donor pass: reduz doadores conservadores e realoca somente
+        # para membros globalmente estruturais, nunca para travamentos locais.
         orbit_reps: Dict[int, MemberSizingDecision] = {}
+
         for d in decisions.values():
             orbit_reps.setdefault(int(d.symmetry_orbit_id), d)
 
@@ -1958,16 +2518,19 @@ class ActiveDesignPlanner:
             key=lambda d: d.donor_rank,
             reverse=True,
         )
+
         critical_reps = sorted(
             [
                 d for d in orbit_reps.values()
-                if (d.FS_min < 1.0 or d.utilization >= 0.75)
+                if d.is_structurally_required
+                and (d.FS_min < 1.0 or d.utilization >= 0.75)
                 and d.action != "reinforce"
             ],
             key=lambda d: (d.FS_min, -d.utilization),
         )
 
         donor_idx = 0
+
         for crit in critical_reps:
             while donor_idx < len(donor_reps):
                 donor = donor_reps[donor_idx]
@@ -1976,10 +2539,12 @@ class ActiveDesignPlanner:
                     donor.n_sticks_current,
                     donor.is_structurally_required,
                 )
+
                 if donor.n_sticks_recommended > donor_floor:
                     donor.n_sticks_recommended -= 1
                     donor.action = "lighten"
                     donor.reason += "|donor_pass_reduced"
+
                     crit.n_sticks_recommended = min(
                         max_for(crit.original_group),
                         max(crit.n_sticks_recommended, crit.n_sticks_current) + 1,
@@ -1987,15 +2552,17 @@ class ActiveDesignPlanner:
                     crit.action = "reinforce"
                     crit.reason += "|donor_pass_reallocated"
                     break
+
                 donor_idx += 1
 
-        # Repropagate per-orbit adjustments to all partner members.
+        # Repropaga ajustes por órbita para os parceiros simétricos.
         for d in orbit_reps.values():
             for mid in d.applied_to_member_ids:
                 if int(mid) in decisions:
                     decisions[int(mid)].n_sticks_recommended = int(d.n_sticks_recommended)
                     decisions[int(mid)].action = d.action
                     decisions[int(mid)].reason = d.reason
+
         return decisions
 
     def select_member_design_option(
@@ -2143,7 +2710,6 @@ class ActiveDesignPlanner:
                     "Warren_symmetric",
                     "Warren_mid_braced",
                     "Howe_inverted",
-                    "K_symmetric",
                     "X",
                 ],
             )
@@ -2152,19 +2718,19 @@ class ActiveDesignPlanner:
         internal_vals = list(
             planner.get(
                 "consider_internal_trusses",
-                ["X", "Warren_symmetric", "Pratt_symmetric", "Howe_inverted", "K_symmetric", "Warren_mid_braced"],
+                ["X", "Warren_symmetric", "Pratt_symmetric", "Howe_inverted", "Warren_mid_braced"],
             )
         )
         top_chord_vals = list(
             planner.get(
                 "consider_top_chord_trusses",
-                ["X", "Warren_symmetric", "Pratt_symmetric", "Howe_inverted", "K_symmetric", "Warren_mid_braced"],
+                ["X", "Warren_symmetric", "Pratt_symmetric", "Howe_inverted", "Warren_mid_braced"],
             )
         )
         bottom_chord_vals = list(
             planner.get(
                 "consider_bottom_chord_trusses",
-                ["X", "Warren_symmetric", "Pratt_symmetric", "Howe_inverted", "K_symmetric", "Warren_mid_braced"],
+                ["X", "Warren_symmetric", "Pratt_symmetric", "Howe_inverted", "Warren_mid_braced"],
             )
         )
         if enforce_symmetry:
@@ -2172,7 +2738,7 @@ class ActiveDesignPlanner:
                 v
                 for v in side_vals
                 if self._normalize_topology_name(v)
-                in {"pratt_symmetric", "warren_symmetric", "warren_mid_braced", "howe_inverted", "k_symmetric", "x", "howe"}
+                in {"pratt_symmetric", "warren_symmetric", "warren_mid_braced", "howe_inverted", "x", "howe"}
             ] or ["Pratt_symmetric", "Warren_symmetric", "Warren_mid_braced"]
             internal_vals = [v for v in internal_vals if self._normalize_topology_name(v) != "none"] or ["X"]
             top_chord_vals = [v for v in top_chord_vals if self._normalize_topology_name(v) != "none"] or ["X"]
@@ -2217,7 +2783,6 @@ class ActiveDesignPlanner:
             "warren",
             "warren_with_verticals",
             "howe",
-            "k",
             "x",
         ]
         seen_family = set()
@@ -2254,7 +2819,6 @@ class ActiveDesignPlanner:
                     "Pratt_symmetric": 3.2,
                     "Warren_symmetric": 1.2,
                     "Warren_mid_braced": 1.4,
-                    "K_symmetric": 1.3,
                     "X": 1.0,
                     "Howe_inverted": 0.4,
                     "Howe": 0.4,
@@ -2265,10 +2829,10 @@ class ActiveDesignPlanner:
         top_weights.update({"triangular_peak": 1.8, "parker_plateau": 1.6, "shallow_arch": 1.3, "flat": 0.7})
 
         internal_weights = {o: 1.0 for o in internal_vals}
-        internal_weights.update({"X": 2.5, "Warren": 1.45, "Pratt": 1.25, "K": 1.25, "N": 1.1, "Howe": 0.9, "none": 0.35})
+        internal_weights.update({"X": 2.5, "Warren": 1.45, "Pratt": 1.25, "N": 1.1, "Howe": 0.9, "none": 0.35})
 
         chord_weights = {o: 1.0 for o in top_chord_vals}
-        chord_weights.update({"X": 2.2, "Warren": 1.6, "Pratt": 1.25, "K": 1.25, "N": 1.1, "Howe": 0.9, "none": 0.4})
+        chord_weights.update({"X": 2.2, "Warren": 1.6, "Pratt": 1.25, "N": 1.1, "Howe": 0.9, "none": 0.4})
 
         reinforce_weights = {o: 1.0 for o in reinforce_vals}
         mass_limit = float(planner.get("max_bridge_mass_g", cfg.get("material", {}).get("mass_limit_g", 1000.0)))
@@ -2530,7 +3094,6 @@ class ActiveDesignPlanner:
         score += {
             "pratt": 0.9,
             "warren_with_verticals": 0.5,
-            "k": 0.4,
             "warren": 0.25,
             "x": 0.2,
             "howe": -0.4,

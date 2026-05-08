@@ -598,13 +598,65 @@ class VisualizationService:
 
         def _fs_color(value: float | None) -> str:
             if value is None:
-                return "rgb(156,163,175)"
+                return "rgb(156,163,175)"  # cinza: sem FS global relevante
+
             fs = float(value)
-            if fs < 1.0:
-                return _interp((251, 113, 133), (185, 28, 28), min(1.0, 1.0 - fs))
-            if fs < 2.0:
-                return _interp((249, 115, 22), (245, 158, 11), min(1.0, fs - 1.0))
-            return _interp((22, 163, 74), (21, 128, 61), min(1.0, (fs - 2.0) / 3.0))
+
+            if fs < 0.75:
+                return _interp((255, 205, 210), (127, 29, 29), min(1.0, (0.75 - fs) / 0.75))
+            if fs < 1.00:
+                return _interp((249, 115, 22), (185, 28, 28), min(1.0, (1.00 - fs) / 0.25))
+            if fs < 1.15:
+                return _interp((251, 191, 36), (249, 115, 22), min(1.0, (1.15 - fs) / 0.15))
+            if fs < 1.50:
+                return _interp((132, 204, 22), (251, 191, 36), min(1.0, (1.50 - fs) / 0.35))
+            if fs < 2.00:
+                return _interp((34, 197, 94), (132, 204, 22), min(1.0, (2.00 - fs) / 0.50))
+
+            return "rgb(21,128,61)"
+
+        def _member_fs_for_risk(mid: int, *, allow_local: bool = False) -> float | None:
+            chk = chk_map.get(int(mid), {}) or {}
+
+            fs_design = safe_float(chk.get("FS_design"), None)
+            if fs_design is not None:
+                return float(fs_design)
+
+            design_relevant = chk.get("design_relevant", True)
+
+            if design_relevant is False and not allow_local:
+                return None
+
+            fs_min = safe_float(chk.get("FS_min"), None)
+            return float(fs_min) if fs_min is not None else None
+
+        def _member_util_for_width(mid: int) -> float:
+            chk = chk_map.get(int(mid), {}) or {}
+
+            util = safe_float(chk.get("utilization_design"), None)
+            if util is not None:
+                return max(0.0, float(util))
+
+            util = safe_float(chk.get("utilization"), None)
+            if util is not None:
+                return max(0.0, float(util))
+
+            fs = _member_fs_for_risk(mid, allow_local=True)
+            if fs is not None and fs > 1.0e-9:
+                return max(0.0, 1.0 / fs)
+
+            return 0.0
+
+        def _risk_color(mid: int) -> str:
+            return _fs_color(_member_fs_for_risk(mid, allow_local=False))
+
+        def _line_width_for_member(mid: int) -> float:
+            if color_mode == "force":
+                n_val = safe_abs_float((res_map.get(int(mid), {}) or {}).get("N_N"), 0.0)
+                return 2.0 + 5.0 * min(1.0, n_val / max_abs_force)
+
+            util = _member_util_for_width(mid)
+            return 2.0 + 6.0 * min(1.0, util / 1.25)
 
         member_line_color: Dict[int, str] = {}
 
@@ -612,12 +664,18 @@ class VisualizationService:
             if color_mode == "force":
                 val = safe_float((res_map.get(mid, {}) or {}).get("N_N"), 0.0) or 0.0
                 return _force_color(float(val))
+
             if color_mode == "utilization":
-                val = safe_float((chk_map.get(mid, {}) or {}).get("utilization"), 0.0) or 0.0
+                val = _member_util_for_width(mid)
                 return _util_color(float(val))
+
             if color_mode == "safety_factor":
-                fs = safe_float((chk_map.get(mid, {}) or {}).get("FS_min"), None)
+                fs = _member_fs_for_risk(mid, allow_local=True)
                 return _fs_color(fs)
+
+            if color_mode == "risk":
+                return _risk_color(mid)
+
             return group_color.get(group, "#4b5563")
 
         if color_mode == "group":
@@ -646,21 +704,44 @@ class VisualizationService:
             for m in members:
                 ni, nj = node_by_id[m.i], node_by_id[m.j]
                 mid = int(m.id)
-                color = _line_color_for_member(mid, str(m.group))
+
+                color = _line_color_for_member(mid, m.group)
                 member_line_color[mid] = color
-                res = res_map.get(mid, {})
-                chk = chk_map.get(mid, {})
+
+                res = res_map.get(mid, {}) or {}
+                chk = chk_map.get(mid, {}) or {}
+
                 n_val = safe_float(res.get("N_N"), 0.0) or 0.0
                 util = safe_float(chk.get("utilization"), None)
-                fs = safe_float(chk.get("FS_min"), None)
-                hover = (
-                    f"Membro {mid}<br>"
-                    f"Grupo: {m.group}<br>"
-                    f"N = {n_val:.2f} N<br>"
-                    f"Utilização = {util:.3f}" if util is not None else f"Membro {mid}<br>Grupo: {m.group}<br>N = {n_val:.2f} N"
-                )
-                if fs is not None:
-                    hover += f"<br>FS = {fs:.3f}"
+                util_design = safe_float(chk.get("utilization_design"), None)
+                fs_min = safe_float(chk.get("FS_min"), None)
+                fs_design = safe_float(chk.get("FS_design"), None)
+
+                hover_parts = [
+                    f"Membro {mid}",
+                    f"Grupo: {m.group}",
+                    f"N = {n_val:.2f} N",
+                ]
+
+                if fs_min is not None:
+                    hover_parts.append(f"FS_min = {fs_min:.3f}")
+
+                if fs_design is not None:
+                    hover_parts.append(f"FS_design = {fs_design:.3f}")
+
+                if util is not None:
+                    hover_parts.append(f"Utilização = {util:.3f}")
+
+                if util_design is not None:
+                    hover_parts.append(f"Utilização design = {util_design:.3f}")
+
+                if chk.get("governing_mode"):
+                    hover_parts.append(f"Modo: {chk.get('governing_mode')}")
+
+                if chk.get("design_relevant") is False:
+                    hover_parts.append("Apenas verificação local / travamento")
+
+                hover = "<br>".join(hover_parts)
                 fig.add_trace(
                     go.Scatter3d(
                         x=[ni.x, nj.x],
@@ -670,7 +751,10 @@ class VisualizationService:
                         name=f"membro_{mid}",
                         hovertext=hover,
                         hoverinfo="text",
-                        line={"width": 4, "color": color},
+                        line={
+                            "width": _line_width_for_member(mid),
+                            "color": color,
+                        },
                         opacity=0.85,
                         showlegend=False,
                     )
@@ -683,8 +767,14 @@ class VisualizationService:
                 fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(34,197,94)", "width": 5}, name="Baixa utilização"))
                 fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(185,28,28)", "width": 5}, name="Utilização crítica"))
             elif color_mode == "safety_factor":
-                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(22,163,74)", "width": 5}, name="FS alto"))
-                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(185,28,28)", "width": 5}, name="FS baixo"))
+                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(185,28,28)", "width": 5}, name="FS < 1,0 crítico"))
+                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(249,115,22)", "width": 5}, name="FS 1,0–1,15 baixo"))
+                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(34,197,94)", "width": 5}, name="FS seguro"))
+            elif color_mode == "risk":
+                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(185,28,28)", "width": 8}, name="Risco alto: FS < 1"))
+                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(249,115,22)", "width": 6}, name="Risco médio: FS ≈ 1"))
+                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(21,128,61)", "width": 4}, name="Baixo risco"))
+                fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines", line={"color": "rgb(156,163,175)", "width": 4}, name="Local/travamento"))
 
         if selected_ids and highlight_selected:
             for mid in sorted(selected_ids):

@@ -55,20 +55,28 @@ class SimulationPipeline:
     def _solver_kwargs_from_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
         bridge = cfg.get("bridge", {}) or {}
         analysis = cfg.get("analysis", {}) or {}
+
+        tension_only_groups = [
+            str(g)
+            for g in (analysis.get("tension_only_groups") or [])
+            if str(g).strip()
+        ]
+
+        tension_only_enabled = (
+            bool(bridge.get("tension_only_bracing_solver_enabled", False))
+            and bool(tension_only_groups)
+            and bool(analysis.get("enable_tension_only_solver_globally", False))
+        )
+
         return {
             "unilateral_supports": bool(bridge.get("unilateral_supports", True)),
-            "tension_only_solver_enabled": bool(
-                bridge.get("tension_only_bracing_solver_enabled", False)
-            ),
-            "tension_only_groups": analysis.get(
-                "tension_only_groups",
-                ["top_bracing", "bottom_bracing", "cross_frame_bracing", "chord_lacing"],
-            ),
+            "tension_only_solver_enabled": tension_only_enabled,
+            "tension_only_groups": tension_only_groups,
             "tension_only_compression_tolerance_N": float(
                 analysis.get("tension_only_compression_tolerance_N", 1.0e-6)
             ),
         }
-
+    
     @staticmethod
     def _evaluate_edital_criteria(cfg: Dict, metrics: Dict, detailed: Dict) -> List[Dict]:
         bridge = cfg.get("bridge", {})
@@ -114,6 +122,30 @@ class SimulationPipeline:
 
         # Build a list of edital checks.  The stick dimension reference values use
         # the updated specification (7.0 mm × 1.5 mm), replacing the legacy 8.2 mm × 2.0 mm
+        
+        rules = cfg.get("competition_rules", {}) or {}
+        enforce_stick_dims = bool(rules.get("enforce_nominal_stick_dimensions", False))
+        if enforce_stick_dims:
+            req_len = rules.get("required_stick_length_mm")
+            req_thk = rules.get("required_stick_thickness_mm")
+            req_w = rules.get("required_stick_width_mm")
+            tol_len = float(rules.get("stick_length_tolerance_mm", 0.5))
+            tol_thk = float(rules.get("stick_thickness_tolerance_mm", 0.2))
+            tol_w = float(rules.get("stick_width_tolerance_mm", 0.2))
+            len_ok = req_len is None or abs(stick_len - float(req_len)) <= tol_len
+            thk_ok = req_thk is None or abs(stick_thk - float(req_thk)) <= tol_thk
+            width_ok = req_w is None or abs(stick_w - float(req_w)) <= tol_w
+            len_rule = "configurável" if req_len is None else f"{float(req_len):.1f} ± {tol_len:.1f} mm"
+            thk_rule = "configurável" if req_thk is None else f"{float(req_thk):.2f} ± {tol_thk:.2f} mm"
+            width_rule = "configurável" if req_w is None else f"{float(req_w):.2f} ± {tol_w:.2f} mm"
+        else:
+            len_ok = stick_len > 0.0
+            thk_ok = stick_thk > 0.0
+            width_ok = stick_w > 0.0
+            len_rule = "configurável; deve ser > 0 mm"
+            thk_rule = "configurável; deve ser > 0 mm"
+            width_rule = "configurável; deve ser > 0 mm"
+        
         checks = [
             row("Vão livre", f"{span:.1f} mm", "obrigatório 1200 mm", abs(span - 1200.0) <= 1e-6),
             row("Apoio esquerdo", f"{left_support:.1f} mm", "máximo 100 mm", left_support <= 100.0 + 1e-6),
@@ -121,18 +153,18 @@ class SimulationPipeline:
             row("Largura", f"{width:.1f} mm", "entre 100 e 200 mm", 100.0 - 1e-6 <= width <= 200.0 + 1e-6),
             row("Altura central", f"{height:.1f} mm", "mínimo 50 mm", height >= 50.0 - 1e-6),
             row("Peso total estimado", f"{mass_g:.1f} g", mass_rule, mass_g <= eff_limit + 1e-6),
-            row("Palito - comprimento", f"{stick_len:.1f} mm", "115 mm (referência)", abs(stick_len - 115.0) <= 1e-6),
+            row("Palito - comprimento", f"{stick_len:.1f} mm", len_rule, len_ok),
             row(
                 "Palito - espessura",
                 f"{stick_thk:.2f} mm",
-                "1,5 mm (referência)",
-                abs(stick_thk - 1.5) <= 1e-6,
+                thk_rule,
+                thk_ok,
             ),
             row(
                 "Palito - largura",
                 f"{stick_w:.2f} mm",
-                "7,0 mm (referência)",
-                abs(stick_w - 7.0) <= 1e-6,
+                width_rule,
+                width_ok,
             ),
             row("Compressão 1 palito", f"{c1:.2f} kgf", "mínimo 4,0 kgf", c1 >= 4.0 - 1e-6),
             row("Compressão 2 palitos", f"{c2:.2f} kgf", "mínimo 11,0 kgf", c2 >= 11.0 - 1e-6),
@@ -538,29 +570,69 @@ class SimulationPipeline:
                         f"{pred_break:.1f}/{target_break:.1f} kgf ({att:.1f}%)."
                     )
                 elif best_cfg:
-                    emit_log(
-                        "Planejador retornou proposta não viável; "
-                        "pipeline manterá a configuração solicitada para segurança dos cálculos."
-                    )
+                    best_mass = safe_float((best or {}).get("mass_g"), None)
+                    best_solver_status = str((best or {}).get("solver_status", "regular"))
+                    best_regular = self._solver_is_regular(best_solver_status)
+
+                    if best_regular:
+                        cfg = self.config_service.normalize(best_cfg)
+                        emit_warning(
+                            "WARN_PLANNER_BEST_NONFEASIBLE_APPLIED_FOR_DIAGNOSTIC",
+                            "Planejador retornou proposta não viável, mas regular. "
+                            "Ela será aplicada ao pipeline final como melhor diagnóstico, "
+                            "com veredito reprovado se não atingir massa/ruptura/FS.",
+                            stage="planner",
+                        )
+                    else:
+                        emit_log(
+                            "Planejador retornou proposta não viável e não regular; "
+                            "pipeline manterá a configuração solicitada para segurança dos cálculos."
+                        )
                 else:
                     emit_log(
                         "Planejador não retornou proposta aceitável para o limite de massa. "
                         "Pipeline seguirá com a configuração solicitada para diagnóstico."
                     )
             except (RuntimeError, ValueError, TypeError, KeyError) as exc:
-                optimization = {
-                    "error": repr(exc),
-                    "stage1": [],
-                    "stage2": [],
-                    "stage3": [],
-                    "best": None,
-                }
-                emit_log(f"Falha no planejador: {repr(exc)}")
-                emit_warning(
-                    "WARN_PLANNER_EXECUTION_FAILED",
-                    f"Planejador falhou e o pipeline seguirá com a configuração solicitada: {exc!r}",
-                    stage="planner",
-                )
+                mode = str((cfg.get("planner_pipeline", {}) or {}).get("mode", "")).strip().lower()
+
+                if mode == "staged_fidelity_funnel":
+                    optimization = {
+                        "error": repr(exc),
+                        "stage1": [],
+                        "stage2": [],
+                        "stage3": [],
+                        "stage4": [],
+                        "best": {
+                            "feasible": False,
+                            "verdict": "NENHUMA SOLUÇÃO VIÁVEL",
+                            "failed_restriction": repr(exc),
+                            "config": cfg,
+                        },
+                        "best_is_feasible": False,
+                        "logs": [f"Funil falhou: {repr(exc)}"],
+                    }
+
+                    emit_log(f"Falha no funil de fidelidade crescente: {repr(exc)}")
+                    emit_warning(
+                        "WARN_PLANNER_FUNNEL_NO_VIABLE_SOLUTION",
+                        f"O funil não encontrou solução viável: {exc!r}",
+                        stage="planner",
+                    )
+                else:
+                    optimization = {
+                        "error": repr(exc),
+                        "stage1": [],
+                        "stage2": [],
+                        "stage3": [],
+                        "best": None,
+                    }
+                    emit_log(f"Falha no planejador: {repr(exc)}")
+                    emit_warning(
+                        "WARN_PLANNER_EXECUTION_FAILED",
+                        f"Planejador falhou e o pipeline seguirá com a configuração solicitada: {exc!r}",
+                        stage="planner",
+                    )
 
         emit_progress(0.62, "Gerando geometria estrutural")
         nodes, members, supports, loads = self.geometry.generate(cfg)
@@ -804,6 +876,21 @@ class SimulationPipeline:
             result.member_results,
             member_checks,
         )
+
+        # Se o funil já trouxe dimensionamento discreto por membro,
+        # não rodar novamente o sizing local legado all-or-nothing.
+        # Esse passo estava gerando plano acima de 1000 g e sendo descartado.
+        if (
+            str((cfg.get("planner_pipeline", {}) or {}).get("mode", "")).strip().lower()
+            == "staged_fidelity_funnel"
+            and bool(cfg.get("member_sticks_by_id"))
+        ):
+            emit_log(
+                "Sizing local final ignorado: a proposta do funil já contém "
+                "dimensionamento por membro. Evitando sobrescrever por um plano "
+                "all-or-nothing."
+            )
+            member_sizing_plan = {}
 
         # Para o pipeline final aplicamos apenas redimensionamento por membro.
         # Não desabilitamos barras automaticamente aqui para evitar singularidade.

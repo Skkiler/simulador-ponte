@@ -99,9 +99,6 @@ class GeometryService:
         elif typ in {"x", "duplo_x", "double_x"}:
             add_member(nid(x0, y, "bottom"), nid(x1, y, "top"), "diagonal")
             add_member(nid(x0, y, "top"), nid(x1, y, "bottom"), "diagonal")
-        elif typ in {"k_symmetric"}:
-            add_member(nid(x0, y, "bottom"), nid(x1, y, "top"), "diagonal")
-            add_member(nid(x0, y, "top"), nid(x1, y, "bottom"), "diagonal")
         elif typ in {"pratt_symmetric"}:
             add_member(nid(x0, y, "top") if c <= mid else nid(x0, y, "bottom"), nid(x1, y, "bottom") if c <= mid else nid(x1, y, "top"), "diagonal")
         else:
@@ -142,7 +139,7 @@ class GeometryService:
         mode = self._normalize_truss_mode(mode)
         if mode == "none":
             return
-        if mode in {"x", "k_symmetric"}:
+        if mode == "x":
             add_member(nid(x0, ys[0], level), nid(x1, ys[1], level), group)
             add_member(nid(x0, ys[1], level), nid(x1, ys[0], level), group)
         elif mode in {"warren", "warren_symmetric"}:
@@ -171,7 +168,7 @@ class GeometryService:
         if mode == "none":
             return
 
-        if mode in {"x", "k_symmetric"}:
+        if mode == "x":
             add_member(nid(x, ys[0], "bottom"), nid(x, ys[1], "top"), "cross_frame_bracing")
             add_member(nid(x, ys[1], "bottom"), nid(x, ys[0], "top"), "cross_frame_bracing")
             return
@@ -436,7 +433,7 @@ class GeometryService:
             sec = self.sections.composite_section(n_sticks, mat, layout_cfg)
             L = self.sections.member_length_mm(node_by_id[i], node_by_id[j])
             k = cfg.get("effective_length_factor_by_group", {}).get(group, {})
-            members.append(Member(idx, i, j, group, n_sticks, sec["A"], sec["A"], sec["A"], sec["Iy"], sec["Iz"], sec["J"], float(mat["E_MPa"]), float(mat["G_MPa"]), float(k.get("Ky", 1.0)), float(k.get("Kz", 1.0)), L))
+            members.append(Member(idx, i, j, group, n_sticks, sec["A"], sec["A"], sec["A"], sec["Iy"], sec["Iz"], sec["J"], float(mat["E_MPa"]), float(mat["G_MPa"]), float(k.get("Ky", 1.0)), float(k.get("Kz", 1.0)), L, str(sec.get("layout", layout_cfg.get("layout", "stacked")))))
 
         left_xs_raw = [
             float(v)
@@ -494,6 +491,9 @@ class GeometryService:
             )
 
         load_total = float(cfg["bridge"]["load_total_N"])
+        load_level = str(cfg.get("bridge", {}).get("load_application_level", "top")).strip().lower()
+        if load_level not in {"top", "bottom"}:
+            load_level = "top"
         load_xs_raw = [
             float(v)
             for v in cfg["bridge"].get("load_distribution_x_mm", [])
@@ -506,7 +506,7 @@ class GeometryService:
         loaded_nodes_set = set()
         for x in load_xs:
             for y in ys:
-                loaded_nodes_set.add(nid(x, y, "top"))
+                loaded_nodes_set.add(nid(x, y, load_level))
 
         loaded_nodes = sorted(loaded_nodes_set)
         fz_each = -load_total / len(loaded_nodes)
@@ -566,8 +566,8 @@ class GeometryService:
             "warren intermedia": "warren_mid_braced",
             "howe_inverted": "howe_inverted",
             "howe invertida": "howe_inverted",
-            "k_symmetric": "k_symmetric",
-            "k simétrica": "k_symmetric",
+            "k_symmetric": "x",
+            "k simétrica": "x",
             "sem": "none",
             "nenhuma": "none",
         }

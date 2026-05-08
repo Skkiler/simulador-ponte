@@ -1519,14 +1519,26 @@ with aba_simulacao:
 
                 color_mode_critical = st.radio(
                     "Cor da visualização crítica",
-                    ["força axial", "utilização", "fator de segurança"],
+                    [
+                        "risco estrutural (FS + utilização)",
+                        "fator de segurança",
+                        "utilização",
+                        "força axial",
+                    ],
                     horizontal=True,
                     index=0,
+                    help=(
+                        "Risco estrutural usa FS_design/FS_min como cor principal "
+                        "e utilização como espessura da barra. Força axial isolada "
+                        "serve para diagnóstico de caminho de carga, não para risco."
+                    ),
                 )
+
                 color_mode_map = {
-                    "força axial": "force",
-                    "utilização": "utilization",
+                    "risco estrutural (FS + utilização)": "risk",
                     "fator de segurança": "safety_factor",
+                    "utilização": "utilization",
+                    "força axial": "force",
                 }
                 st.plotly_chart(
                     viz.plotly_geometry(

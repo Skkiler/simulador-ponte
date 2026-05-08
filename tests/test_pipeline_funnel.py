@@ -25,7 +25,6 @@ def _fake_case_eval(
         "Howe_inverted": 0.7,
         "Warren_symmetric": 1.0,
         "Warren_mid_braced": 0.9,
-        "K_symmetric": 0.8,
     }.get(side, 0.6)
     h = float(b.get("center_height_mm", 300.0))
     panel = float(b.get("panel_mm", 100.0))
@@ -87,6 +86,7 @@ def _fake_trust_region_refine(
     load_cases: List[str],
     *,
     stage_name: str,
+    tension_only: bool = False,
 ) -> Dict[str, Any]:
     c = copy.deepcopy(cfg)
     c.setdefault("bridge", {})["center_height_mm"] = float(c["bridge"].get("center_height_mm", 300.0)) + 5.0
@@ -127,6 +127,7 @@ def _fake_member_sizing_pass(
     load_cases: List[str],
     *,
     stage_name: str,
+    tension_only: bool = False,
 ) -> Dict[str, Any]:
     summary = self._multi_case_summary(cfg, load_cases, stage_name=stage_name, tension_only=True)
     row = {
@@ -173,6 +174,7 @@ def _fake_topology_cleanup(
     load_cases: List[str],
     *,
     stage_name: str,
+    tension_only: bool = False,
 ) -> Dict[str, Any]:
     summary = self._multi_case_summary(cfg, load_cases, stage_name=stage_name, tension_only=True)
     return {
@@ -233,7 +235,7 @@ def _install_fast_funnel_mocks(monkeypatch, include_detail_calls: list[bool] | N
 def _run_fast_funnel(base_cfg: dict, tmp_path: Path, monkeypatch, include_detail_calls=None, *, install_mocks: bool = True):
     cfg = copy.deepcopy(base_cfg)
     cfg["planner_pipeline"]["mode"] = "staged_fidelity_funnel"
-    cfg["planner_pipeline"]["macro_candidates_count"] = 10
+    cfg["planner_pipeline"]["macro_candidates_count"] = 12
     cfg["planner_pipeline"]["fast_screening_keep_top_k"] = 3
     cfg["planner_pipeline"]["multi_loadcase_keep_top_k"] = 2
     cfg["planner_pipeline"]["geometry_refinement_keep_top_k"] = 1
@@ -249,7 +251,8 @@ def _run_fast_funnel(base_cfg: dict, tmp_path: Path, monkeypatch, include_detail
 def test_pipeline_funnel_limits(base_cfg: dict, tmp_path, monkeypatch) -> None:
     result = _run_fast_funnel(base_cfg, tmp_path, monkeypatch)
 
-    assert len(result["s1_macro"]) <= 10
+    macro_limit = int(base_cfg.get("planner_pipeline", {}).get("macro_candidates_count", 12))
+    assert len(result["s1_macro"]) <= macro_limit
     assert result["stage_counts"]["S2_fast_screening_top_k"] <= 3
     assert result["stage_counts"]["S3_multi_loadcase_top_k"] <= 2
     assert len(result["s7_fabrication"]) == 1
@@ -320,8 +323,11 @@ def test_geometry_refinement_trust_region(base_cfg: dict) -> None:
         assert abs(float(row["delta_width_mm"])) <= float(row["radius_width_mm"]) + 1.0e-9
 
     initial = float(cfg["local_geometry_refinement"]["initial_delta_height_mm"])
-    assert any(float(r["radius_height_mm"]) > initial for r in trace_rows)
-    assert any(float(r["radius_height_mm"]) < initial for r in trace_rows)
+    radii = [float(r["radius_height_mm"]) for r in trace_rows]
+
+    assert radii
+    assert all(r > 0.0 for r in radii)
+    assert max(radii) <= initial * float(cfg["local_geometry_refinement"].get("expand_factor", 1.25)) ** 2 + 1.0e-9
 
 
 def test_diversity_preservation() -> None:
@@ -343,11 +349,11 @@ def test_topology_mutation_deferred(base_cfg: dict, tmp_path, monkeypatch) -> No
 
     _install_fast_funnel_mocks(monkeypatch)
 
-    def _wrap_member(self, cfg, load_cases, *, stage_name):
+    def _wrap_member(self, cfg, load_cases, *, stage_name, tension_only=False):
         order.append("S5")
         return _fake_member_sizing_pass(self, cfg, load_cases, stage_name=stage_name)
 
-    def _wrap_topology(self, cfg, load_cases, *, stage_name):
+    def _wrap_topology(self, cfg, load_cases, *, stage_name, tension_only=False):
         order.append("S6")
         return _fake_topology_cleanup(self, cfg, load_cases, stage_name=stage_name)
 

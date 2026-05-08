@@ -31,6 +31,7 @@ class Member:
     Ky: float
     Kz: float
     L: float
+    layout: str = "stacked"
 
 
 @dataclass(frozen=True)
