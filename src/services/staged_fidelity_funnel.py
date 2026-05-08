@@ -1878,7 +1878,7 @@ class StagedFidelityFunnelPlanner:
             budget_g += abs(float(delta))
 
         # 2. Reforços entram por prioridade estrutural por grama.
-        reinforcements: List[Tuple[float, float, int, Any]] = []
+        reinforcements: List[Tuple[float, float, float, str, int, Any]] = []
 
         for mid, decision in plan.items():
             mid = int(mid)
@@ -1901,24 +1901,40 @@ class StagedFidelityFunnelPlanner:
             group = str(getattr(decision, "original_group", ""))
 
             group_priority = {
-                "vertical": 7.0,
-                "top_chord": 6.5,
+                "vertical": 8.0,
+                "top_chord": 7.0,
                 "diagonal": 4.5,
                 "bottom_chord": 3.0,
                 "support_pad": 2.0,
             }.get(group, 0.25)
 
-            fs_term = 1.0 / max(0.05, float(fs if fs is not None else 1.0))
+            fs_value = float(fs if fs is not None else 1.0)
+            fs_term = 1.0 / max(0.05, fs_value)
 
+            # Não deixe o critério "ganho por grama" ignorar o pior membro global.
+            # Primeiro entram membros globais com FS muito baixo; depois o ranking volta
+            # a ser eficiência por massa. Isso evita deixar montantes centrais longos
+            # com 2 palitos enquanto reforços baratos consomem o orçamento.
             score = (group_priority * fs_term + float(util)) / max(0.5, float(delta))
 
-            reinforcements.append((score, float(delta), mid, decision))
+            reinforcements.append((score, float(delta), fs_value, group, mid, decision))
 
-        reinforcements.sort(key=lambda item: item[0], reverse=True)
+        critical_budget_first_fs = float(
+            (cfg.get("member_sizing", {}) or {}).get("critical_budget_first_fs", 0.85)
+        )
+
+        critical_first = [
+            item for item in reinforcements
+            if item[3] in {"vertical", "top_chord", "diagonal"} and item[2] < critical_budget_first_fs
+        ]
+        regular_reinforcements = [item for item in reinforcements if item not in critical_first]
+
+        critical_first.sort(key=lambda item: (item[2], -item[0]))
+        regular_reinforcements.sort(key=lambda item: item[0], reverse=True)
 
         applied_reinforcements = 0
 
-        for _, delta, mid, decision in reinforcements:
+        for _, delta, _, _, mid, decision in critical_first + regular_reinforcements:
             if max_reinforcements is not None and applied_reinforcements >= int(max_reinforcements):
                 break
 
@@ -2374,6 +2390,7 @@ class StagedFidelityFunnelPlanner:
         *,
         stage_name: str,
         tension_only: bool = False,
+        mass_rescue_only: bool = False,
     ) -> Dict[str, Any]:
         top_cfg = cfg.get("topology_cleanup", {}) or {}
         enabled = bool(top_cfg.get("enabled", True))
@@ -2393,6 +2410,9 @@ class StagedFidelityFunnelPlanner:
         patience = max(1, int(top_cfg.get("patience", 10)))
         near_zero_N = float(top_cfg.get("near_zero_force_threshold_N", 2.0))
         near_zero_rel = float(top_cfg.get("near_zero_force_relative_threshold", 0.01))
+        mass_rescue_target_ratio = float(top_cfg.get("mass_rescue_target_ratio", 0.985))
+        mass_rescue_min_break_retention = float(top_cfg.get("mass_rescue_min_break_retention", 0.97))
+        mass_rescue_min_fs_retention = float(top_cfg.get("mass_rescue_min_fs_retention", 0.97))
 
         cur_cfg = self.planner.config.normalize(cfg)
         cur_summary = self._multi_case_summary(cur_cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
@@ -2412,6 +2432,117 @@ class StagedFidelityFunnelPlanner:
         zero_force_diag: List[Dict[str, Any]] = []
         no_improve = 0
 
+        preserve_groups = {
+            str(g)
+            for g in (
+                top_cfg.get("preserve_member_groups")
+                or ["bottom_chord", "top_chord", "vertical", "diagonal", "support_pad"]
+            )
+        }
+        removable_groups = {
+            str(g)
+            for g in (
+                top_cfg.get("removable_member_groups")
+                or [
+                    "top_bracing",
+                    "bottom_bracing",
+                    "cross_frame_bracing",
+                    "chord_lacing",
+                    "top_transverse",
+                    "bottom_transverse",
+                ]
+            )
+        }
+        preserve_symmetry = bool(top_cfg.get("preserve_symmetry_on_removal", True))
+
+        def _active_case() -> Dict[str, Any]:
+            cases = cur_summary.get("cases") or []
+            return cases[0] if cases else {}
+
+        def _round_coord(v: Any) -> float:
+            return round(float(v), 3)
+
+        def _member_symmetry_helpers() -> Tuple[Dict[int, Any], Dict[int, Any], Dict[Tuple[str, Tuple[Tuple[float, float, float], Tuple[float, float, float]]], List[int]]]:
+            case = _active_case()
+            members = case.get("members") or []
+            nodes = case.get("nodes") or []
+            node_by_id = {int(getattr(n, "id")): n for n in nodes}
+            member_by_id = {int(getattr(m, "id")): m for m in members}
+
+            key_to_ids: Dict[Tuple[str, Tuple[Tuple[float, float, float], Tuple[float, float, float]]], List[int]] = {}
+
+            def point_key(n: Any) -> Tuple[float, float, float]:
+                return (_round_coord(getattr(n, "x")), _round_coord(getattr(n, "y")), _round_coord(getattr(n, "z")))
+
+            def member_key(m: Any) -> Tuple[str, Tuple[Tuple[float, float, float], Tuple[float, float, float]]] | None:
+                ni = node_by_id.get(int(getattr(m, "i")))
+                nj = node_by_id.get(int(getattr(m, "j")))
+                if ni is None or nj is None:
+                    return None
+                pts = tuple(sorted([point_key(ni), point_key(nj)]))
+                return (str(getattr(m, "group", "")), pts)
+
+            for m in members:
+                k = member_key(m)
+                if k is not None:
+                    key_to_ids.setdefault(k, []).append(int(getattr(m, "id")))
+
+            return member_by_id, node_by_id, key_to_ids
+
+        def _symmetry_orbit_for_member(
+            mid: int,
+            member_by_id: Dict[int, Any],
+            node_by_id: Dict[int, Any],
+            key_to_ids: Dict[Tuple[str, Tuple[Tuple[float, float, float], Tuple[float, float, float]]], List[int]],
+        ) -> List[int]:
+            m = member_by_id.get(int(mid))
+            if m is None:
+                return []
+
+            ni = node_by_id.get(int(getattr(m, "i")))
+            nj = node_by_id.get(int(getattr(m, "j")))
+            if ni is None or nj is None:
+                return [int(mid)]
+
+            span = float(cur_cfg.get("bridge", {}).get("span_mm", 1200.0))
+            group = str(getattr(m, "group", ""))
+
+            def p(n: Any) -> Tuple[float, float, float]:
+                return (_round_coord(getattr(n, "x")), _round_coord(getattr(n, "y")), _round_coord(getattr(n, "z")))
+
+            base_pts = [p(ni), p(nj)]
+
+            def tx(pt: Tuple[float, float, float], mirror_x: bool, mirror_y: bool) -> Tuple[float, float, float]:
+                x, y, z = pt
+                if mirror_x:
+                    x = _round_coord(span - x)
+                if mirror_y:
+                    y = _round_coord(-y)
+                return (_round_coord(x), _round_coord(y), _round_coord(z))
+
+            orbit: set[int] = set()
+            transforms = [(False, False), (True, False), (False, True), (True, True)] if preserve_symmetry else [(False, False)]
+
+            for mx, my in transforms:
+                pts = tuple(sorted([tx(base_pts[0], mx, my), tx(base_pts[1], mx, my)]))
+                orbit.update(key_to_ids.get((group, pts), []))
+
+            return sorted(orbit or {int(mid)})
+
+        def _is_removal_orbit_allowed(orbit_ids: List[int], member_by_id: Dict[int, Any]) -> bool:
+            if not orbit_ids:
+                return False
+            for oid in orbit_ids:
+                m = member_by_id.get(int(oid))
+                if m is None:
+                    return False
+                group = str(getattr(m, "group", ""))
+                if group in preserve_groups:
+                    return False
+                if group not in removable_groups:
+                    return False
+            return True
+
         for it in range(1, max_iters + 1):
             cur_summary = self._multi_case_summary(cur_cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
             zero_ids = [int(v) for v in (cur_summary.get("zero_force_member_ids") or [])]
@@ -2430,52 +2561,97 @@ class StagedFidelityFunnelPlanner:
             candidates: List[Tuple[str, Dict[str, Any], Dict[str, Any]]] = []
 
             # 1) Remoção conservadora de membros quase nulos.
+            # Nunca remover membros que definem a forma global da ponte
+            # (banzos, montantes, diagonais principais e apoios).
+            # A remoção é aplicada por órbita de simetria para evitar ponte torta.
             max_remove = int(top_cfg.get("max_remove_candidates_per_iteration", 4))
+            member_by_id, node_by_id, key_to_ids = _member_symmetry_helpers()
+            seen_orbits: set[Tuple[int, ...]] = set()
+            remove_candidates_added = 0
 
-            for mid in zero_ids[:max_remove]:
+            for mid in zero_ids:
+                if remove_candidates_added >= max_remove:
+                    break
+
+                orbit_ids = _symmetry_orbit_for_member(
+                    int(mid),
+                    member_by_id,
+                    node_by_id,
+                    key_to_ids,
+                )
+                orbit_key = tuple(sorted(int(v) for v in orbit_ids))
+
+                if orbit_key in seen_orbits:
+                    continue
+
+                seen_orbits.add(orbit_key)
+
+                if not _is_removal_orbit_allowed(list(orbit_key), member_by_id):
+                    continue
+
                 c = copy.deepcopy(cur_cfg)
-                c.setdefault("member_active_by_id", {})[str(int(mid))] = False
+                active_map = c.setdefault("member_active_by_id", {})
                 disabled = {
                     int(v)
                     for v in (c.get("disabled_member_ids", []) or [])
                     if str(v).strip()
                 }
-                disabled.add(int(mid))
+
+                for oid in orbit_key:
+                    active_map[str(int(oid))] = False
+                    disabled.add(int(oid))
+
                 c["disabled_member_ids"] = sorted(disabled)
                 c = self.planner.config.normalize(c)
-                candidates.append(("remove_member", c, {"member_id": int(mid)}))
+                candidates.append(
+                    (
+                        "remove_member",
+                        c,
+                        {
+                            "member_id": int(mid),
+                            "member_ids": ";".join(str(v) for v in orbit_key),
+                            "removed_count": len(orbit_key),
+                        },
+                    )
+                )
+                remove_candidates_added += 1
 
-            # 2) Mutações globais e mistas.
-            for side_mode, op in [
-                ("Pratt_symmetric", "convert_panel_to_pratt"),
-                ("Howe_inverted", "convert_panel_to_howe"),
-                ("Warren_symmetric", "convert_panel_to_warren"),
-            ]:
-                if str(cur_cfg.get("bridge", {}).get("side_truss_type")) == side_mode:
-                    continue
-                c = copy.deepcopy(cur_cfg)
-                c.setdefault("bridge", {})["side_truss_type"] = side_mode
-                c = self.planner.config.normalize(c)
-                candidates.append((op, c, {"side_truss_type": side_mode}))
+            if not mass_rescue_only:
+                # 2) Mutações globais e mistas. Em modo mass rescue,
+                # não alterar padrão global; só remover peso local seguro.
+                for side_mode, op in [
+                    ("Pratt_symmetric", "convert_panel_to_pratt"),
+                    ("Howe_inverted", "convert_panel_to_howe"),
+                    ("Warren_symmetric", "convert_panel_to_warren"),
+                ]:
+                    if str(cur_cfg.get("bridge", {}).get("side_truss_type")) == side_mode:
+                        continue
+                    c = copy.deepcopy(cur_cfg)
+                    c.setdefault("bridge", {})["side_truss_type"] = side_mode
+                    c = self.planner.config.normalize(c)
+                    candidates.append((op, c, {"side_truss_type": side_mode}))
 
-            c_mixed = copy.deepcopy(cur_cfg)
-            pattern = self._make_symmetric_span_pattern(c_mixed.setdefault("bridge", {}))
-            c_mixed.setdefault("bridge", {})["panel_side_truss_pattern"] = pattern
-            c_mixed = self.planner.config.normalize(c_mixed)
-            candidates.append(("create_mixed_panel_pattern", c_mixed, {"pattern_len": len(pattern)}))
+                c_mixed = copy.deepcopy(cur_cfg)
+                pattern = self._make_symmetric_span_pattern(c_mixed.setdefault("bridge", {}))
+                c_mixed.setdefault("bridge", {})["panel_side_truss_pattern"] = pattern
+                c_mixed = self.planner.config.normalize(c_mixed)
+                candidates.append(("create_mixed_panel_pattern", c_mixed, {"pattern_len": len(pattern)}))
 
-            # 3) Conversões de contraventamento X para diagonal única e vice-versa.
-            c_single = copy.deepcopy(cur_cfg)
-            c_single.setdefault("bridge", {})["top_chord_truss_type"] = "Pratt_symmetric"
-            c_single.setdefault("bridge", {})["bottom_chord_truss_type"] = "Pratt_symmetric"
-            c_single = self.planner.config.normalize(c_single)
-            candidates.append(("convert_x_bracing_to_single_tension_diagonal", c_single, {}))
+                # 3) Conversões de contraventamento X para diagonal única e vice-versa.
+                c_single = copy.deepcopy(cur_cfg)
+                c_single.setdefault("bridge", {})["top_chord_truss_type"] = "Pratt_symmetric"
+                c_single.setdefault("bridge", {})["bottom_chord_truss_type"] = "Pratt_symmetric"
+                c_single = self.planner.config.normalize(c_single)
+                candidates.append(("convert_x_bracing_to_single_tension_diagonal", c_single, {}))
 
-            c_double = copy.deepcopy(cur_cfg)
-            c_double.setdefault("bridge", {})["top_chord_truss_type"] = "X"
-            c_double.setdefault("bridge", {})["bottom_chord_truss_type"] = "X"
-            c_double = self.planner.config.normalize(c_double)
-            candidates.append(("convert_single_diagonal_to_x_tension_bracing", c_double, {}))
+                c_double = copy.deepcopy(cur_cfg)
+                c_double.setdefault("bridge", {})["top_chord_truss_type"] = "X"
+                c_double.setdefault("bridge", {})["bottom_chord_truss_type"] = "X"
+                c_double = self.planner.config.normalize(c_double)
+                candidates.append(("convert_single_diagonal_to_x_tension_bracing", c_double, {}))
+
+            if not candidates:
+                break
 
             best_iter = None
             for op_name, cand_cfg, op_meta in candidates:
@@ -2513,16 +2689,48 @@ class StagedFidelityFunnelPlanner:
                 if not self._summary_valid_flag(summary):
                     continue
 
-                if best_iter is None or (safe_float(summary.get("objective"), -1.0e99) or -1.0e99) > (safe_float(best_iter[0].get("objective"), -1.0e99) or -1.0e99):
-                    best_iter = (summary, cand_cfg, row)
+                if mass_rescue_only:
+                    mass_limit_eff = float(effective_mass_limit_g(cur_cfg))
+                    mass_val = safe_float(summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+                    break_val = safe_float(summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+                    fs_val = safe_float(summary.get("min_fs_design_proxy"), 0.0) or 0.0
+                    objective_val = safe_float(summary.get("objective"), INVALID_OBJECTIVE) or INVALID_OBJECTIVE
+                    rank = (
+                        -max(0.0, mass_val - mass_rescue_target_ratio * mass_limit_eff),
+                        -mass_val,
+                        break_val,
+                        fs_val,
+                        objective_val,
+                    )
+                    if best_iter is None or rank > best_iter[3]:
+                        best_iter = (summary, cand_cfg, row, rank)
+                else:
+                    if best_iter is None or (safe_float(summary.get("objective"), -1.0e99) or -1.0e99) > (safe_float(best_iter[0].get("objective"), -1.0e99) or -1.0e99):
+                        best_iter = (summary, cand_cfg, row, None)
 
             if best_iter is None:
                 break
 
-            best_summary, best_cfg, best_row = best_iter
+            best_summary, best_cfg, best_row = best_iter[:3]
             cur_obj = safe_float(cur_summary.get("objective"), -1.0e99) or -1.0e99
             new_obj = safe_float(best_summary.get("objective"), -1.0e99) or -1.0e99
-            if new_obj > cur_obj + 1.0e-9:
+
+            cur_mass = safe_float(cur_summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+            new_mass = safe_float(best_summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+            cur_break = safe_float(cur_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+            new_break = safe_float(best_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+            cur_fs = safe_float(cur_summary.get("min_fs_design_proxy"), 0.0) or 0.0
+            new_fs = safe_float(best_summary.get("min_fs_design_proxy"), 0.0) or 0.0
+            mass_limit_eff = float(effective_mass_limit_g(cur_cfg))
+
+            mass_rescue_accept = (
+                mass_rescue_only
+                and new_mass < cur_mass - 1.0e-6
+                and new_break >= cur_break * mass_rescue_min_break_retention
+                and new_fs >= cur_fs * mass_rescue_min_fs_retention
+            )
+
+            if new_obj > cur_obj + 1.0e-9 or mass_rescue_accept:
                 cur_cfg = best_cfg
                 cur_summary = best_summary
                 no_improve = 0
@@ -2531,7 +2739,9 @@ class StagedFidelityFunnelPlanner:
                         {
                             "iteration": it,
                             "member_id": best_row.get("member_id"),
-                            "reason": "low_force_all_cases",
+                            "member_ids": best_row.get("member_ids", str(best_row.get("member_id"))),
+                            "removed_count": best_row.get("removed_count", 1),
+                            "reason": "low_force_all_cases_local_member_symmetric_orbit",
                         }
                     )
                 if best_row.get("operation") == "create_mixed_panel_pattern":
@@ -2544,6 +2754,11 @@ class StagedFidelityFunnelPlanner:
                             ),
                         }
                     )
+
+                if mass_rescue_only:
+                    current_mass_after_accept = safe_float(cur_summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+                    if current_mass_after_accept <= mass_rescue_target_ratio * mass_limit_eff:
+                        break
             else:
                 no_improve += 1
 
@@ -3186,6 +3401,7 @@ class StagedFidelityFunnelPlanner:
                     load_cases,
                     stage_name="S6",
                     tension_only=tension_only_s6,
+                    mass_rescue_only=mass_rescue_only,
                 )
                 s = topo["summary"]
                 s6_rows.append(

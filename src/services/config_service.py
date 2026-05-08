@@ -905,6 +905,7 @@ class ConfigService:
 
         # Permite aceitar algumas rodadas quase planas antes da meta.
         member_sizing_cfg.setdefault("allow_flat_pre_target_rounds", 2)
+        member_sizing_cfg.setdefault("critical_budget_first_fs", 1.05)
         member_sizing_cfg.setdefault(
             "sizing_load_cases",
             [
@@ -928,6 +929,31 @@ class ConfigService:
         topology_cleanup.setdefault("patience", 2)
         topology_cleanup.setdefault("max_remove_candidates_per_iteration", 4)
         topology_cleanup.setdefault("skip_if_break_below_ratio", 0.65)
+        topology_cleanup.setdefault("mass_rescue_target_ratio", 0.985)
+        topology_cleanup.setdefault("mass_rescue_min_break_retention", 0.97)
+        topology_cleanup.setdefault("mass_rescue_min_fs_retention", 0.97)
+        topology_cleanup.setdefault(
+            "preserve_member_groups",
+            [
+                "bottom_chord",
+                "top_chord",
+                "vertical",
+                "diagonal",
+                "support_pad",
+            ],
+        )
+        topology_cleanup.setdefault(
+            "removable_member_groups",
+            [
+                "top_bracing",
+                "bottom_bracing",
+                "cross_frame_bracing",
+                "chord_lacing",
+                "top_transverse",
+                "bottom_transverse",
+            ],
+        )
+        topology_cleanup.setdefault("preserve_symmetry_on_removal", True)
         topology_cleanup.setdefault("near_zero_force_threshold_N", 2.0)
         topology_cleanup.setdefault("near_zero_force_relative_threshold", 0.01)
         topology_cleanup.setdefault("preserve_stability", True)
@@ -981,7 +1007,7 @@ class ConfigService:
         local_sizing.setdefault("allow_optional_member_removal", True)
         local_sizing.setdefault("min_sticks_structural_member", 1)
         local_sizing.setdefault("min_sticks_primary_member", 2)
-        local_sizing.setdefault("structural_floor_ratio_primary", 0.34)
+        local_sizing.setdefault("structural_floor_ratio_primary", 1.00)
         local_sizing.setdefault("max_local_iterations", 6)
         local_sizing.setdefault("donor_fs_threshold", 3.0)
         local_sizing.setdefault("sizing_target_fs", 1.15)
@@ -1000,15 +1026,18 @@ class ConfigService:
             if key in member_sizing_cfg:
                 local_sizing[key] = member_sizing_cfg[key]
 
-        local_sizing.setdefault("allow_primary_member_lightening_if_topology_ok", True)
+        local_sizing.setdefault("allow_primary_member_lightening_if_topology_ok", False)
         local_sizing.setdefault("require_topology_validation_after_removal", True)
         local_sizing.setdefault(
             "min_sticks_primary_member_by_group",
             {
-                "top_chord": 2,
+                # Guardas de forma: banzos, montantes e diagonais não podem
+                # ser "emagrecidos" até quebrar a continuidade visual/estrutural.
+                # O dimensionamento pode reforçar acima disso, mas não reduzir abaixo.
+                "top_chord": 4,
                 "bottom_chord": 2,
-                "vertical": 1,
-                "diagonal": 1,
+                "vertical": 2,
+                "diagonal": 2,
                 "top_transverse": 1,
                 "bottom_transverse": 1,
                 "support_pad": 2,

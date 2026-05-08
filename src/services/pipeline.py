@@ -869,48 +869,52 @@ class SimulationPipeline:
             result.node_results,
         )
 
-        member_sizing_plan = self.optimizer.build_member_sizing_plan(
-            cfg,
-            nodes,
-            members,
-            result.member_results,
-            member_checks,
-        )
-
-        # Se o funil já trouxe dimensionamento discreto por membro,
-        # não rodar novamente o sizing local legado all-or-nothing.
-        # Esse passo estava gerando plano acima de 1000 g e sendo descartado.
-        if (
+        has_funnel_member_sizing = (
             str((cfg.get("planner_pipeline", {}) or {}).get("mode", "")).strip().lower()
             == "staged_fidelity_funnel"
             and bool(cfg.get("member_sticks_by_id"))
-        ):
+        )
+
+        if has_funnel_member_sizing:
             emit_log(
                 "Sizing local final ignorado: a proposta do funil já contém "
                 "dimensionamento por membro. Evitando sobrescrever por um plano "
                 "all-or-nothing."
             )
             member_sizing_plan = {}
+            cfg_with_sizing = copy.deepcopy(cfg)
+            sizing_changed = False
+        else:
+            member_sizing_plan = self.optimizer.build_member_sizing_plan(
+                cfg,
+                nodes,
+                members,
+                result.member_results,
+                member_checks,
+            )
 
-        # Para o pipeline final aplicamos apenas redimensionamento por membro.
-        # Não desabilitamos barras automaticamente aqui para evitar singularidade.
-        cfg_with_sizing = copy.deepcopy(cfg)
-        sized_by_id: Dict[str, int] = {}
-        sized_active: Dict[str, bool] = {}
-        for mid, decision in member_sizing_plan.items():
-            sized_by_id[str(int(mid))] = max(1, int(decision.n_sticks_recommended))
-            sized_active[str(int(mid))] = True
-        cfg_with_sizing["member_sticks_by_id"] = sized_by_id
-        cfg_with_sizing["member_active_by_id"] = sized_active
-        cfg_with_sizing["disabled_member_ids"] = []
-        cfg_with_sizing = self.config_service.normalize(cfg_with_sizing)
-        sizing_changed = any(
-            [
-                (cfg_with_sizing.get("member_sticks_by_id", {}) or {}) != (cfg.get("member_sticks_by_id", {}) or {}),
-                (cfg_with_sizing.get("member_active_by_id", {}) or {}) != (cfg.get("member_active_by_id", {}) or {}),
-                (cfg_with_sizing.get("disabled_member_ids", []) or []) != (cfg.get("disabled_member_ids", []) or []),
-            ]
-        )
+            # Para o pipeline final aplicamos apenas redimensionamento por membro.
+            # Não desabilitamos barras automaticamente aqui para evitar singularidade.
+            cfg_with_sizing = copy.deepcopy(cfg)
+            sized_by_id: Dict[str, int] = dict(cfg.get("member_sticks_by_id", {}) or {})
+            sized_active: Dict[str, bool] = dict(cfg.get("member_active_by_id", {}) or {})
+
+            for mid, decision in member_sizing_plan.items():
+                sized_by_id[str(int(mid))] = max(1, int(decision.n_sticks_recommended))
+                sized_active[str(int(mid))] = True
+
+            cfg_with_sizing["member_sticks_by_id"] = sized_by_id
+            cfg_with_sizing["member_active_by_id"] = sized_active
+            # Preserve a topologia existente; nunca limpe disabled_member_ids aqui.
+            cfg_with_sizing["disabled_member_ids"] = list(cfg.get("disabled_member_ids", []) or [])
+            cfg_with_sizing = self.config_service.normalize(cfg_with_sizing)
+            sizing_changed = any(
+                [
+                    (cfg_with_sizing.get("member_sticks_by_id", {}) or {}) != (cfg.get("member_sticks_by_id", {}) or {}),
+                    (cfg_with_sizing.get("member_active_by_id", {}) or {}) != (cfg.get("member_active_by_id", {}) or {}),
+                    (cfg_with_sizing.get("disabled_member_ids", []) or []) != (cfg.get("disabled_member_ids", []) or []),
+                ]
+            )
 
         if sizing_changed:
             emit_log(
