@@ -2733,6 +2733,78 @@ class StagedFidelityFunnelPlanner:
         except Exception:
             partners = {}
 
+        # Além da simetria entre as duas laterais (y), os trechos planos do
+        # banzo superior devem preservar simetria longitudinal em torno do
+        # centro do patamar superior. Isso evita resultados como um trecho
+        # central com 6 palitos e seu par adjacente com 5.
+        node_by_id = {int(getattr(n, "id")): n for n in nodes}
+        max_top_z = max((float(getattr(n, "z", 0.0)) for n in nodes), default=0.0)
+        flat_tol = float(ms.get("longitudinal_symmetry_flat_top_tol_mm", 3.0))
+        enable_long_sym = bool(ms.get("longitudinal_symmetry_for_flat_top_chord", True))
+        flat_top_ids: set[int] = set()
+        flat_node_xs: List[float] = []
+
+        def _rcoord(value: Any) -> float:
+            return round(float(value), 3)
+
+        for m in members:
+            if str(getattr(m, "group", "")) != "top_chord":
+                continue
+            ni = node_by_id.get(int(getattr(m, "i")))
+            nj = node_by_id.get(int(getattr(m, "j")))
+            if ni is None or nj is None:
+                continue
+            if float(getattr(ni, "z", 0.0)) >= max_top_z - flat_tol and float(getattr(nj, "z", 0.0)) >= max_top_z - flat_tol:
+                flat_top_ids.add(int(getattr(m, "id")))
+                flat_node_xs.extend([float(getattr(ni, "x")), float(getattr(nj, "x"))])
+
+        x_sym_axis = (min(flat_node_xs) + max(flat_node_xs)) * 0.5 if flat_node_xs else float(cur_cfg.get("bridge", {}).get("span_mm", 1200.0)) * 0.5
+        flat_key_to_ids: Dict[Tuple[str, Tuple[Tuple[float, float, float], Tuple[float, float, float]]], List[int]] = {}
+
+        def _point_key(n: Any) -> Tuple[float, float, float]:
+            return (_rcoord(getattr(n, "x")), _rcoord(getattr(n, "y")), _rcoord(getattr(n, "z")))
+
+        for mid in flat_top_ids:
+            m = member_by_id.get(int(mid))
+            if m is None:
+                continue
+            ni = node_by_id.get(int(getattr(m, "i")))
+            nj = node_by_id.get(int(getattr(m, "j")))
+            if ni is None or nj is None:
+                continue
+            pts = tuple(sorted([_point_key(ni), _point_key(nj)]))
+            flat_key_to_ids.setdefault(("top_chord", pts), []).append(int(mid))
+
+        def _extend_flat_top_longitudinal_orbit(orbit: Tuple[int, ...], group: str) -> Tuple[int, ...]:
+            if not enable_long_sym or group != "top_chord" or not orbit:
+                return orbit
+            if not any(int(mid) in flat_top_ids for mid in orbit):
+                return orbit
+            out: set[int] = set(int(v) for v in orbit)
+            transforms = [(False, False), (True, False), (False, True), (True, True)]
+            for mid in list(out):
+                m = member_by_id.get(int(mid))
+                if m is None or int(mid) not in flat_top_ids:
+                    continue
+                ni = node_by_id.get(int(getattr(m, "i")))
+                nj = node_by_id.get(int(getattr(m, "j")))
+                if ni is None or nj is None:
+                    continue
+                base_pts = [_point_key(ni), _point_key(nj)]
+
+                def _tx(pt: Tuple[float, float, float], mirror_x: bool, mirror_y: bool) -> Tuple[float, float, float]:
+                    x, y, z = pt
+                    if mirror_x:
+                        x = _rcoord(2.0 * x_sym_axis - x)
+                    if mirror_y:
+                        y = _rcoord(-y)
+                    return (_rcoord(x), _rcoord(y), _rcoord(z))
+
+                for mx, my in transforms:
+                    pts = tuple(sorted([_tx(base_pts[0], mx, my), _tx(base_pts[1], mx, my)]))
+                    out.update(flat_key_to_ids.get(("top_chord", pts), []))
+            return tuple(sorted(out))
+
         worst_by_mid: Dict[int, Dict[str, Any]] = {}
         for case in cases:
             case_name = str(case.get("case", "unknown"))
@@ -2770,6 +2842,7 @@ class StagedFidelityFunnelPlanner:
         group_priority = {"top_chord": 8.0, "vertical": 6.0, "diagonal": 4.0, "bottom_chord": 2.0}
         for mid, meta in worst_by_mid.items():
             orbit = tuple(sorted(set([mid] + [int(v) for v in partners.get(mid, []) if int(v) in member_by_id])))
+            orbit = _extend_flat_top_longitudinal_orbit(orbit, str(meta.get("group")))
             if orbit in seen:
                 continue
             seen.add(orbit)
@@ -2892,7 +2965,9 @@ class StagedFidelityFunnelPlanner:
         target_kgf = float(ms.get("support_pad_push_target_kgf", ms.get("ultimate_strength_target_kgf", 100.0)))
         max_group_sticks = int(ms.get("support_pad_push_max_group_sticks", 6))
         mass_limit = float(effective_mass_limit_g(cur_cfg))
-        target_proxy_mass = mass_limit * float(ms.get("support_pad_push_max_proxy_mass_ratio", 1.010))
+        target_proxy_mass = mass_limit * float(ms.get("support_pad_push_max_proxy_mass_ratio", 0.988))
+        proxy_margin = float(ms.get("support_pad_push_proxy_mass_margin_g", 12.0))
+        target_proxy_mass = min(target_proxy_mass, mass_limit - proxy_margin)
         min_break_ret = float(ms.get("support_pad_push_min_break_retention", 0.995))
         min_fs_ret = float(ms.get("support_pad_push_min_fs_retention", 0.995))
 
@@ -2902,6 +2977,25 @@ class StagedFidelityFunnelPlanner:
         best_fs = safe_float(cur_summary.get("min_fs_design_proxy"), 0.0) or 0.0
         best_mass = safe_float(cur_summary.get("dead_weight_proxy_g"), 0.0) or 0.0
         trace_rows: List[Dict[str, Any]] = []
+        if best_mass > target_proxy_mass + 1.0e-9:
+            return {
+                "best_cfg": cur_cfg,
+                "summary": cur_summary,
+                "trace_rows": [
+                    {
+                        "old_support_pad_sticks": None,
+                        "new_support_pad_sticks": None,
+                        "accepted": False,
+                        "reason": "skipped_no_proxy_mass_margin",
+                        "old_break_proxy_kgf": best_break,
+                        "new_break_proxy_kgf": best_break,
+                        "new_min_fs_design_proxy": best_fs,
+                        "new_mass_proxy_g": best_mass,
+                        "target_proxy_mass_g": target_proxy_mass,
+                        "nominal_support_break_kgf_before": None,
+                    }
+                ],
+            }
 
         # Usa o caso central para ler as margens de apoio, pois ele representa o
         # ensaio nominal. Os load cases completos continuam na validação abaixo.
@@ -2984,6 +3078,194 @@ class StagedFidelityFunnelPlanner:
 
         return {"best_cfg": best_cfg, "summary": best_summary, "trace_rows": trace_rows}
 
+    def _final_mass_symmetry_trim(
+        self,
+        cfg: Dict[str, Any],
+        load_cases: List[str],
+        *,
+        stage_name: str,
+        tension_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Remove 1 palito de órbitas simétricas folgadas quando a massa passou do alvo.
+
+        Diferente do cleanup topológico, este passo nunca desativa membro; ele só
+        reduz n_sticks em órbitas primárias com FS folgado, preservando simetria
+        entre as duas laterais. Serve para corrigir o caso típico: a ponte fica
+        forte, mas 5-10 g acima do limite por reforços finais.
+        """
+        settings = cfg.get("member_sizing", {}) or {}
+        if not bool(settings.get("enable_final_mass_symmetry_trim", True)):
+            summary = self._multi_case_summary(cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+            return {"best_cfg": cfg, "summary": summary, "trace_rows": []}
+
+        cur_cfg = self.planner.config.normalize(cfg)
+        cur_summary = self._multi_case_summary(cur_cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+        if not self._summary_valid_flag(cur_summary):
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+
+        analysis = cur_cfg.get("analysis", {}) or {}
+        material = cur_cfg.get("material", {}) or {}
+        mass_limit = float(effective_mass_limit_g(cur_cfg))
+        target_proxy_mass = mass_limit * float(settings.get("final_mass_trim_target_proxy_mass_ratio", 0.990))
+        cur_mass = safe_float(cur_summary.get("dead_weight_proxy_g"), 0.0) or 0.0
+        if cur_mass <= target_proxy_mass + 1.0e-9:
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+
+        fs_threshold = float(settings.get("final_mass_trim_fs_threshold", 1.22))
+        min_break_ret = float(settings.get("final_mass_trim_min_break_retention", 0.985))
+        min_fs_ret = float(settings.get("final_mass_trim_min_fs_retention", 0.985))
+        max_trials = max(1, int(settings.get("final_mass_trim_max_trials", 12)))
+        groups = set(str(g) for g in (settings.get("final_mass_trim_groups") or ["top_chord", "vertical", "diagonal"]))
+        min_by_group = cur_cfg.get("minimum_sticks_by_group", {}) or {}
+        stick_mass_g = float(material.get("stick_mass_g", 1.4))
+        stick_len_mm = max(1.0, float(material.get("stick_length_mm", 120.0)))
+
+        def min_for_group(group: str) -> int:
+            raw = safe_float(min_by_group.get(group), None)
+            if raw is not None:
+                return int(raw)
+            return {"top_chord": 4, "bottom_chord": 2, "vertical": 2, "diagonal": 2, "support_pad": 2}.get(group, 1)
+
+        ml_cfg = cur_cfg.get("multi_loadcase_screening", {}) or {}
+        case_names = [
+            str(v)
+            for v in (
+                settings.get("sizing_load_cases")
+                or ml_cfg.get("strength_governing_cases")
+                or ["center", "torsion_60_40", "lateral_imperfection"]
+            )
+        ]
+        cases = [
+            self._evaluate_case_cached(cur_cfg, c, stage_name=stage_name, tension_only=tension_only)
+            for c in case_names
+        ]
+        if not cases:
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+        ref = cases[0]
+        nodes = ref.get("nodes") or []
+        members = ref.get("members") or []
+        member_by_id = {int(getattr(m, "id")): m for m in members}
+        try:
+            partners = self.planner.map_member_to_symmetry_partners(cur_cfg, nodes, members)
+        except Exception:
+            partners = {}
+
+        worst_by_mid: Dict[int, Dict[str, Any]] = {}
+        for case in cases:
+            cname = str(case.get("case", "unknown"))
+            res_by_id = {int(r.get("member_id")): r for r in (case.get("member_results") or []) if r.get("member_id") is not None}
+            for chk in (case.get("member_checks") or []):
+                mid_raw = chk.get("member_id")
+                if mid_raw is None:
+                    continue
+                mid = int(mid_raw)
+                m = member_by_id.get(mid)
+                if m is None:
+                    continue
+                group = str(getattr(m, "group", chk.get("group", "")))
+                if group not in groups or chk.get("design_relevant") is False:
+                    continue
+                fs = safe_float(chk.get("FS_design"), None)
+                if fs is None:
+                    fs = safe_float(chk.get("FS_min"), None)
+                if fs is None:
+                    continue
+                n_val = safe_float((res_by_id.get(mid, {}) or {}).get("N_N"), chk.get("N_N"))
+                cur = worst_by_mid.get(mid)
+                if cur is None or float(fs) < float(cur.get("FS", 1.0e99)):
+                    worst_by_mid[mid] = {"FS": float(fs), "case": cname, "group": group, "N_N": float(n_val or 0.0)}
+
+        seen: set[Tuple[int, ...]] = set()
+        candidates: List[Tuple[float, Tuple[int, ...], Dict[str, Any]]] = []
+        for mid, meta in worst_by_mid.items():
+            group = str(meta.get("group"))
+            orbit = tuple(sorted(set([int(mid)] + [int(v) for v in partners.get(int(mid), []) if int(v) in member_by_id])))
+            if orbit in seen:
+                continue
+            seen.add(orbit)
+            ns = [int(getattr(member_by_id[i], "n_sticks", 1)) for i in orbit]
+            if not ns or min(ns) <= min_for_group(group):
+                continue
+            fs_vals = [worst_by_mid.get(i, {}).get("FS") for i in orbit if worst_by_mid.get(i, {}).get("FS") is not None]
+            if not fs_vals:
+                continue
+            fs_min = min(float(v) for v in fs_vals)
+            if fs_min < fs_threshold:
+                continue
+            length_total = sum(float(getattr(member_by_id[i], "L", 0.0) or 0.0) for i in orbit)
+            delta_mass = length_total / stick_len_mm * stick_mass_g
+            n_abs = max(abs(float(worst_by_mid.get(i, {}).get("N_N", 0.0))) for i in orbit if i in worst_by_mid)
+            # Prioriza órbitas longas, folgadas e pouco solicitadas.
+            score = (fs_min * max(0.2, 1.0 / max(1.0, n_abs / 50.0)) * max(0.5, delta_mass))
+            candidates.append((score, orbit, {"group": group, "fs_min": fs_min, "delta_mass_g_est": delta_mass, "N_abs_N": n_abs, "case": meta.get("case")}))
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        best_cfg = cur_cfg
+        best_summary = cur_summary
+        best_break = safe_float(cur_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        best_fs = safe_float(cur_summary.get("min_fs_design_proxy"), 0.0) or 0.0
+        best_mass = cur_mass
+        trace_rows: List[Dict[str, Any]] = []
+
+        for _, orbit, meta in candidates[:max_trials]:
+            if best_mass <= target_proxy_mass + 1.0e-9:
+                break
+            trial = copy.deepcopy(best_cfg)
+            by_id = trial.setdefault("member_sticks_by_id", {})
+            old_ns: List[int] = []
+            new_ns: List[int] = []
+            group = str(meta.get("group"))
+            ok = True
+            for mid in orbit:
+                m = member_by_id[int(mid)]
+                old_n = max(1, int(getattr(m, "n_sticks", 1)))
+                if old_n <= min_for_group(group):
+                    ok = False
+                    break
+                old_ns.append(old_n)
+                new_ns.append(old_n - 1)
+                by_id[str(int(mid))] = old_n - 1
+            if not ok:
+                continue
+            trial = self.planner.config.normalize(trial)
+            summary = self._multi_case_summary(trial, load_cases, stage_name=stage_name, tension_only=tension_only)
+            if not self._summary_valid_flag(summary):
+                continue
+            nb = safe_float(summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+            nf = safe_float(summary.get("min_fs_design_proxy"), 0.0) or 0.0
+            nm = safe_float(summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+            acceptable = nm < best_mass - 1.0e-9 and nb >= best_break * min_break_ret and nf >= best_fs * min_fs_ret
+            trace_rows.append(
+                {
+                    "orbit_member_ids": ";".join(str(i) for i in orbit),
+                    "group": group,
+                    "old_n_sticks": ";".join(str(v) for v in old_ns),
+                    "new_n_sticks": ";".join(str(v) for v in new_ns),
+                    "FS_before": meta.get("fs_min"),
+                    "N_abs_N": meta.get("N_abs_N"),
+                    "worst_case": meta.get("case"),
+                    "delta_mass_g_est": -float(meta.get("delta_mass_g_est", 0.0)),
+                    "new_break_proxy_kgf": nb,
+                    "new_min_fs_design_proxy": nf,
+                    "new_mass_proxy_g": nm,
+                    "target_proxy_mass_g": target_proxy_mass,
+                    "accepted": bool(acceptable),
+                    "reason": "final_mass_symmetry_trim" if acceptable else "trim_not_retained",
+                }
+            )
+            if not acceptable:
+                continue
+            best_cfg = trial
+            best_summary = summary
+            best_break = nb
+            best_fs = nf
+            best_mass = nm
+            ref2 = self._evaluate_case_cached(best_cfg, case_names[0], stage_name=stage_name, tension_only=tension_only)
+            members2 = ref2.get("members") or []
+            member_by_id = {int(getattr(m, "id")): m for m in members2}
+
+        return {"best_cfg": best_cfg, "summary": best_summary, "trace_rows": trace_rows}
+
     def _primary_symmetry_orbit_audit(
         self,
         cfg: Dict[str, Any],
@@ -3025,6 +3307,86 @@ class StagedFidelityFunnelPlanner:
         except Exception:
             partners = {}
 
+        member_sizing = cfg.get("member_sizing", {}) or {}
+        bridge = cfg.get("bridge", {}) or {}
+        span = float(bridge.get("span_mm", 1200.0))
+        node_by_id = {int(getattr(n, "id")): n for n in nodes}
+        flat_tol = float(member_sizing.get("longitudinal_symmetry_flat_top_tol_mm", 3.0))
+        geom_tol = max(1.0, flat_tol)
+
+        def _member_points(mid: int):
+            m = member_by_id.get(int(mid))
+            if m is None:
+                return None
+            ni = node_by_id.get(int(getattr(m, "i")))
+            nj = node_by_id.get(int(getattr(m, "j")))
+            if ni is None or nj is None:
+                return None
+            return ni, nj
+
+        def _is_flat_top_chord(mid: int) -> bool:
+            m = member_by_id.get(int(mid))
+            pts = _member_points(int(mid))
+            if m is None or pts is None:
+                return False
+            if str(getattr(m, "group", "")) != "top_chord":
+                return False
+            ni, nj = pts
+            if getattr(ni, "level", "top") != "top" or getattr(nj, "level", "top") != "top":
+                return False
+            return abs(float(getattr(ni, "z")) - float(getattr(nj, "z"))) <= flat_tol
+
+        def _points_match(target, cand) -> bool:
+            tx, ty, tz = target
+            return (
+                abs(float(getattr(cand, "x")) - tx) <= geom_tol
+                and abs(float(getattr(cand, "y")) - ty) <= geom_tol
+                and abs(float(getattr(cand, "z")) - tz) <= geom_tol
+            )
+
+        def _is_longitudinal_mirror(src_mid: int, cand_mid: int) -> bool:
+            if not _is_flat_top_chord(src_mid) or not _is_flat_top_chord(cand_mid):
+                return False
+            src = _member_points(src_mid)
+            cand = _member_points(cand_mid)
+            if src is None or cand is None:
+                return False
+            a, b = src
+            c, d = cand
+            target_a = (span - float(getattr(a, "x")), float(getattr(a, "y")), float(getattr(a, "z")))
+            target_b = (span - float(getattr(b, "x")), float(getattr(b, "y")), float(getattr(b, "z")))
+            return (
+                (_points_match(target_a, c) and _points_match(target_b, d))
+                or (_points_match(target_a, d) and _points_match(target_b, c))
+            )
+
+        def _extend_flat_top_longitudinal_orbit(orbit: tuple[int, ...], group: str) -> tuple[int, ...]:
+            # Corrige a assimetria longitudinal do banzo superior no platô central.
+            # A órbita lateral pura pode gerar 10/51 com n diferente de 12/53.
+            # Aqui a órbita é ampliada também pelo espelho longitudinal x -> span - x,
+            # mas apenas para trechos realmente planos do top_chord, evitando alterar arcos/rampas.
+            if str(group) != "top_chord":
+                return tuple(sorted(set(int(v) for v in orbit)))
+
+            out = set(int(v) for v in orbit)
+            changed = True
+            while changed:
+                changed = False
+                for src_mid in list(out):
+                    if not _is_flat_top_chord(src_mid):
+                        continue
+                    for cand_mid, cand_member in member_by_id.items():
+                        cand_mid = int(cand_mid)
+                        if cand_mid in out:
+                            continue
+                        if str(getattr(cand_member, "group", "")) != "top_chord":
+                            continue
+                        if _is_longitudinal_mirror(src_mid, cand_mid):
+                            out.add(cand_mid)
+                            changed = True
+
+            return tuple(sorted(out))
+
         # Pega o pior FS por membro entre casos de projeto. Isso evita comparar
         # uma cor visual isolada com outra carga diferente.
         fs_by_mid: Dict[int, float] = {}
@@ -3053,6 +3415,7 @@ class StagedFidelityFunnelPlanner:
             if group not in primary_groups:
                 continue
             orbit = tuple(sorted(set([mid] + [int(v) for v in partners.get(mid, []) if int(v) in member_by_id])))
+            orbit = _extend_flat_top_longitudinal_orbit(orbit, group)
             if orbit in seen:
                 continue
             seen.add(orbit)
@@ -3070,7 +3433,9 @@ class StagedFidelityFunnelPlanner:
                     "FS_max": fs_max,
                     "FS_spread": (fs_max - fs_min) if fs_min is not None and fs_max is not None else None,
                     "worst_case_members": ";".join(f"{i}:{case_by_mid.get(i, '')}" for i in orbit),
-                    "asymmetry_flag": bool((ns and min(ns) != max(ns)) or (fs_min is not None and fs_max is not None and (fs_max - fs_min) > 0.10)),
+                    "n_sticks_asymmetry_flag": bool(ns and min(ns) != max(ns)),
+                    "fs_spread_diagnostic_flag": bool(fs_min is not None and fs_max is not None and (fs_max - fs_min) > 0.10),
+                    "asymmetry_flag": bool(ns and min(ns) != max(ns)),
                 }
             )
         return rows
@@ -3104,6 +3469,10 @@ class StagedFidelityFunnelPlanner:
         analysis = cur_cfg.get("analysis", {}) or {}
         material = cur_cfg.get("material", {}) or {}
         member_sizing = cur_cfg.get("member_sizing", {}) or {}
+
+        # Alias usado pelos helpers de simetria longitudinal.
+        # Corrige NameError: ms is not defined.
+        ms = member_sizing
         mass_limit = float(effective_mass_limit_g(cur_cfg))
         competitive_ratio = float(member_sizing.get("competitive_mass_target_ratio", 0.98))
         target_proxy_mass = mass_limit * float(member_sizing.get("rebalance_target_proxy_mass_ratio", competitive_ratio))
@@ -3154,6 +3523,78 @@ class StagedFidelityFunnelPlanner:
         except Exception:
             partners = {}
 
+        # Além da simetria entre as duas laterais (y), os trechos planos do
+        # banzo superior devem preservar simetria longitudinal em torno do
+        # centro do patamar superior. Isso evita resultados como um trecho
+        # central com 6 palitos e seu par adjacente com 5.
+        node_by_id = {int(getattr(n, "id")): n for n in nodes}
+        max_top_z = max((float(getattr(n, "z", 0.0)) for n in nodes), default=0.0)
+        flat_tol = float(ms.get("longitudinal_symmetry_flat_top_tol_mm", 3.0))
+        enable_long_sym = bool(ms.get("longitudinal_symmetry_for_flat_top_chord", True))
+        flat_top_ids: set[int] = set()
+        flat_node_xs: List[float] = []
+
+        def _rcoord(value: Any) -> float:
+            return round(float(value), 3)
+
+        for m in members:
+            if str(getattr(m, "group", "")) != "top_chord":
+                continue
+            ni = node_by_id.get(int(getattr(m, "i")))
+            nj = node_by_id.get(int(getattr(m, "j")))
+            if ni is None or nj is None:
+                continue
+            if float(getattr(ni, "z", 0.0)) >= max_top_z - flat_tol and float(getattr(nj, "z", 0.0)) >= max_top_z - flat_tol:
+                flat_top_ids.add(int(getattr(m, "id")))
+                flat_node_xs.extend([float(getattr(ni, "x")), float(getattr(nj, "x"))])
+
+        x_sym_axis = (min(flat_node_xs) + max(flat_node_xs)) * 0.5 if flat_node_xs else float(cur_cfg.get("bridge", {}).get("span_mm", 1200.0)) * 0.5
+        flat_key_to_ids: Dict[Tuple[str, Tuple[Tuple[float, float, float], Tuple[float, float, float]]], List[int]] = {}
+
+        def _point_key(n: Any) -> Tuple[float, float, float]:
+            return (_rcoord(getattr(n, "x")), _rcoord(getattr(n, "y")), _rcoord(getattr(n, "z")))
+
+        for mid in flat_top_ids:
+            m = member_by_id.get(int(mid))
+            if m is None:
+                continue
+            ni = node_by_id.get(int(getattr(m, "i")))
+            nj = node_by_id.get(int(getattr(m, "j")))
+            if ni is None or nj is None:
+                continue
+            pts = tuple(sorted([_point_key(ni), _point_key(nj)]))
+            flat_key_to_ids.setdefault(("top_chord", pts), []).append(int(mid))
+
+        def _extend_flat_top_longitudinal_orbit(orbit: Tuple[int, ...], group: str) -> Tuple[int, ...]:
+            if not enable_long_sym or group != "top_chord" or not orbit:
+                return orbit
+            if not any(int(mid) in flat_top_ids for mid in orbit):
+                return orbit
+            out: set[int] = set(int(v) for v in orbit)
+            transforms = [(False, False), (True, False), (False, True), (True, True)]
+            for mid in list(out):
+                m = member_by_id.get(int(mid))
+                if m is None or int(mid) not in flat_top_ids:
+                    continue
+                ni = node_by_id.get(int(getattr(m, "i")))
+                nj = node_by_id.get(int(getattr(m, "j")))
+                if ni is None or nj is None:
+                    continue
+                base_pts = [_point_key(ni), _point_key(nj)]
+
+                def _tx(pt: Tuple[float, float, float], mirror_x: bool, mirror_y: bool) -> Tuple[float, float, float]:
+                    x, y, z = pt
+                    if mirror_x:
+                        x = _rcoord(2.0 * x_sym_axis - x)
+                    if mirror_y:
+                        y = _rcoord(-y)
+                    return (_rcoord(x), _rcoord(y), _rcoord(z))
+
+                for mx, my in transforms:
+                    pts = tuple(sorted([_tx(base_pts[0], mx, my), _tx(base_pts[1], mx, my)]))
+                    out.update(flat_key_to_ids.get(("top_chord", pts), []))
+            return tuple(sorted(out))
+
         worst_by_mid: Dict[int, Dict[str, Any]] = {}
         for case in cases:
             case_name = str(case.get("case", "unknown"))
@@ -3181,6 +3622,7 @@ class StagedFidelityFunnelPlanner:
         orbits: List[Dict[str, Any]] = []
         for mid, meta in worst_by_mid.items():
             orbit = tuple(sorted(set([mid] + [int(v) for v in partners.get(mid, []) if int(v) in member_by_id])))
+            orbit = _extend_flat_top_longitudinal_orbit(orbit, str(meta.get("group")))
             if orbit in seen:
                 continue
             seen.add(orbit)
@@ -4662,6 +5104,36 @@ class StagedFidelityFunnelPlanner:
                 ]
                 keep_s6 = s6_rows[:1]
         GeometryService.write_csv(out / "support_pad_capacity_push.csv", support_pad_push_rows)
+
+        final_mass_trim_rows: List[Dict[str, Any]] = []
+        if bool((base.get("member_sizing", {}) or {}).get("enable_final_mass_symmetry_trim", True)):
+            trim_input_cfg = (keep_s6[0]["config"] if keep_s6 else keep_s5[0]["config"])
+            trimmed = self._final_mass_symmetry_trim(
+                trim_input_cfg,
+                load_cases,
+                stage_name="S6_FINAL_MASS_TRIM",
+                tension_only=tension_only_s6,
+            )
+            final_mass_trim_rows = [
+                {"candidate_id": "S6T-0001", **r}
+                for r in (trimmed.get("trace_rows") or [])
+            ]
+            if any(bool(r.get("accepted")) for r in final_mass_trim_rows):
+                s = trimmed["summary"]
+                s6_rows = [
+                    {
+                        "stage": "S6_FINAL_MASS_TRIM",
+                        "candidate_id": "S6T-0001",
+                        "objective": s.get("objective"),
+                        "valid_for_selection": s.get("valid_for_selection"),
+                        "predicted_breaking_load_proxy_kgf": s.get("predicted_breaking_load_proxy_kgf"),
+                        "min_fs_design_proxy": s.get("min_fs_design_proxy"),
+                        "dead_weight_proxy_g": s.get("dead_weight_proxy_g"),
+                        "config": trimmed["best_cfg"],
+                    }
+                ]
+                keep_s6 = s6_rows[:1]
+        GeometryService.write_csv(out / "final_mass_symmetry_trim.csv", final_mass_trim_rows)
 
         symmetry_audit_rows = self._primary_symmetry_orbit_audit(
             (keep_s6[0]["config"] if keep_s6 else keep_s5[0]["config"]),

@@ -31,10 +31,14 @@ class Frame3DDAdapter:
         for s in active:
             lines.append(f"{s.node_id:5d} {int(s.UX):d} {int(s.UY):d} {int(s.UZ):d} 1 1 1")
         dens=self._density(cfg)
-        lines.append(f"{len(members)} # number of frame elements")
+        # Frame3DD exige que os números dos elementos fiquem dentro do intervalo
+        # 1..nE. Os IDs internos do modelo podem ter lacunas depois de remoções
+        # topológicas; por isso exportamos uma numeração local contígua.
+        frame_members = list(members)
+        lines.append(f"{len(frame_members)} # number of frame elements")
         lines.append("# e n1 n2 Ax Asy Asz Jxx Iyy Izz E G roll density")
-        for m in members:
-            lines.append(f"{m.id:5d} {m.i:5d} {m.j:5d} {m.A:12.6f} {m.Asy:12.6f} {m.Asz:12.6f} {m.J:12.6f} {m.Iy:12.6f} {m.Iz:12.6f} {m.E:12.6f} {m.G:12.6f} {0.0:8.3f} {dens:12.6e}")
+        for eid, m in enumerate(frame_members, start=1):
+            lines.append(f"{eid:5d} {m.i:5d} {m.j:5d} {m.A:12.6f} {m.Asy:12.6f} {m.Asz:12.6f} {m.J:12.6f} {m.Iy:12.6f} {m.Iz:12.6f} {m.E:12.6f} {m.G:12.6f} {0.0:8.3f} {dens:12.6e}")
         include_shear = int(float(cfg.get("analysis", {}).get("frame3dd_include_shear_deformation", 1)))
         include_geo = int(float(cfg.get("analysis", {}).get("frame3dd_include_geometric_stiffness", 0)))
         lines += [

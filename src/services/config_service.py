@@ -1043,7 +1043,7 @@ class ConfigService:
         member_sizing_cfg.setdefault("final_strength_push_max_orbits", 5)
         member_sizing_cfg.setdefault("final_strength_push_max_trials", 16)
         member_sizing_cfg.setdefault("final_strength_push_max_increment_per_orbit", 1)
-        member_sizing_cfg.setdefault("final_strength_push_max_proxy_mass_ratio", 1.005)
+        member_sizing_cfg.setdefault("final_strength_push_max_proxy_mass_ratio", 0.990)
         member_sizing_cfg.setdefault("final_strength_push_min_abs_force_N", 40.0)
         member_sizing_cfg.setdefault("final_strength_push_min_break_gain", 1.001)
         member_sizing_cfg.setdefault("final_strength_push_min_fs_gain", 1.001)
@@ -1051,9 +1051,22 @@ class ConfigService:
         member_sizing_cfg.setdefault("enable_support_pad_capacity_push", True)
         member_sizing_cfg.setdefault("support_pad_push_target_kgf", 100.0)
         member_sizing_cfg.setdefault("support_pad_push_max_group_sticks", 6)
-        member_sizing_cfg.setdefault("support_pad_push_max_proxy_mass_ratio", 1.010)
+        member_sizing_cfg.setdefault("support_pad_push_max_proxy_mass_ratio", 0.988)
         member_sizing_cfg.setdefault("support_pad_push_min_break_retention", 0.995)
         member_sizing_cfg.setdefault("support_pad_push_min_fs_retention", 0.995)
+        member_sizing_cfg.setdefault("support_pad_push_proxy_mass_margin_g", 12.0)
+        # Passo final: quando o reforço estrutural passou um pouco da massa,
+        # reduzir apenas órbitas simétricas com FS folgado para voltar ao limite.
+        member_sizing_cfg.setdefault("enable_final_mass_symmetry_trim", True)
+        member_sizing_cfg.setdefault("final_mass_trim_target_proxy_mass_ratio", 0.990)
+        member_sizing_cfg.setdefault("final_mass_trim_fs_threshold", 1.22)
+        member_sizing_cfg.setdefault("final_mass_trim_min_break_retention", 0.985)
+        member_sizing_cfg.setdefault("final_mass_trim_min_fs_retention", 0.985)
+        member_sizing_cfg.setdefault("final_mass_trim_max_trials", 12)
+        member_sizing_cfg.setdefault("final_mass_trim_groups", ["top_chord", "vertical", "diagonal"])
+        member_sizing_cfg.setdefault("longitudinal_symmetry_for_flat_top_chord", True)
+        member_sizing_cfg.setdefault("longitudinal_symmetry_flat_top_tol_mm", 3.0)
+
 
         member_sizing_cfg.setdefault(
             "sizing_load_cases",
