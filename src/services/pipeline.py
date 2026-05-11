@@ -1587,6 +1587,8 @@ class SimulationPipeline:
 
         zip_path = self.output_root / "resultados_simulacao.zip"
         self.zip_outputs(zip_path)
+        focused_zip_path = self.output_root / "pacote_focado_fabricacao_e_calculo.zip"
+        self.zip_focused_outputs(focused_zip_path)
         emit_progress(1.0, "Pipeline concluído")
         emit_log("Pipeline finalizado.")
         debug_logger.write_summary()
@@ -1609,12 +1611,68 @@ class SimulationPipeline:
             "edital_checks": edital_checks,
             "frame3dd_result": frame_result,
             "zip_path": zip_path,
+            "focused_zip_path": focused_zip_path,
             "optimization": optimization,
             "execution_logs": execution_logs,
             "warnings": warnings,
             "planner_debug_jsonl": str(debug_logger.jsonl_path),
             "planner_debug_summary": str(debug_logger.summary_path),
         }
+
+
+    def zip_focused_outputs(self, zip_path: str | Path) -> Path:
+        """Create a smaller, analysis-oriented package.
+
+        The full output zip remains available for debugging. This package is for
+        fabrication/review: fewer files, clearer responsibilities, no repeated
+        planner scratch outputs unless they directly support a decision.
+        """
+        zp = Path(zip_path)
+        if zp.exists():
+            zp.unlink()
+
+        include_paths = [
+            "config_used.json",
+            "config_requested.json",
+            "final_report/00_resumo_executivo.md",
+            "final_report/01_memorial_calculo.md",
+            "final_report/02_guia_fabricacao.md",
+            "final_report/03_checklist_construcao.md",
+            "final_report/04_plano_montagem_detalhado.md",
+            "final_report/04_plano_pecas_por_medida.csv",
+            "final_report/05_mapa_juntas_por_tipo.csv",
+            "final_report/06_sequencia_montagem.csv",
+            "final_report/focused_outputs_manifest.json",
+            "final_report/executive_summary.json",
+            "final_report/critical_members.csv",
+            "final_report/mass_breakdown.csv",
+            "final_report/fabrication_summary.csv",
+            "final_report/pipeline_stage_trace.csv",
+            "optimization/final_validation_summary.json",
+            "optimization/pipeline_trace.json",
+            "optimization/symmetry_audit.csv",
+            "optimization/section_efficiency_mutation.csv",
+            "optimization/post_topology_reinvestment.csv",
+            "optimization/post_reinvest_rebalance.csv",
+            "optimization/final_strength_reserve_push.csv",
+            "optimization/support_pad_capacity_push.csv",
+            "optimization/s8_case_diagnostics.csv",
+            "optimization/s7_fabrication/stick_pieces.csv",
+            "optimization/s7_fabrication/cutting_list.csv",
+            "optimization/s7_fabrication/glue_joints.csv",
+            "optimization/s7_fabrication/connection_plan.csv",
+            "optimization/s7_fabrication/assembly_steps.csv",
+            "optimization/s7_fabrication/member_detail_checks.csv",
+            "plots/geometria_3d_interativa.html",
+            "plots/14_gabaritos_membros_criticos.png",
+        ]
+
+        with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:
+            for rel in include_paths:
+                p = self.output_root / rel
+                if p.exists() and p.is_file():
+                    z.write(p, rel)
+        return zp
 
     def zip_outputs(self, zip_path: str | Path) -> Path:
         zp = Path(zip_path)

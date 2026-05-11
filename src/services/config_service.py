@@ -383,6 +383,16 @@ class ConfigService:
         support_check.setdefault("allowable_reaction_per_support_node_kgf", 22.0)
         support_check.setdefault("negative_reaction_means_uplift", True)
 
+        # Apoios não devem ser um gargalo artificial quando o projeto adiciona
+        # palitos de sapata. A capacidade nominal base continua sendo 22 kgf
+        # para 4 linhas de contato, mas pode crescer proporcionalmente ao
+        # número real de linhas de palito na sapata.
+        support_check.setdefault("adaptive_support_capacity_from_pad", True)
+        support_check.setdefault("baseline_contact_sticks_per_support_node", 4)
+        support_check.setdefault("baseline_support_pad_sticks", 3)
+        support_check.setdefault("capacity_per_contact_stick_kgf", None)
+        support_check.setdefault("max_effective_contact_sticks_per_node", 8)
+
         # ---------------------------------------------------------------------
         # Detail model / joints / fabrication
         # ---------------------------------------------------------------------
@@ -1009,11 +1019,41 @@ class ConfigService:
         # sem adicionar palitos. Útil quando a falha é beam_column/buckling.
         member_sizing_cfg.setdefault("enable_section_efficiency_mutation", True)
         member_sizing_cfg.setdefault("section_efficiency_groups", ["top_chord", "vertical"])
-        member_sizing_cfg.setdefault("section_efficiency_top_chord_spacing_candidates_mm", [16.0, 18.0])
-        member_sizing_cfg.setdefault("section_efficiency_vertical_spacing_candidates_mm", [11.0, 12.0])
+        member_sizing_cfg.setdefault("section_efficiency_top_chord_spacing_candidates_mm", [16.0, 18.0, 20.0, 22.0])
+        member_sizing_cfg.setdefault("section_efficiency_vertical_spacing_candidates_mm", [11.0, 12.0, 13.0, 14.0])
+        member_sizing_cfg.setdefault("section_efficiency_top_chord_K_candidates", [0.62, 0.58])
+        member_sizing_cfg.setdefault("section_efficiency_vertical_K_candidates", [0.76, 0.72])
+        member_sizing_cfg.setdefault("section_efficiency_diagonal_K_candidates", [0.82])
         member_sizing_cfg.setdefault("section_efficiency_max_proxy_mass_ratio", 0.985)
-        member_sizing_cfg.setdefault("section_efficiency_min_break_gain", 1.003)
-        member_sizing_cfg.setdefault("section_efficiency_min_fs_gain", 1.003)
+        member_sizing_cfg.setdefault("section_efficiency_min_break_gain", 1.001)
+        member_sizing_cfg.setdefault("section_efficiency_min_fs_gain", 1.001)
+        member_sizing_cfg.setdefault("section_efficiency_require_bracing_for_K", True)
+
+        # Empurrão final de resistência: usa pequena margem de massa restante
+        # para reforçar órbitas primárias críticas, sem quebrar simetria.
+        # Este passo é deliberadamente pós-eficiência de seção: primeiro tenta
+        # ganhar por inércia/travamento; depois usa massa só onde ainda governa.
+        member_sizing_cfg.setdefault("enable_final_strength_reserve_push", True)
+        member_sizing_cfg.setdefault("final_strength_push_groups", ["top_chord", "vertical", "diagonal"])
+        # O alvo mínimo é 80 kgf, mas o otimizador deve tentar reserva real de
+        # competição. Para mirar 100 kgf, o gargalo primário precisa chegar
+        # perto de FS 1,25 sob carga de 80 kgf.
+        member_sizing_cfg.setdefault("ultimate_strength_target_kgf", 100.0)
+        member_sizing_cfg.setdefault("final_strength_push_fs_threshold", 1.25)
+        member_sizing_cfg.setdefault("final_strength_push_max_orbits", 5)
+        member_sizing_cfg.setdefault("final_strength_push_max_trials", 16)
+        member_sizing_cfg.setdefault("final_strength_push_max_increment_per_orbit", 1)
+        member_sizing_cfg.setdefault("final_strength_push_max_proxy_mass_ratio", 1.005)
+        member_sizing_cfg.setdefault("final_strength_push_min_abs_force_N", 40.0)
+        member_sizing_cfg.setdefault("final_strength_push_min_break_gain", 1.001)
+        member_sizing_cfg.setdefault("final_strength_push_min_fs_gain", 1.001)
+        member_sizing_cfg.setdefault("final_strength_push_allow_if_below_target", True)
+        member_sizing_cfg.setdefault("enable_support_pad_capacity_push", True)
+        member_sizing_cfg.setdefault("support_pad_push_target_kgf", 100.0)
+        member_sizing_cfg.setdefault("support_pad_push_max_group_sticks", 6)
+        member_sizing_cfg.setdefault("support_pad_push_max_proxy_mass_ratio", 1.010)
+        member_sizing_cfg.setdefault("support_pad_push_min_break_retention", 0.995)
+        member_sizing_cfg.setdefault("support_pad_push_min_fs_retention", 0.995)
 
         member_sizing_cfg.setdefault(
             "sizing_load_cases",

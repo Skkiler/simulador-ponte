@@ -1993,13 +1993,24 @@ with aba_simulacao:
 
         st.subheader("Downloads")
 
+        fzp = Path(r.get("focused_zip_path", ""))
+        if fzp.exists():
+            st.download_button(
+                "Baixar pacote focado: cálculo + fabricação",
+                fzp.read_bytes(),
+                file_name="pacote_focado_fabricacao_e_calculo.zip",
+                mime="application/zip",
+                help="Pacote menor e mais direto: resumo, memorial, guia de fabricação, listas essenciais e auditorias.",
+            )
+
         zp = Path(r.get("zip_path", ""))
         if zp.exists():
             st.download_button(
-                "Baixar pacote de resultados",
+                "Baixar pacote completo de depuração",
                 zp.read_bytes(),
-                file_name="resultados_simulacao.zip",
+                file_name="resultados_simulacao_completo.zip",
                 mime="application/zip",
+                help="Pacote completo com todos os CSVs, plots e saídas intermediárias.",
             )
 
         _download_text_button(

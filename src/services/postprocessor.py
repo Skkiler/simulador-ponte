@@ -267,9 +267,45 @@ class PostProcessor:
         node_by_id = {n.id: n for n in nodes}
         support_by_node = {s.node_id: s for s in supports}
 
-        max_reac = float(cfg["support_check"]["allowable_reaction_per_support_node_kgf"]) * 9.80665
-        contact_len = float(cfg["support_check"]["contact_length_per_support_node_mm"])
-        n_contact = int(cfg["support_check"]["n_contact_sticks_per_support_node"])
+        support_cfg = cfg.get("support_check", {}) or {}
+        base_allow_kgf = float(support_cfg.get("allowable_reaction_per_support_node_kgf", 22.0))
+        contact_len = float(support_cfg.get("contact_length_per_support_node_mm", 50.0))
+        n_contact_nominal = int(support_cfg.get("n_contact_sticks_per_support_node", 4))
+        baseline_contacts = max(1, int(support_cfg.get("baseline_contact_sticks_per_support_node", n_contact_nominal)))
+        baseline_pad = max(1, int(support_cfg.get("baseline_support_pad_sticks", 3)))
+        max_contacts = max(baseline_contacts, int(support_cfg.get("max_effective_contact_sticks_per_node", 8)))
+        adaptive_support = bool(support_cfg.get("adaptive_support_capacity_from_pad", True))
+
+        support_pad_sticks = max(
+            baseline_pad,
+            int(
+                safe_float(
+                    (cfg.get("member_sticks_by_group", {}) or {}).get("support_pad"),
+                    baseline_pad,
+                )
+                or baseline_pad
+            ),
+        )
+
+        # Cada palito adicional na sapata cria uma linha de contato útil somente
+        # se ele existir fisicamente no grupo support_pad. Mantém o valor legado
+        # quando adaptive_support=False.
+        if adaptive_support:
+            n_contact = min(
+                max_contacts,
+                max(n_contact_nominal, baseline_contacts + max(0, support_pad_sticks - baseline_pad)),
+            )
+        else:
+            n_contact = n_contact_nominal
+
+        per_contact_kgf = safe_float(
+            support_cfg.get("capacity_per_contact_stick_kgf"),
+            None,
+        )
+        if per_contact_kgf is None:
+            per_contact_kgf = base_allow_kgf / max(1, baseline_contacts)
+
+        max_reac = float(per_contact_kgf) * float(n_contact) * 9.80665
         w = float(cfg["material"]["stick_width_mm"])
         area = contact_len * w * n_contact
 
@@ -311,6 +347,8 @@ class PostProcessor:
                     "contact_area_mm2": area,
                     "bearing_pressure_MPa": pressure,
                     "allowable_reaction_node_N": max_reac,
+                    "effective_contact_sticks": n_contact,
+                    "support_pad_group_sticks": support_pad_sticks,
                     "FS_support_reaction": fs_clean,
                     "FS_support_reaction_label": safety_label(fs_clean),
                     "support_active_vertical": active,
