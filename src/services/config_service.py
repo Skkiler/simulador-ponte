@@ -492,6 +492,31 @@ class ConfigService:
         detail.setdefault("fast_mass_scale", 1.0)
         detail.setdefault("saw_kerf_mm", 1.0)
         detail.setdefault("imperfection_eccentricity_mm", 2.0)
+        # Excentricidade global de 2 mm é conservadora para membros simples.
+        # Em membros box/double_stack com juntas reforçadas, a imperfeição efetiva
+        # deve ser menor, mas nunca nula. O pós-processador aplica estes fatores.
+        detail.setdefault("adaptive_imperfection_eccentricity", True)
+        detail.setdefault("min_imperfection_eccentricity_mm", 0.55)
+        detail.setdefault(
+            "imperfection_eccentricity_factor_by_layout",
+            {
+                "box": 0.55,
+                "double_stack": 0.70,
+                "side_by_side": 0.85,
+                "stacked": 1.00,
+                "single": 1.00,
+            },
+        )
+        detail.setdefault(
+            "imperfection_eccentricity_factor_by_group",
+            {
+                "top_chord": 0.85,
+                "bottom_chord": 0.90,
+                "vertical": 0.85,
+                "diagonal": 0.90,
+                "support_pad": 0.85,
+            },
+        )
         detail.setdefault("splice_stagger_enabled", True)
         detail.setdefault("splice_stagger_step_mm", 5.0)
         detail.setdefault("splice_stagger_max_offset_mm", 30.0)
@@ -537,11 +562,13 @@ class ConfigService:
         defaults_layout = {
             "bottom_chord": {
                 "layout": "box",
+                "stick_orientation": "edge",
                 "spacing_y_mm": 10.0,
                 "spacing_z_mm": 8.0,
             },
             "top_chord": {
                 "layout": "box",
+                "stick_orientation": "edge",
                 "spacing_y_mm": 14.0,
                 "spacing_z_mm": 14.0,
             },
@@ -596,6 +623,14 @@ class ConfigService:
         for key, val in defaults_layout.items():
             layout.setdefault(key, val)
 
+        # Banzos trabalham axialmente, mas o banzo superior é governado por
+        # flambagem/interação. Por padrão, palitos dos banzos ficam "de lado"
+        # (lateral para cima) para aumentar Iy da seção individual. Em seção box,
+        # isso melhora o eixo vertical sem sacrificar o afastamento lateral.
+        for chord_group in ("top_chord", "bottom_chord"):
+            chord_layout = layout.setdefault(chord_group, {})
+            chord_layout.setdefault("stick_orientation", "edge")
+
         # ---------------------------------------------------------------------
         # Basic group defaults
         # ---------------------------------------------------------------------
@@ -632,10 +667,14 @@ class ConfigService:
         analysis.setdefault(
             "braced_effective_length_defaults",
             {
-                "top_chord": {"Ky": 0.75, "Kz": 0.75},
-                "vertical": {"Ky": 0.85, "Kz": 0.85},
-                "diagonal": {"Ky": 0.90, "Kz": 0.90},
-                "bottom_chord": {"Ky": 0.90, "Kz": 0.90},
+                # Estrutura com X-bracing superior/inferior e quadros transversais
+                # não deve tratar o banzo comprimido como totalmente destravado.
+                # Estes K ainda são moderados; apenas reduzem o excesso de punição
+                # sobre membros efetivamente travados em intervalos regulares.
+                "top_chord": {"Ky": 0.68, "Kz": 0.68},
+                "vertical": {"Ky": 0.80, "Kz": 0.80},
+                "diagonal": {"Ky": 0.85, "Kz": 0.85},
+                "bottom_chord": {"Ky": 0.85, "Kz": 0.85},
             },
         )
 
@@ -940,13 +979,42 @@ class ConfigService:
         member_sizing_cfg.setdefault("enable_post_topology_reinvestment", True)
         # Reinvestimento só pode usar massa realmente disponível abaixo do alvo competitivo.
         # Antes estava em 1.015 e reengordava a ponte para ~999 g.
-        member_sizing_cfg.setdefault("reinvest_target_proxy_mass_ratio", 0.975)
-        member_sizing_cfg.setdefault("reinvest_final_mass_reserve_g", 16.0)
-        member_sizing_cfg.setdefault("reinvest_max_members", 12)
+        # Após o S6, reinveste parte da massa removida nos gargalos primários,
+        # mas mira massa final abaixo de ~980 g. Como a massa detalhada tende a
+        # ficar alguns gramas acima do proxy, usamos alvo proxy de 0.980 e reserva 4 g.
+        member_sizing_cfg.setdefault("reinvest_target_proxy_mass_ratio", 0.980)
+        member_sizing_cfg.setdefault("reinvest_final_mass_reserve_g", 4.0)
+        member_sizing_cfg.setdefault("reinvest_max_members", 16)
         member_sizing_cfg.setdefault("reinvest_max_sticks_per_member", 1)
         member_sizing_cfg.setdefault("reinvest_fs_threshold", 1.05)
         member_sizing_cfg.setdefault("reinvest_strength_cases_only", True)
         member_sizing_cfg.setdefault("reinvest_min_abs_force_N", 25.0)
+
+        # Rebalanceamento pós-reinvestimento: troca 1 palito de órbitas folgadas
+        # para órbitas críticas equivalentes, preservando simetria e massa quase neutra.
+        member_sizing_cfg.setdefault("enable_post_reinvest_rebalance", True)
+        member_sizing_cfg.setdefault("rebalance_fs_threshold", 1.05)
+        member_sizing_cfg.setdefault("rebalance_donor_fs_threshold", 1.16)
+        member_sizing_cfg.setdefault("rebalance_max_swaps", 4)
+        member_sizing_cfg.setdefault("rebalance_max_net_mass_g", 3.0)
+        member_sizing_cfg.setdefault("rebalance_min_break_retention", 0.995)
+        member_sizing_cfg.setdefault("rebalance_min_fs_retention", 0.995)
+        member_sizing_cfg.setdefault(
+            "rebalance_groups",
+            ["top_chord", "vertical", "diagonal"],
+        )
+        member_sizing_cfg.setdefault("enable_symmetry_audit", True)
+
+        # Mutação de eficiência de seção: melhora a inércia de banzos/montantes
+        # sem adicionar palitos. Útil quando a falha é beam_column/buckling.
+        member_sizing_cfg.setdefault("enable_section_efficiency_mutation", True)
+        member_sizing_cfg.setdefault("section_efficiency_groups", ["top_chord", "vertical"])
+        member_sizing_cfg.setdefault("section_efficiency_top_chord_spacing_candidates_mm", [16.0, 18.0])
+        member_sizing_cfg.setdefault("section_efficiency_vertical_spacing_candidates_mm", [11.0, 12.0])
+        member_sizing_cfg.setdefault("section_efficiency_max_proxy_mass_ratio", 0.985)
+        member_sizing_cfg.setdefault("section_efficiency_min_break_gain", 1.003)
+        member_sizing_cfg.setdefault("section_efficiency_min_fs_gain", 1.003)
+
         member_sizing_cfg.setdefault(
             "sizing_load_cases",
             [
@@ -971,7 +1039,7 @@ class ConfigService:
         topology_cleanup.setdefault("max_remove_candidates_per_iteration", 4)
         topology_cleanup.setdefault("skip_if_break_below_ratio", 0.65)
         # Mira massa abaixo de 980 g, não apenas abaixo do limite eliminatório.
-        topology_cleanup.setdefault("mass_rescue_target_ratio", 0.965)
+        topology_cleanup.setdefault("mass_rescue_target_ratio", 0.955)
         topology_cleanup.setdefault("mass_rescue_min_break_retention", 0.985)
         topology_cleanup.setdefault("mass_rescue_min_fs_retention", 0.985)
         topology_cleanup.setdefault(

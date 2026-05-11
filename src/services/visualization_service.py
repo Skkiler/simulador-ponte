@@ -998,14 +998,28 @@ class VisualizationService:
                 x1 = safe_float(r.get("x1_mm"), 0.0) or 0.0
                 y1 = (safe_float(r.get("y1_mm"), 0.0) or 0.0) + off_y
                 z1 = (safe_float(r.get("z1_mm"), 0.0) or 0.0) + off_z
-                # Recupera largura e espessura do palito, se disponíveis; caso contrário usa defaults genéricos
+                # Recupera dimensões físicas e orientação do palito.
+                # width_mm/thickness_mm permanecem a dimensão nominal do blank;
+                # visual_width_mm/visual_thickness_mm representam a orientação construtiva
+                # no prisma renderizado (edge = lateral para cima).
                 try:
-                    wmm = float(r.get("width_mm"))
-                    tmm = float(r.get("thickness_mm"))
+                    nominal_wmm = float(r.get("width_mm"))
+                    nominal_tmm = float(r.get("thickness_mm"))
                 except (TypeError, ValueError):
-                    # Valores típicos de referência
-                    wmm = 7.0
-                    tmm = 1.5
+                    nominal_wmm = 7.0
+                    nominal_tmm = 1.5
+
+                stick_orientation = str(r.get("stick_orientation", "flat") or "flat").strip().lower()
+                try:
+                    wmm = float(r.get("visual_width_mm"))
+                    tmm = float(r.get("visual_thickness_mm"))
+                except (TypeError, ValueError):
+                    if stick_orientation == "edge":
+                        wmm = nominal_tmm
+                        tmm = nominal_wmm
+                    else:
+                        wmm = nominal_wmm
+                        tmm = nominal_tmm
                 # Monta label para hover
                 label_parts = [
                     f"{r.get('stick_id', '')}",
@@ -1014,7 +1028,8 @@ class VisualizationService:
                     f"Corte {safe_float(r.get('cut_length_mm'), 0.0) or 0.0:.1f} mm",
                     f"N peça {safe_float(r.get('N_piece_N'), 0.0) or 0.0:.2f} N",
                 ]
-                label_parts.append(f"Seção {wmm:.1f}×{tmm:.1f} mm")
+                label_parts.append(f"Blank nominal {nominal_wmm:.1f}×{nominal_tmm:.1f} mm")
+                label_parts.append(f"Render/orientação {wmm:.1f}×{tmm:.1f} mm — {stick_orientation}")
                 label = "<br>".join(label_parts)
                 if use_lines:
                     fig.add_trace(

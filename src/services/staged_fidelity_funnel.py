@@ -2656,6 +2656,417 @@ class StagedFidelityFunnelPlanner:
 
         return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
 
+    def _primary_symmetry_orbit_audit(
+        self,
+        cfg: Dict[str, Any],
+        load_cases: List[str],
+        *,
+        stage_name: str,
+        tension_only: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Audita órbitas simétricas para pegar diferenças de n_sticks/FS.
+
+        O relatório visual pode parecer assimétrico quando o caso de carga é assimétrico,
+        mas diferenças reais de n_sticks em uma órbita primária são erro de projeto.
+        Este helper não altera a ponte; ele só escreve diagnóstico.
+        """
+        summary = self._multi_case_summary(
+            cfg,
+            load_cases,
+            stage_name=stage_name,
+            tension_only=tension_only,
+        )
+        cases = summary.get("cases") or []
+        if not cases:
+            return []
+
+        ref = cases[0]
+        nodes = ref.get("nodes") or []
+        members = ref.get("members") or []
+        member_by_id = {int(getattr(m, "id")): m for m in members}
+        analysis = cfg.get("analysis", {}) or {}
+        primary_groups = set(
+            analysis.get(
+                "global_failure_groups",
+                ["bottom_chord", "top_chord", "vertical", "diagonal", "support_pad"],
+            )
+        )
+
+        try:
+            partners = self.planner.map_member_to_symmetry_partners(cfg, nodes, members)
+        except Exception:
+            partners = {}
+
+        # Pega o pior FS por membro entre casos de projeto. Isso evita comparar
+        # uma cor visual isolada com outra carga diferente.
+        fs_by_mid: Dict[int, float] = {}
+        case_by_mid: Dict[int, str] = {}
+        for case in cases:
+            case_name = str(case.get("case", "unknown"))
+            for chk in (case.get("member_checks") or []):
+                mid_raw = chk.get("member_id")
+                if mid_raw is None:
+                    continue
+                mid = int(mid_raw)
+                fs = safe_float(chk.get("FS_design"), None)
+                if fs is None:
+                    fs = safe_float(chk.get("FS_min"), None)
+                if fs is None:
+                    continue
+                old = fs_by_mid.get(mid)
+                if old is None or float(fs) < old:
+                    fs_by_mid[mid] = float(fs)
+                    case_by_mid[mid] = case_name
+
+        seen: set[Tuple[int, ...]] = set()
+        rows: List[Dict[str, Any]] = []
+        for mid, m in sorted(member_by_id.items()):
+            group = str(getattr(m, "group", ""))
+            if group not in primary_groups:
+                continue
+            orbit = tuple(sorted(set([mid] + [int(v) for v in partners.get(mid, []) if int(v) in member_by_id])))
+            if orbit in seen:
+                continue
+            seen.add(orbit)
+            ns = [int(getattr(member_by_id[i], "n_sticks", 1)) for i in orbit]
+            fs_vals = [fs_by_mid.get(i) for i in orbit if fs_by_mid.get(i) is not None]
+            fs_min = min(fs_vals) if fs_vals else None
+            fs_max = max(fs_vals) if fs_vals else None
+            rows.append(
+                {
+                    "orbit_member_ids": ";".join(str(i) for i in orbit),
+                    "group": group,
+                    "n_sticks_min": min(ns) if ns else None,
+                    "n_sticks_max": max(ns) if ns else None,
+                    "FS_min": fs_min,
+                    "FS_max": fs_max,
+                    "FS_spread": (fs_max - fs_min) if fs_min is not None and fs_max is not None else None,
+                    "worst_case_members": ";".join(f"{i}:{case_by_mid.get(i, '')}" for i in orbit),
+                    "asymmetry_flag": bool((ns and min(ns) != max(ns)) or (fs_min is not None and fs_max is not None and (fs_max - fs_min) > 0.10)),
+                }
+            )
+        return rows
+
+    def _rebalance_primary_sticks_by_symmetry(
+        self,
+        cfg: Dict[str, Any],
+        load_cases: List[str],
+        *,
+        stage_name: str,
+        tension_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Troca palitos de órbitas primárias folgadas para órbitas críticas.
+
+        Diferente de reinvestir massa nova, este passo tenta ser quase neutro em massa:
+        remove 1 palito de uma órbita do mesmo grupo com FS folgado e adiciona 1 palito
+        em uma órbita crítica simétrica. Isso corrige o caso típico visto no output:
+        alguns banzos superiores com 5 palitos e FS > 1.15, enquanto outro par simétrico
+        de banzo ainda está com 4 palitos e FS < 1.0.
+        """
+        settings = cfg.get("member_sizing", {}) or {}
+        if not bool(settings.get("enable_post_reinvest_rebalance", True)):
+            summary = self._multi_case_summary(cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+            return {"best_cfg": cfg, "summary": summary, "trace_rows": []}
+
+        cur_cfg = self.planner.config.normalize(cfg)
+        cur_summary = self._multi_case_summary(cur_cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+        if not self._summary_valid_flag(cur_summary):
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+
+        analysis = cur_cfg.get("analysis", {}) or {}
+        material = cur_cfg.get("material", {}) or {}
+        member_sizing = cur_cfg.get("member_sizing", {}) or {}
+        mass_limit = float(effective_mass_limit_g(cur_cfg))
+        competitive_ratio = float(member_sizing.get("competitive_mass_target_ratio", 0.98))
+        target_proxy_mass = mass_limit * float(member_sizing.get("rebalance_target_proxy_mass_ratio", competitive_ratio))
+        current_mass = safe_float(cur_summary.get("dead_weight_proxy_g"), 0.0) or 0.0
+
+        max_net_mass = float(member_sizing.get("rebalance_max_net_mass_g", 3.0))
+        max_swaps = max(1, int(member_sizing.get("rebalance_max_swaps", 4)))
+        fs_threshold = float(member_sizing.get("rebalance_fs_threshold", analysis.get("acceptance_min_primary_fs", 1.05)))
+        donor_threshold = float(member_sizing.get("rebalance_donor_fs_threshold", 1.16))
+        groups = set(member_sizing.get("rebalance_groups", ["top_chord", "vertical", "diagonal"]) or [])
+        stick_mass_g = float(material.get("stick_mass_g", 1.4))
+        stick_len_mm = max(1.0, float(material.get("stick_length_mm", 115.0)))
+        max_default = int(analysis.get("planner_max_sticks_per_group", 12))
+        max_by_group = analysis.get("planner_max_sticks_per_group_by_group", {}) or {}
+        min_by_group = (cur_cfg.get("minimum_sticks_by_group", {}) or {})
+
+        def max_for_group(group: str) -> int:
+            raw = safe_float(max_by_group.get(group), None)
+            return int(raw) if raw is not None else max_default
+
+        def min_for_group(group: str) -> int:
+            raw = safe_float(min_by_group.get(group), None)
+            if raw is not None:
+                return int(raw)
+            return {"top_chord": 4, "bottom_chord": 2, "vertical": 2, "diagonal": 2, "support_pad": 2}.get(group, 1)
+
+        ml_cfg = cur_cfg.get("multi_loadcase_screening", {}) or {}
+        case_names = [
+            str(v)
+            for v in (
+                member_sizing.get("sizing_load_cases")
+                or ml_cfg.get("strength_governing_cases")
+                or ["center", "torsion_60_40", "lateral_imperfection"]
+            )
+        ]
+        cases = [
+            self._evaluate_case_cached(cur_cfg, c, stage_name=stage_name, tension_only=tension_only)
+            for c in case_names
+        ]
+        if not cases:
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+        ref = cases[0]
+        nodes = ref.get("nodes") or []
+        members = ref.get("members") or []
+        member_by_id = {int(getattr(m, "id")): m for m in members}
+        try:
+            partners = self.planner.map_member_to_symmetry_partners(cur_cfg, nodes, members)
+        except Exception:
+            partners = {}
+
+        worst_by_mid: Dict[int, Dict[str, Any]] = {}
+        for case in cases:
+            case_name = str(case.get("case", "unknown"))
+            for chk in (case.get("member_checks") or []):
+                mid_raw = chk.get("member_id")
+                if mid_raw is None:
+                    continue
+                mid = int(mid_raw)
+                m = member_by_id.get(mid)
+                if m is None:
+                    continue
+                group = str(getattr(m, "group", chk.get("group", "")))
+                if group not in groups or chk.get("design_relevant") is False:
+                    continue
+                fs = safe_float(chk.get("FS_design"), None)
+                if fs is None:
+                    fs = safe_float(chk.get("FS_min"), None)
+                if fs is None:
+                    continue
+                cur = worst_by_mid.get(mid)
+                if cur is None or float(fs) < float(cur.get("FS", 1.0e99)):
+                    worst_by_mid[mid] = {"FS": float(fs), "case": case_name, "group": group}
+
+        seen: set[Tuple[int, ...]] = set()
+        orbits: List[Dict[str, Any]] = []
+        for mid, meta in worst_by_mid.items():
+            orbit = tuple(sorted(set([mid] + [int(v) for v in partners.get(mid, []) if int(v) in member_by_id])))
+            if orbit in seen:
+                continue
+            seen.add(orbit)
+            group = str(meta.get("group"))
+            fs_vals = [worst_by_mid.get(i, {}).get("FS") for i in orbit if worst_by_mid.get(i, {}).get("FS") is not None]
+            if not fs_vals:
+                continue
+            ns = [int(getattr(member_by_id[i], "n_sticks", 1)) for i in orbit]
+            lengths = [float(getattr(member_by_id[i], "L", 0.0) or 0.0) for i in orbit]
+            orbits.append(
+                {
+                    "orbit": orbit,
+                    "group": group,
+                    "fs_min": min(float(v) for v in fs_vals),
+                    "fs_max": max(float(v) for v in fs_vals),
+                    "n_min": min(ns),
+                    "n_max": max(ns),
+                    "length_total": sum(lengths),
+                    "case": worst_by_mid.get(mid, {}).get("case"),
+                }
+            )
+
+        critical = [o for o in orbits if o["fs_min"] < fs_threshold and o["n_max"] < max_for_group(str(o["group"]))]
+        donors = [o for o in orbits if o["fs_min"] > donor_threshold and o["n_min"] > min_for_group(str(o["group"]))]
+        critical.sort(key=lambda o: (o["fs_min"], -o["length_total"]))
+        donors.sort(key=lambda o: (-o["fs_min"], o["length_total"]))
+
+        if not critical or not donors:
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+
+        best_cfg = cur_cfg
+        best_summary = cur_summary
+        best_break = safe_float(cur_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        best_fs = safe_float(cur_summary.get("min_fs_design_proxy"), 0.0) or 0.0
+        trace_rows: List[Dict[str, Any]] = []
+        used_pairs: set[Tuple[Tuple[int, ...], Tuple[int, ...]]] = set()
+
+        for _ in range(max_swaps):
+            accepted = False
+            for crit in critical:
+                c_orbit = tuple(crit["orbit"])
+                for donor in donors:
+                    d_orbit = tuple(donor["orbit"])
+                    if crit["group"] != donor["group"] or c_orbit == d_orbit:
+                        continue
+                    if (c_orbit, d_orbit) in used_pairs:
+                        continue
+                    used_pairs.add((c_orbit, d_orbit))
+                    add_mass = sum(float(getattr(member_by_id[i], "L", 0.0) or 0.0) / stick_len_mm * stick_mass_g for i in c_orbit)
+                    rem_mass = sum(float(getattr(member_by_id[i], "L", 0.0) or 0.0) / stick_len_mm * stick_mass_g for i in d_orbit)
+                    net_mass = add_mass - rem_mass
+                    if current_mass + net_mass > target_proxy_mass + max_net_mass + 1.0e-9:
+                        continue
+                    trial = copy.deepcopy(best_cfg)
+                    by_id = trial.setdefault("member_sticks_by_id", {})
+                    valid = True
+                    for i in c_orbit:
+                        old = max(1, int(getattr(member_by_id[i], "n_sticks", 1)))
+                        if old >= max_for_group(str(crit["group"])):
+                            valid = False
+                            break
+                        by_id[str(int(i))] = old + 1
+                    for i in d_orbit:
+                        old = max(1, int(getattr(member_by_id[i], "n_sticks", 1)))
+                        if old <= min_for_group(str(donor["group"])):
+                            valid = False
+                            break
+                        by_id[str(int(i))] = old - 1
+                    if not valid:
+                        continue
+                    trial = self.planner.config.normalize(trial)
+                    summary = self._multi_case_summary(trial, load_cases, stage_name=stage_name, tension_only=tension_only)
+                    if not self._summary_valid_flag(summary):
+                        continue
+                    nb = safe_float(summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+                    nf = safe_float(summary.get("min_fs_design_proxy"), 0.0) or 0.0
+                    nm = safe_float(summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+                    min_break_ret = float(member_sizing.get("rebalance_min_break_retention", 0.995))
+                    min_fs_ret = float(member_sizing.get("rebalance_min_fs_retention", 0.995))
+                    if nm <= target_proxy_mass + max_net_mass + 1.0e-9 and nb >= best_break * min_break_ret and nf >= best_fs * min_fs_ret and (nf > best_fs + 1.0e-6 or nb > best_break + 1.0e-6):
+                        best_cfg = trial
+                        best_summary = summary
+                        best_break = nb
+                        best_fs = nf
+                        trace_rows.append(
+                            {
+                                "critical_orbit": ";".join(str(i) for i in c_orbit),
+                                "donor_orbit": ";".join(str(i) for i in d_orbit),
+                                "group": crit["group"],
+                                "critical_fs_before": crit["fs_min"],
+                                "donor_fs_before": donor["fs_min"],
+                                "net_mass_g_est": net_mass,
+                                "new_break_proxy_kgf": nb,
+                                "new_min_fs_design_proxy": nf,
+                                "new_mass_proxy_g": nm,
+                                "reason": "symmetry_preserving_primary_rebalance",
+                            }
+                        )
+                        accepted = True
+                        break
+                if accepted:
+                    break
+            if not accepted:
+                break
+
+        return {"best_cfg": best_cfg, "summary": best_summary, "trace_rows": trace_rows}
+
+
+    def _section_efficiency_mutation(
+        self,
+        cfg: Dict[str, Any],
+        load_cases: List[str],
+        *,
+        stage_name: str,
+        tension_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Testa melhorias de seção sem adicionar palitos.
+
+        O objetivo é atacar flambagem/interação axial-flexão aumentando inércia
+        geométrica por layout/orientação, antes de simplesmente adicionar massa.
+        Mantém o modelo geral: se o usuário mudar dimensões do palito, a mutação
+        ainda só ajusta espaçamentos relativos/absolutos configuráveis.
+        """
+        settings = cfg.get("member_sizing", {}) or {}
+        if not bool(settings.get("enable_section_efficiency_mutation", True)):
+            summary = self._multi_case_summary(cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+            return {"best_cfg": cfg, "summary": summary, "trace_rows": []}
+
+        cur_cfg = self.planner.config.normalize(cfg)
+        cur_summary = self._multi_case_summary(cur_cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+        if not self._summary_valid_flag(cur_summary):
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+
+        mass_limit = float(effective_mass_limit_g(cur_cfg))
+        target_proxy_mass = mass_limit * float(settings.get("section_efficiency_max_proxy_mass_ratio", 0.985))
+        min_break_gain = float(settings.get("section_efficiency_min_break_gain", 1.003))
+        min_fs_gain = float(settings.get("section_efficiency_min_fs_gain", 1.003))
+
+        best_cfg = cur_cfg
+        best_summary = cur_summary
+        best_break = safe_float(cur_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        best_fs = safe_float(cur_summary.get("min_fs_design_proxy"), 0.0) or 0.0
+        best_mass = safe_float(cur_summary.get("dead_weight_proxy_g"), 0.0) or 0.0
+        trace_rows: List[Dict[str, Any]] = []
+
+        groups = {str(g) for g in (settings.get("section_efficiency_groups") or ["top_chord", "vertical"])}
+        candidates: List[Tuple[str, str, float, Dict[str, Any]]] = []
+
+        layout_base = (cur_cfg.get("section_layout_by_group", {}) or {})
+
+        def _candidate_with_spacing(group: str, spacing: float) -> Dict[str, Any]:
+            cand = copy.deepcopy(best_cfg)
+            layout = cand.setdefault("section_layout_by_group", {})
+            gcfg = dict(layout.get(group, {}) or {})
+            gcfg["layout"] = "box"
+            if group in {"top_chord", "bottom_chord"}:
+                gcfg["stick_orientation"] = "edge"
+            gcfg["spacing_y_mm"] = max(float(gcfg.get("spacing_y_mm", 0.0) or 0.0), float(spacing))
+            gcfg["spacing_z_mm"] = max(float(gcfg.get("spacing_z_mm", 0.0) or 0.0), float(spacing))
+            layout[group] = gcfg
+            return cand
+
+        if "top_chord" in groups:
+            for sp in settings.get("section_efficiency_top_chord_spacing_candidates_mm", [16.0, 18.0]):
+                cur = layout_base.get("top_chord", {}) or {}
+                if float(sp) > max(float(cur.get("spacing_y_mm", 0.0) or 0.0), float(cur.get("spacing_z_mm", 0.0) or 0.0)) + 1.0e-9:
+                    candidates.append(("top_chord", "box_spacing", float(sp), _candidate_with_spacing("top_chord", float(sp))))
+
+        if "vertical" in groups:
+            for sp in settings.get("section_efficiency_vertical_spacing_candidates_mm", [11.0, 12.0]):
+                cur = layout_base.get("vertical", {}) or {}
+                if float(sp) > max(float(cur.get("spacing_y_mm", 0.0) or 0.0), float(cur.get("spacing_z_mm", 0.0) or 0.0)) + 1.0e-9:
+                    candidates.append(("vertical", "box_spacing", float(sp), _candidate_with_spacing("vertical", float(sp))))
+
+        for group, mutation, value, cand_cfg in candidates:
+            cand_cfg = self.planner.config.normalize(cand_cfg)
+            summary = self._multi_case_summary(cand_cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+            new_break = safe_float(summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+            new_fs = safe_float(summary.get("min_fs_design_proxy"), 0.0) or 0.0
+            new_mass = safe_float(summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+            accepted = False
+            reason = "not_improved"
+
+            if not self._summary_valid_flag(summary):
+                reason = "invalid_summary"
+            elif new_mass > target_proxy_mass + 1.0e-9 and best_mass <= target_proxy_mass + 1.0e-9:
+                reason = "above_proxy_mass_target"
+            elif new_break >= best_break * min_break_gain or new_fs >= best_fs * min_fs_gain:
+                accepted = True
+                reason = "section_efficiency_improved"
+                best_cfg = cand_cfg
+                best_summary = summary
+                best_break = new_break
+                best_fs = new_fs
+                best_mass = new_mass
+                # Atualiza base para permitir mutações cumulativas coerentes.
+                layout_base = best_cfg.get("section_layout_by_group", {}) or {}
+
+            trace_rows.append(
+                {
+                    "group": group,
+                    "mutation": mutation,
+                    "value_mm": value,
+                    "accepted": accepted,
+                    "reason": reason,
+                    "old_break_proxy_kgf": best_break if accepted else safe_float(cur_summary.get("predicted_breaking_load_proxy_kgf"), 0.0),
+                    "new_break_proxy_kgf": new_break,
+                    "new_min_fs_design_proxy": new_fs,
+                    "new_mass_proxy_g": new_mass,
+                }
+            )
+
+        return {"best_cfg": best_cfg, "summary": best_summary, "trace_rows": trace_rows}
+
     def _topology_cleanup(
         self,
         cfg: Dict[str, Any],
@@ -3631,14 +4042,26 @@ class StagedFidelityFunnelPlanner:
             )
         )
 
+        mass_rescue_target_ratio = float(
+            (base.get("topology_cleanup", {}) or {}).get(
+                "mass_rescue_target_ratio",
+                0.955,
+            )
+        )
+        mass_rescue_target_g = mass_rescue_target_ratio * mass_limit
+
         skip_topology_when_weak_and_within_mass = (
             best_s5_break < s6_skip_break_ratio * target_break
-            and best_s5_mass <= mass_limit
+            and best_s5_mass <= mass_rescue_target_g
         )
 
+        # Mass rescue não deve ocorrer apenas quando passa de 1000 g.
+        # Se a meta prática é ficar abaixo de ~980 g, S6 precisa liberar massa
+        # local enquanto preservar quase toda a capacidade. Essa folga é então
+        # reinvestida em membros primários críticos antes do S7.
         mass_rescue_only = (
-            best_s5_break < s6_skip_break_ratio * target_break
-            and best_s5_mass > mass_limit
+            best_s5_mass > mass_rescue_target_g
+            and best_s5_break < target_break
         )
 
         emit_progress(0.76, "S6: mutação topológica final")
@@ -3665,8 +4088,9 @@ class StagedFidelityFunnelPlanner:
         else:
             if mass_rescue_only:
                 emit_log(
-                    "[S6:MASS_RESCUE] Candidato ainda fraco, mas acima da massa. "
-                    "S6 rodará apenas como tentativa de resgate de massa."
+                    "[S6:MASS_RESCUE] Candidato ainda abaixo da meta e acima da massa prática "
+                    f"({best_s5_mass:.1f} g > alvo {mass_rescue_target_g:.1f} g). "
+                    "S6 rodará como resgate de massa local para posterior reinvestimento crítico."
                 )
             for idx, row in enumerate(keep_s5[:1], 1):
                 topo = self._topology_cleanup(
@@ -3740,6 +4164,81 @@ class StagedFidelityFunnelPlanner:
                 ]
                 keep_s6 = s6_rows[:1]
         GeometryService.write_csv(out / "post_topology_reinvestment.csv", reinvest_trace_rows)
+
+        # Rebalanceamento quase neutro em massa: move 1 palito de órbitas primárias
+        # folgadas para órbitas simétricas críticas. Isso corrige casos em que o
+        # reinvestimento adiciona massa em alguns painéis, mas deixa outro par
+        # simétrico de banzo/montante como gargalo.
+        rebalance_trace_rows: List[Dict[str, Any]] = []
+        if bool((base.get("member_sizing", {}) or {}).get("enable_post_reinvest_rebalance", True)):
+            rebalance_input_cfg = (keep_s6[0]["config"] if keep_s6 else keep_s5[0]["config"])
+            rebalanced = self._rebalance_primary_sticks_by_symmetry(
+                rebalance_input_cfg,
+                load_cases,
+                stage_name="S6_REBALANCE",
+                tension_only=tension_only_s6,
+            )
+            rebalance_trace_rows = [
+                {"candidate_id": "S6B-0001", **r}
+                for r in (rebalanced.get("trace_rows") or [])
+            ]
+            if rebalance_trace_rows:
+                s = rebalanced["summary"]
+                s6_rows = [
+                    {
+                        "stage": "S6_REBALANCE",
+                        "candidate_id": "S6B-0001",
+                        "objective": s.get("objective"),
+                        "valid_for_selection": s.get("valid_for_selection"),
+                        "predicted_breaking_load_proxy_kgf": s.get("predicted_breaking_load_proxy_kgf"),
+                        "min_fs_design_proxy": s.get("min_fs_design_proxy"),
+                        "dead_weight_proxy_g": s.get("dead_weight_proxy_g"),
+                        "config": rebalanced["best_cfg"],
+                    }
+                ]
+                keep_s6 = s6_rows[:1]
+        GeometryService.write_csv(out / "post_reinvest_rebalance.csv", rebalance_trace_rows)
+
+        # Mutação sem massa: melhora inércia efetiva de seções comprimidas
+        # alterando orientação/espaçamento de banzos e montantes dentro de limites
+        # construtivos. Isto afeta flambagem sem adicionar palitos.
+        section_eff_trace_rows: List[Dict[str, Any]] = []
+        if bool((base.get("member_sizing", {}) or {}).get("enable_section_efficiency_mutation", True)):
+            section_input_cfg = (keep_s6[0]["config"] if keep_s6 else keep_s5[0]["config"])
+            section_eff = self._section_efficiency_mutation(
+                section_input_cfg,
+                load_cases,
+                stage_name="S6_SECTION_EFF",
+                tension_only=tension_only_s6,
+            )
+            section_eff_trace_rows = [
+                {"candidate_id": "S6E-0001", **r}
+                for r in (section_eff.get("trace_rows") or [])
+            ]
+            if any(bool(r.get("accepted")) for r in section_eff_trace_rows):
+                s = section_eff["summary"]
+                s6_rows = [
+                    {
+                        "stage": "S6_SECTION_EFF",
+                        "candidate_id": "S6E-0001",
+                        "objective": s.get("objective"),
+                        "valid_for_selection": s.get("valid_for_selection"),
+                        "predicted_breaking_load_proxy_kgf": s.get("predicted_breaking_load_proxy_kgf"),
+                        "min_fs_design_proxy": s.get("min_fs_design_proxy"),
+                        "dead_weight_proxy_g": s.get("dead_weight_proxy_g"),
+                        "config": section_eff["best_cfg"],
+                    }
+                ]
+                keep_s6 = s6_rows[:1]
+        GeometryService.write_csv(out / "section_efficiency_mutation.csv", section_eff_trace_rows)
+
+        symmetry_audit_rows = self._primary_symmetry_orbit_audit(
+            (keep_s6[0]["config"] if keep_s6 else keep_s5[0]["config"]),
+            load_cases,
+            stage_name="S6_SYMMETRY_AUDIT",
+            tension_only=tension_only_s6,
+        )
+        GeometryService.write_csv(out / "symmetry_audit.csv", symmetry_audit_rows)
 
         emit_progress(0.86, "S7: detalhamento de fabricação")
         t7 = time.perf_counter()

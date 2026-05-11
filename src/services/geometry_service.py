@@ -433,7 +433,7 @@ class GeometryService:
             sec = self.sections.composite_section(n_sticks, mat, layout_cfg)
             L = self.sections.member_length_mm(node_by_id[i], node_by_id[j])
             k = cfg.get("effective_length_factor_by_group", {}).get(group, {})
-            members.append(Member(idx, i, j, group, n_sticks, sec["A"], sec["A"], sec["A"], sec["Iy"], sec["Iz"], sec["J"], float(mat["E_MPa"]), float(mat["G_MPa"]), float(k.get("Ky", 1.0)), float(k.get("Kz", 1.0)), L, str(sec.get("layout", layout_cfg.get("layout", "stacked")))))
+            members.append(Member(idx, i, j, group, n_sticks, sec["A"], sec["A"], sec["A"], sec["Iy"], sec["Iz"], sec["J"], float(mat["E_MPa"]), float(mat["G_MPa"]), float(k.get("Ky", 1.0)), float(k.get("Kz", 1.0)), L, str(sec.get("layout", layout_cfg.get("layout", "stacked"))), str(sec.get("stick_orientation", layout_cfg.get("stick_orientation", "flat")))))
 
         left_xs_raw = [
             float(v)

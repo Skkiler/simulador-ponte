@@ -28,6 +28,24 @@ class PostProcessor:
         )
 
         imperfection_e = float(detail.get("imperfection_eccentricity_mm", 2.0))
+        adaptive_imperfection = bool(detail.get("adaptive_imperfection_eccentricity", True))
+        min_imperfection_e = float(detail.get("min_imperfection_eccentricity_mm", 0.55))
+        imperfection_factor_by_layout = detail.get("imperfection_eccentricity_factor_by_layout", {}) or {}
+        imperfection_factor_by_group = detail.get("imperfection_eccentricity_factor_by_group", {}) or {}
+
+        def _effective_imperfection_eccentricity(group: str, layout: str, n_sticks: int) -> float:
+            if not adaptive_imperfection:
+                return max(0.0, float(imperfection_e))
+
+            lf = safe_float(imperfection_factor_by_layout.get(str(layout).lower()), 1.0) or 1.0
+            gf = safe_float(imperfection_factor_by_group.get(str(group)), 1.0) or 1.0
+
+            # Mais palitos e seção composta reduzem sensibilidade a desalinhamento local,
+            # mas nunca eliminam imperfeição. O piso evita superotimismo.
+            n_factor = 1.0 / math.sqrt(max(1.0, min(float(n_sticks), 6.0)))
+            e_eff = float(imperfection_e) * float(lf) * float(gf) * max(0.55, n_factor)
+            return max(0.0, max(min_imperfection_e, e_eff))
+
         stick_w = float(mat.get("stick_width_mm", 7.0))
         stick_t = float(mat.get("stick_thickness_mm", 1.5))
         stick_area = max(1.0e-9, stick_w * stick_t)
@@ -74,6 +92,8 @@ class PostProcessor:
                 decay_per_splice=float(detail.get("joint_efficiency_decay_per_splice_compression", 0.04)),
             )
 
+            e_eff = _effective_imperfection_eccentricity(str(r.get("group", "")), layout, n)
+
             col_y = self.sections.column_capacity_N(
                 E_MPa=float(mat["E_MPa"]),
                 A_mm2=A,
@@ -82,7 +102,7 @@ class PostProcessor:
                 L_mm=L,
                 sigma_c_MPa=sigma_c,
                 method="auto",
-                eccentricity_mm=imperfection_e if N < 0 else 0.0,
+                eccentricity_mm=e_eff if N < 0 else 0.0,
             )
             col_z = self.sections.column_capacity_N(
                 E_MPa=float(mat["E_MPa"]),
@@ -92,7 +112,7 @@ class PostProcessor:
                 L_mm=L,
                 sigma_c_MPa=sigma_c,
                 method="auto",
-                eccentricity_mm=imperfection_e if N < 0 else 0.0,
+                eccentricity_mm=e_eff if N < 0 else 0.0,
             )
             cap_col_y = (safe_float(col_y.get("capacity_N"), 0.0) or 0.0) * max(0.55, min(1.2, eta_c))
             cap_col_z = (safe_float(col_z.get("capacity_N"), 0.0) or 0.0) * max(0.55, min(1.2, eta_c))
@@ -109,7 +129,7 @@ class PostProcessor:
             r_z = self.sections.radius_of_gyration(Iz, A)
             c_z = max(stick_t * 0.5, r_y * math.sqrt(3.0))
             c_y = max(stick_w * 0.5, r_z * math.sqrt(3.0))
-            M_imp = absN * imperfection_e if N < 0 else 0.0
+            M_imp = absN * e_eff if N < 0 else 0.0
             sigma_by = M_imp * c_z / Iy if Iy > 0 else 0.0
             sigma_bz = M_imp * c_y / Iz if Iz > 0 else 0.0
 
@@ -226,6 +246,7 @@ class PostProcessor:
                     "beam_column_util": beam_col_util,
                     "beam_column_B1y": B1y,
                     "beam_column_B1z": B1z,
+                    "imperfection_eccentricity_effective_mm": e_eff if N < 0 else 0.0,
                     "tension_only_released": released_tension_only,
                     "design_relevant": design_relevant,
                 }

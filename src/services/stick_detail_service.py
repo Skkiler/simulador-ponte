@@ -239,6 +239,17 @@ class StickDetailService:
             )
             sec = self.sections.composite_section(n_lanes, mat, layout_cfg_detail)
 
+            stick_orientation = str(sec.get("stick_orientation", layout_cfg_detail.get("stick_orientation", "flat"))).strip().lower()
+            visual_width_mm = safe_float(sec.get("stick_width_y_mm"), None)
+            visual_thickness_mm = safe_float(sec.get("stick_height_z_mm"), None)
+            if visual_width_mm is None or visual_thickness_mm is None:
+                if stick_orientation == "edge":
+                    visual_width_mm = stick_t
+                    visual_thickness_mm = stick_w
+                else:
+                    visual_width_mm = stick_w
+                    visual_thickness_mm = stick_t
+
             per_lane = N / n_lanes
             piece_area = stick_w * stick_t
             per_sigma = per_lane / piece_area if piece_area else 0.0
@@ -393,8 +404,11 @@ class StickDetailService:
                             "N_piece_N": per_lane,
                             "sigma_axial_piece_MPa": per_sigma,
                             "member_state": "tension" if N >= 0 else "compression",
+                            "stick_orientation": stick_orientation,
                             "width_mm": stick_w,
                             "thickness_mm": stick_t,
+                            "visual_width_mm": visual_width_mm,
+                            "visual_thickness_mm": visual_thickness_mm,
                             "quadrant_id": quadrant_id,
                             "mass_g": stick_mass * cut_len_rounded / stick_len,
                         }

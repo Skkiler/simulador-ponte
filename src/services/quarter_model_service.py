@@ -191,6 +191,8 @@ class QuarterModelService:
                         m.Ky,
                         m.Kz,
                         L,
+                        getattr(m, "layout", "stacked"),
+                        getattr(m, "stick_orientation", "flat"),
                     )
                 )
                 source_member_by_quarter_member[qid] = int(m.id)
@@ -395,6 +397,8 @@ class QuarterModelService:
                             qm.Ky,
                             qm.Kz,
                             L,
+                            getattr(qm, "layout", "stacked"),
+                            getattr(qm, "stick_orientation", "flat"),
                         )
                     )
                     member_key_to_id[key] = mid

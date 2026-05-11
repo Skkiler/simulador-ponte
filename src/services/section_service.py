@@ -62,24 +62,51 @@ class SectionService:
         n = max(1, int(n_sticks))
         layout_cfg = layout_cfg or {"layout": "stacked"}
         layout = str(layout_cfg.get("layout", "stacked")).lower()
+        orientation_raw = str(
+            layout_cfg.get(
+                "stick_orientation",
+                layout_cfg.get("orientation", "flat"),
+            )
+        ).strip().lower()
+        edge_orientations = {
+            "edge",
+            "on_edge",
+            "edge_up",
+            "lateral_up",
+            "side_up",
+            "lado",
+            "lateral",
+            "em_pe",
+            "em_pé",
+            "vertical",
+        }
+        stick_orientation = "edge" if orientation_raw in edge_orientations else "flat"
+
         b = float(material["stick_width_mm"])
         t = float(material["stick_thickness_mm"])
 
-        A1 = b * t
-        Iy1 = b * t**3 / 12.0
-        Iz1 = t * b**3 / 12.0
+        # Eixos locais da seção do membro: y = largura lateral, z = altura vertical.
+        # flat: face larga "deitada" (largura em y, espessura em z).
+        # edge: palito "de lado"/lateral para cima (espessura em y, largura em z).
+        # Para banzos comprimidos, edge aumenta fortemente Iy, pois I = b*h^3/12.
+        stick_y_mm = t if stick_orientation == "edge" else b
+        stick_z_mm = b if stick_orientation == "edge" else t
+
+        A1 = stick_y_mm * stick_z_mm
+        Iy1 = stick_y_mm * stick_z_mm**3 / 12.0
+        Iz1 = stick_z_mm * stick_y_mm**3 / 12.0
 
         positions: List[Tuple[float, float]] = []
         if layout == "single":
             positions = [(0.0, 0.0)]
         elif layout == "side_by_side":
-            start = -0.5 * (n - 1) * b
-            positions = [(start + k * b, 0.0) for k in range(n)]
+            start = -0.5 * (n - 1) * stick_y_mm
+            positions = [(start + k * stick_y_mm, 0.0) for k in range(n)]
         elif layout == "double_stack":
             cols = max(1, int(layout_cfg.get("columns", 2)))
             rows = int(math.ceil(n / cols))
-            sy = max(float(layout_cfg.get("spacing_y_mm", b)), b)
-            sz = max(float(layout_cfg.get("spacing_z_mm", t)), t)
+            sy = max(float(layout_cfg.get("spacing_y_mm", stick_y_mm)), stick_y_mm)
+            sz = max(float(layout_cfg.get("spacing_z_mm", stick_z_mm)), stick_z_mm)
             y0 = -0.5 * (cols - 1) * sy
             z0 = -0.5 * (rows - 1) * sz
             for idx in range(n):
@@ -87,8 +114,8 @@ class SectionService:
                 r = idx // cols
                 positions.append((y0 + c * sy, z0 + r * sz))
         elif layout == "box":
-            sy = max(float(layout_cfg.get("spacing_y_mm", b + 2.0)), b)
-            sz = max(float(layout_cfg.get("spacing_z_mm", t + 2.0)), t)
+            sy = max(float(layout_cfg.get("spacing_y_mm", stick_y_mm + 2.0)), stick_y_mm)
+            sz = max(float(layout_cfg.get("spacing_z_mm", stick_z_mm + 2.0)), stick_z_mm)
             if n == 1:
                 positions = [(0.0, 0.0)]
             elif n == 2:
@@ -108,8 +135,8 @@ class SectionService:
             while len(positions) < n:
                 positions.append(positions[-1])
         else:
-            start = -0.5 * (n - 1) * t
-            positions = [(0.0, start + k * t) for k in range(n)]
+            start = -0.5 * (n - 1) * stick_z_mm
+            positions = [(0.0, start + k * stick_z_mm) for k in range(n)]
 
         eta_I, eta_A = cls._resolve_composite_action(material, layout_cfg)
 
@@ -126,8 +153,8 @@ class SectionService:
 
         A = A_perfect * eta_A
         J = max(1e-9, 0.35 * (Iy + Iz))
-        width = (max(y for y, _ in positions) - min(y for y, _ in positions) + b) if positions else b
-        height = (max(z for _, z in positions) - min(z for _, z in positions) + t) if positions else t
+        width = (max(y for y, _ in positions) - min(y for y, _ in positions) + stick_y_mm) if positions else stick_y_mm
+        height = (max(z for _, z in positions) - min(z for _, z in positions) + stick_z_mm) if positions else stick_z_mm
 
         return {
             "A": A,
@@ -140,6 +167,9 @@ class SectionService:
             "centroid_y_mm": cy,
             "centroid_z_mm": cz,
             "layout": layout,
+            "stick_orientation": stick_orientation,
+            "stick_width_y_mm": stick_y_mm,
+            "stick_height_z_mm": stick_z_mm,
             "stick_positions_yz": positions,
             "buckling_I_critical_mm4": min(Iy, Iz),
             "Iy_perfect": Iy_perfect,

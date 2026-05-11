@@ -32,6 +32,7 @@ class Member:
     Kz: float
     L: float
     layout: str = "stacked"
+    stick_orientation: str = "flat"
 
 
 @dataclass(frozen=True)

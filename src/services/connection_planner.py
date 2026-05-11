@@ -309,6 +309,8 @@ class ConnectionPlanner:
             float(getattr(member, "Ky", 1.0)),
             float(getattr(member, "Kz", 1.0)),
             float(getattr(member, "L", 1.0)),
+            str(getattr(member, "layout", "stacked")),
+            str(getattr(member, "stick_orientation", "flat")),
         )
         plan = self.assign_member_joint_plan(
             cfg,

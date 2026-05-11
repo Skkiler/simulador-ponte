@@ -334,11 +334,13 @@ class ActiveDesignPlanner:
                 # O objetivo é aumentar rigidez contra flambagem sem gerar massa absurda.
                 layout["top_chord"] = {
                     "layout": "box",
+                    "stick_orientation": "edge",
                     "spacing_y_mm": 10.0,
                     "spacing_z_mm": 10.0,
                 }
                 layout["bottom_chord"] = {
                     "layout": "double_stack",
+                    "stick_orientation": "edge",
                     "columns": 2,
                     "spacing_y_mm": 6.0,
                     "spacing_z_mm": 4.0,
@@ -398,11 +400,13 @@ class ActiveDesignPlanner:
 
                 layout["top_chord"] = {
                     "layout": "box",
+                    "stick_orientation": "edge",
                     "spacing_y_mm": 12.0,
                     "spacing_z_mm": 12.0,
                 }
                 layout["bottom_chord"] = {
                     "layout": "box",
+                    "stick_orientation": "edge",
                     "spacing_y_mm": 8.0,
                     "spacing_z_mm": 6.0,
                 }
@@ -466,6 +470,7 @@ class ActiveDesignPlanner:
             "top_chord",
             {
                 "layout": "box",
+                "stick_orientation": "edge",
                 "spacing_y_mm": 10.0,
                 "spacing_z_mm": 10.0,
             },
@@ -474,6 +479,7 @@ class ActiveDesignPlanner:
             "bottom_chord",
             {
                 "layout": "box",
+                "stick_orientation": "edge",
                 "spacing_y_mm": 8.0,
                 "spacing_z_mm": 6.0,
             },
@@ -608,7 +614,7 @@ class ActiveDesignPlanner:
                 for g in ("top_chord", "bottom_chord"):
                     gcfg = dict(layout_by_group.get(g, {}) or {})
                     if str(gcfg.get("layout", "stacked")).lower() in {"stacked", "single", "side_by_side"}:
-                        gcfg.update({"layout": "box", "spacing_y_mm": 12.0, "spacing_z_mm": 12.0})
+                        gcfg.update({"layout": "box", "stick_orientation": "edge", "spacing_y_mm": 12.0, "spacing_z_mm": 12.0})
                         layout_by_group[g] = gcfg
                 for g in ("vertical", "diagonal"):
                     gcfg = dict(layout_by_group.get(g, {}) or {})
