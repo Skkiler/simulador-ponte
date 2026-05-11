@@ -1830,9 +1830,14 @@ class StagedFidelityFunnelPlanner:
         current_breaking_load_kgf: float = 0.0,
         target_breaking_load_kgf: float = 80.0,
     ) -> Dict[int, Any]:
+        competitive_ratio = float(
+            (cfg.get("member_sizing", {}) or {}).get("competitive_mass_target_ratio", 0.98)
+        )
+        effective_budget_limit_g = min(float(mass_limit_g), float(mass_limit_g) * competitive_ratio)
+
         budget_g = max(
             0.0,
-            float(mass_limit_g) - float(current_mass_g) - float(reserve_g),
+            effective_budget_limit_g - float(current_mass_g) - float(reserve_g),
         )
 
         keep: Dict[int, Any] = {}
@@ -2383,6 +2388,274 @@ class StagedFidelityFunnelPlanner:
             "before_after": all_before_after,
         }
     
+    def _reinvest_mass_into_critical_members(
+        self,
+        cfg: Dict[str, Any],
+        load_cases: List[str],
+        *,
+        stage_name: str,
+        tension_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Reinveste massa recuperada pelo S6 em gargalos primários simétricos.
+
+        O S5 dimensiona antes do resgate de massa; quando o S6 remove massa local,
+        a versão anterior seguia direto para fabricação e deixava gargalos primários
+        com FS baixo. Este passo usa a folga recuperada para acrescentar 1 palito
+        por órbita simétrica crítica, sem remover membros e sem mudar topologia.
+        """
+        settings = cfg.get("member_sizing", {}) or {}
+        if not bool(settings.get("enable_post_topology_reinvestment", True)):
+            summary = self._multi_case_summary(
+                cfg,
+                load_cases,
+                stage_name=stage_name,
+                tension_only=tension_only,
+            )
+            return {"best_cfg": cfg, "summary": summary, "trace_rows": []}
+
+        cur_cfg = self.planner.config.normalize(cfg)
+        cur_summary = self._multi_case_summary(
+            cur_cfg,
+            load_cases,
+            stage_name=stage_name,
+            tension_only=tension_only,
+        )
+
+        if not self._summary_valid_flag(cur_summary):
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+
+        analysis = cur_cfg.get("analysis", {}) or {}
+        material = cur_cfg.get("material", {}) or {}
+        bridge = cur_cfg.get("bridge", {}) or {}
+        member_sizing = cur_cfg.get("member_sizing", {}) or {}
+
+        mass_limit = float(effective_mass_limit_g(cur_cfg))
+        current_mass = safe_float(cur_summary.get("dead_weight_proxy_g"), 0.0) or 0.0
+        competitive_ratio = float(member_sizing.get("competitive_mass_target_ratio", 0.98))
+        target_proxy_mass = min(
+            mass_limit * competitive_ratio,
+            mass_limit * float(member_sizing.get("reinvest_target_proxy_mass_ratio", 0.975)),
+        )
+        reserve_g = float(member_sizing.get("reinvest_final_mass_reserve_g", 16.0))
+        available_budget = max(0.0, target_proxy_mass - current_mass - reserve_g)
+
+        if available_budget <= 0.25:
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+
+        if bool(member_sizing.get("reinvest_strength_cases_only", True)):
+            ml_cfg = cur_cfg.get("multi_loadcase_screening", {}) or {}
+            reinvest_case_names = [
+                str(v)
+                for v in (
+                    member_sizing.get("sizing_load_cases")
+                    or ml_cfg.get("strength_governing_cases")
+                    or ["center", "torsion_60_40", "lateral_imperfection"]
+                )
+            ]
+            cases = [
+                self._evaluate_case_cached(
+                    cur_cfg,
+                    case_name,
+                    stage_name=stage_name,
+                    tension_only=tension_only,
+                )
+                for case_name in reinvest_case_names
+            ]
+        else:
+            cases = cur_summary.get("cases") or []
+
+        if not cases:
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+
+        ref_case = cases[0]
+        nodes = ref_case.get("nodes") or []
+        members = ref_case.get("members") or []
+        node_by_id = {int(getattr(n, "id")): n for n in nodes}
+        member_by_id = {int(getattr(m, "id")): m for m in members}
+
+        try:
+            partners = self.planner.map_member_to_symmetry_partners(cur_cfg, nodes, members)
+        except Exception:
+            partners = {}
+
+        global_groups = set(
+            analysis.get(
+                "global_failure_groups",
+                ["bottom_chord", "top_chord", "vertical", "diagonal", "support_pad"],
+            )
+        )
+        priority_group = {
+            "vertical": 7.0,
+            "top_chord": 6.5,
+            "diagonal": 4.0,
+            "bottom_chord": 2.0,
+            "support_pad": 1.5,
+        }
+        fs_threshold = float(member_sizing.get("reinvest_fs_threshold", analysis.get("acceptance_min_primary_fs", 1.05)))
+        max_orbits = int(member_sizing.get("reinvest_max_members", 12))
+        max_sticks_increment = max(1, int(member_sizing.get("reinvest_max_sticks_per_member", 1)))
+        min_abs_force_N = float(member_sizing.get("reinvest_min_abs_force_N", 25.0))
+        stick_mass_g = float(material.get("stick_mass_g", 1.4))
+        stick_len_mm = max(1.0, float(material.get("stick_length_mm", 115.0)))
+        span = float(bridge.get("span_mm", 1200.0))
+        max_default = int(analysis.get("planner_max_sticks_per_group", 12))
+        max_by_group = analysis.get("planner_max_sticks_per_group_by_group", {}) or {}
+
+        def max_for_group(group: str) -> int:
+            raw = safe_float(max_by_group.get(group), None)
+            return int(raw) if raw is not None else max_default
+
+        worst_by_mid: Dict[int, Dict[str, Any]] = {}
+        for case in cases:
+            case_name = str(case.get("case", "unknown"))
+            checks = case.get("member_checks") or []
+            results = {
+                int(r.get("member_id")): r
+                for r in (case.get("member_results") or [])
+                if r.get("member_id") is not None
+            }
+            for chk in checks:
+                mid_raw = chk.get("member_id")
+                if mid_raw is None:
+                    continue
+                mid = int(mid_raw)
+                m = member_by_id.get(mid)
+                if m is None:
+                    continue
+                group = str(getattr(m, "group", chk.get("group", "")))
+                if group not in global_groups:
+                    continue
+                if chk.get("design_relevant") is False:
+                    continue
+                fs = safe_float(chk.get("FS_design"), None)
+                if fs is None:
+                    fs = safe_float(chk.get("FS_min"), None)
+                if fs is None or fs >= fs_threshold:
+                    continue
+                res = results.get(mid, {})
+                n_val = safe_float(res.get("N_N"), 0.0) or 0.0
+                if abs(float(n_val)) < min_abs_force_N:
+                    continue
+                current = worst_by_mid.get(mid)
+                if current is None or float(fs) < float(current.get("FS", 1.0e99)):
+                    worst_by_mid[mid] = {
+                        "FS": float(fs),
+                        "case": case_name,
+                        "group": group,
+                        "N_N": n_val,
+                        "mode": chk.get("governing_mode") or chk.get("failure_mode") or "",
+                    }
+
+        seen_orbits: set[Tuple[int, ...]] = set()
+        candidates: List[Tuple[float, float, Tuple[int, ...], Dict[str, Any]]] = []
+
+        for mid, meta in worst_by_mid.items():
+            m = member_by_id.get(mid)
+            if m is None:
+                continue
+            orbit = sorted(set([mid] + [int(v) for v in partners.get(mid, []) if int(v) in member_by_id]))
+            orbit_key = tuple(orbit)
+            if orbit_key in seen_orbits:
+                continue
+            seen_orbits.add(orbit_key)
+
+            group = str(meta.get("group"))
+            max_allowed = max_for_group(group)
+            increments: Dict[int, int] = {}
+            delta_mass = 0.0
+            center_bonus = 0.0
+            min_fs = float(meta.get("FS", 1.0e99))
+
+            for oid in orbit:
+                om = member_by_id.get(int(oid))
+                if om is None:
+                    continue
+                old_n = max(1, int(getattr(om, "n_sticks", 1)))
+                if old_n >= max_allowed:
+                    continue
+                inc = min(max_sticks_increment, max_allowed - old_n)
+                if inc <= 0:
+                    continue
+                increments[int(oid)] = inc
+                delta_mass += inc * float(getattr(om, "L", 0.0) or 0.0) / stick_len_mm * stick_mass_g
+                ni = node_by_id.get(int(getattr(om, "i")))
+                nj = node_by_id.get(int(getattr(om, "j")))
+                if ni is not None and nj is not None and span > 1.0e-9:
+                    mx = 0.5 * (float(getattr(ni, "x")) + float(getattr(nj, "x")))
+                    center_bonus = max(center_bonus, 1.0 - abs(mx - 0.5 * span) / max(0.5 * span, 1.0))
+
+            if not increments or delta_mass <= 0.0:
+                continue
+
+            score = (
+                priority_group.get(group, 1.0) * (1.0 / max(0.05, min_fs))
+                + 0.75 * center_bonus
+            ) / max(0.5, delta_mass)
+            candidates.append((score, delta_mass, orbit_key, {**meta, "increments": increments}))
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+
+        new_cfg = copy.deepcopy(cur_cfg)
+        by_id = new_cfg.setdefault("member_sticks_by_id", {})
+        trace_rows: List[Dict[str, Any]] = []
+        used_budget = 0.0
+        applied_orbits = 0
+
+        for score, delta_mass, orbit, meta in candidates:
+            if applied_orbits >= max_orbits:
+                break
+            if used_budget + delta_mass > available_budget + 1.0e-9:
+                continue
+            for oid, inc in meta["increments"].items():
+                om = member_by_id.get(int(oid))
+                if om is None:
+                    continue
+                old_n = max(1, int(getattr(om, "n_sticks", 1)))
+                by_id[str(int(oid))] = old_n + int(inc)
+                trace_rows.append(
+                    {
+                        "member_id": int(oid),
+                        "group": str(meta.get("group")),
+                        "old_n_sticks": old_n,
+                        "new_n_sticks": old_n + int(inc),
+                        "delta_mass_g_orbit": delta_mass,
+                        "worst_case": meta.get("case"),
+                        "FS_before": meta.get("FS"),
+                        "N_N": meta.get("N_N"),
+                        "score": score,
+                        "reason": "post_topology_reinvest_critical_primary_orbit",
+                    }
+                )
+            used_budget += delta_mass
+            applied_orbits += 1
+
+        if not trace_rows:
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+
+        new_cfg = self.planner.config.normalize(new_cfg)
+        new_summary = self._multi_case_summary(
+            new_cfg,
+            load_cases,
+            stage_name=stage_name,
+            tension_only=tension_only,
+        )
+
+        old_break = safe_float(cur_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        new_break = safe_float(new_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        old_fs = safe_float(cur_summary.get("min_fs_design_proxy"), 0.0) or 0.0
+        new_fs = safe_float(new_summary.get("min_fs_design_proxy"), 0.0) or 0.0
+        new_mass = safe_float(new_summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+
+        if (
+            self._summary_valid_flag(new_summary)
+            and new_mass <= target_proxy_mass + 1.0e-9
+            and new_break >= old_break * 0.995
+            and new_fs >= old_fs * 0.995
+        ):
+            return {"best_cfg": new_cfg, "summary": new_summary, "trace_rows": trace_rows}
+
+        return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+
     def _topology_cleanup(
         self,
         cfg: Dict[str, Any],
@@ -3434,6 +3707,39 @@ class StagedFidelityFunnelPlanner:
         GeometryService.write_csv(out / "zero_force_diagnostics.csv", zero_force_diag)
         GeometryService.write_csv(out / "mass_reallocation_after_topology.csv", mass_realloc_rows)
         stage_times["S6"] = time.perf_counter() - t6
+
+        # S6 pode liberar massa local. Antes o funil seguia direto para S7;
+        # agora a folga é reinvestida em gargalos primários simétricos, sem
+        # mudar topologia e sem remover membros.
+        reinvest_trace_rows: List[Dict[str, Any]] = []
+        if bool((base.get("member_sizing", {}) or {}).get("enable_post_topology_reinvestment", True)):
+            reinvest_input_cfg = (keep_s6[0]["config"] if keep_s6 else keep_s5[0]["config"])
+            reinvested = self._reinvest_mass_into_critical_members(
+                reinvest_input_cfg,
+                load_cases,
+                stage_name="S6_REINVEST",
+                tension_only=tension_only_s6,
+            )
+            reinvest_trace_rows = [
+                {"candidate_id": "S6R-0001", **r}
+                for r in (reinvested.get("trace_rows") or [])
+            ]
+            if reinvest_trace_rows:
+                s = reinvested["summary"]
+                s6_rows = [
+                    {
+                        "stage": "S6_REINVEST",
+                        "candidate_id": "S6R-0001",
+                        "objective": s.get("objective"),
+                        "valid_for_selection": s.get("valid_for_selection"),
+                        "predicted_breaking_load_proxy_kgf": s.get("predicted_breaking_load_proxy_kgf"),
+                        "min_fs_design_proxy": s.get("min_fs_design_proxy"),
+                        "dead_weight_proxy_g": s.get("dead_weight_proxy_g"),
+                        "config": reinvested["best_cfg"],
+                    }
+                ]
+                keep_s6 = s6_rows[:1]
+        GeometryService.write_csv(out / "post_topology_reinvestment.csv", reinvest_trace_rows)
 
         emit_progress(0.86, "S7: detalhamento de fabricação")
         t7 = time.perf_counter()

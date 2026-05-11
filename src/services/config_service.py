@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
+from src.core.numeric import safe_float
+
 
 class ConfigService:
     """Responsabilidade única: ler, salvar e normalizar configurações."""
@@ -623,6 +625,31 @@ class ConfigService:
         analysis.setdefault("acceptance_min_design_breaking_load_kgf", 80.0)
         analysis.setdefault("use_target_min_fs_as_hard_acceptance", False)
 
+        # Ponte espacial com X-bracing/top-bottom bracing não deve usar K=1.0
+        # para todos os membros comprimidos. Estes valores continuam moderados
+        # e só reduzem K quando o usuário não especificou valor menor.
+        analysis.setdefault("auto_braced_effective_lengths", True)
+        analysis.setdefault(
+            "braced_effective_length_defaults",
+            {
+                "top_chord": {"Ky": 0.75, "Kz": 0.75},
+                "vertical": {"Ky": 0.85, "Kz": 0.85},
+                "diagonal": {"Ky": 0.90, "Kz": 0.90},
+                "bottom_chord": {"Ky": 0.90, "Kz": 0.90},
+            },
+        )
+
+        if bool(analysis.get("auto_braced_effective_lengths", True)):
+            k_by_group = cfg.setdefault("effective_length_factor_by_group", {})
+            for group, kv in (analysis.get("braced_effective_length_defaults") or {}).items():
+                entry = k_by_group.setdefault(str(group), {})
+                for axis in ("Ky", "Kz"):
+                    target = safe_float((kv or {}).get(axis), None)
+                    if target is None:
+                        continue
+                    current = safe_float(entry.get(axis), None)
+                    entry[axis] = float(target if current is None else min(float(current), float(target)))
+
         analysis.setdefault("enable_tension_only_solver_globally", False)
         analysis.setdefault("enable_tension_only_solver_in_funnel", False)
         analysis.setdefault("tension_only_groups", [])
@@ -885,9 +912,13 @@ class ConfigService:
         member_sizing_cfg.setdefault("use_mass_donor_pass", True)
         member_sizing_cfg.setdefault("reinforce_by_gain_per_gram", True)
 
-        # O resultado atual ficou com ~914 g, ou seja, massa sobrando.
-        # Reserve muito alto faz o S5 parar cedo demais.
-        member_sizing_cfg.setdefault("mass_reserve_for_fabrication_g", 10.0)
+        # Alvo competitivo: não usar os 1000 g como meta real.
+        # A fabricação/densidade real dos palitos varia; manter folga melhora robustez.
+        member_sizing_cfg.setdefault("competitive_mass_target_ratio", 0.98)
+
+        # Reserva maior força o S5 a escolher reforços de maior eficiência,
+        # em vez de encostar no limite e depender de resgate posterior.
+        member_sizing_cfg.setdefault("mass_reserve_for_fabrication_g", 20.0)
 
         # 12 reforços/rodada foi pouco: o trace mostra que novos gargalos
         # aparecem depois da 2ª rodada.
@@ -906,6 +937,16 @@ class ConfigService:
         # Permite aceitar algumas rodadas quase planas antes da meta.
         member_sizing_cfg.setdefault("allow_flat_pre_target_rounds", 2)
         member_sizing_cfg.setdefault("critical_budget_first_fs", 1.05)
+        member_sizing_cfg.setdefault("enable_post_topology_reinvestment", True)
+        # Reinvestimento só pode usar massa realmente disponível abaixo do alvo competitivo.
+        # Antes estava em 1.015 e reengordava a ponte para ~999 g.
+        member_sizing_cfg.setdefault("reinvest_target_proxy_mass_ratio", 0.975)
+        member_sizing_cfg.setdefault("reinvest_final_mass_reserve_g", 16.0)
+        member_sizing_cfg.setdefault("reinvest_max_members", 12)
+        member_sizing_cfg.setdefault("reinvest_max_sticks_per_member", 1)
+        member_sizing_cfg.setdefault("reinvest_fs_threshold", 1.05)
+        member_sizing_cfg.setdefault("reinvest_strength_cases_only", True)
+        member_sizing_cfg.setdefault("reinvest_min_abs_force_N", 25.0)
         member_sizing_cfg.setdefault(
             "sizing_load_cases",
             [
@@ -929,9 +970,10 @@ class ConfigService:
         topology_cleanup.setdefault("patience", 2)
         topology_cleanup.setdefault("max_remove_candidates_per_iteration", 4)
         topology_cleanup.setdefault("skip_if_break_below_ratio", 0.65)
-        topology_cleanup.setdefault("mass_rescue_target_ratio", 0.985)
-        topology_cleanup.setdefault("mass_rescue_min_break_retention", 0.97)
-        topology_cleanup.setdefault("mass_rescue_min_fs_retention", 0.97)
+        # Mira massa abaixo de 980 g, não apenas abaixo do limite eliminatório.
+        topology_cleanup.setdefault("mass_rescue_target_ratio", 0.965)
+        topology_cleanup.setdefault("mass_rescue_min_break_retention", 0.985)
+        topology_cleanup.setdefault("mass_rescue_min_fs_retention", 0.985)
         topology_cleanup.setdefault(
             "preserve_member_groups",
             [
