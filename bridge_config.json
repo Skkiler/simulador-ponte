@@ -19,11 +19,7 @@
     "tension_only_bracing_solver_enabled": false,
     "tension_only_bracing_interpretation": false,
     "load_distribution_x_mm": [
-      400,
-      500,
-      600,
-      700,
-      800
+      600.0
     ],
     "support_contact_x_left_mm": [
       -100,
@@ -46,7 +42,11 @@
     "top_profile": "parker_plateau",
     "internal_truss_type": "X",
     "top_chord_truss_type": "X",
-    "bottom_chord_truss_type": "X"
+    "bottom_chord_truss_type": "X",
+    "load_distribution_model": "plate_surface_uniform",
+    "load_footprint_length_mm": 400.0,
+    "load_footprint_width_mm": 160.0,
+    "load_footprint_y_center_mm": 0.0
   },
   "material": {
     "name": "Palito de picolé equivalente",
@@ -136,7 +136,7 @@
   },
   "planner": {
     "target_load_kgf": 80.0,
-    "target_breaking_load_kgf": 80.0,
+    "target_breaking_load_kgf": 120.0,
     "stretch_breaking_load_kgf": 120.0,
     "max_bridge_mass_g": 1000.0,
     "target_bridge_mass_g": 950.0,
@@ -165,7 +165,8 @@
         "bottom_transverse": 1,
         "support_pad": 2
       }
-    }
+    },
+    "use_stretch_breaking_load_as_acceptance": true
   },
   "analysis": {
     "frame3dd_path": "auto",
@@ -178,8 +179,8 @@
     "acceptance_min_primary_fs": 1.05,
     "acceptance_min_support_fs": 1.0,
     "acceptance_min_glue_fs": 1.5,
-    "acceptance_min_design_breaking_load_kgf": 80.0,
-    "use_target_min_fs_as_hard_acceptance": false,
+    "acceptance_min_design_breaking_load_kgf": 120.0,
+    "use_target_min_fs_as_hard_acceptance": true,
     "planner_objective_profile": "max_strength_per_competition_mass",
     "tension_only_groups": [],
     "enable_tension_only_solver_globally": false,
@@ -198,7 +199,10 @@
       "bottom_bracing",
       "cross_frame_bracing"
     ],
-    "optimize_variants": true
+    "optimize_variants": true,
+    "snap_panel_to_even_span_divisor": true,
+    "frame3dd_stabilize_rigid_body_modes": true,
+    "frame3dd_fix_support_rotations": false
   },
   "detail_model": {
     "enabled": true,
@@ -230,7 +234,8 @@
       "eta_A": 1.0
     },
     "generate_member_templates": true,
-    "generate_piece_views": true
+    "generate_piece_views": true,
+    "auto_splice_overlap_enabled": true
   },
   "section_layout_by_group": {
     "bottom_chord": {
@@ -284,5 +289,62 @@
       "spacing_y_mm": 0,
       "spacing_z_mm": 0
     }
+  },
+  "multi_loadcase_screening": {
+    "include_longitudinal_offsets_as_strength_cases": false
+  },
+  "member_sizing": {
+    "support_pad_push_max_proxy_mass_ratio": 1.0,
+    "support_pad_push_proxy_mass_margin_g": 0.0,
+    "ultimate_strength_target_kgf": 120.0,
+    "enable_plane_bracing_efficiency_mutation": true,
+    "plane_bracing_efficiency_min_break_retention": 0.995,
+    "plane_bracing_efficiency_min_fs_retention": 0.94,
+    "plane_bracing_efficiency_min_mass_saving_g": 8.0,
+    "plane_bracing_efficiency_trials": [
+      {
+        "top": "X",
+        "bottom": "Warren_symmetric",
+        "cross_frame": true
+      },
+      {
+        "top": "Warren_symmetric",
+        "bottom": "X",
+        "cross_frame": true
+      },
+      {
+        "top": "Pratt_symmetric",
+        "bottom": "X",
+        "cross_frame": true
+      },
+      {
+        "top": "Warren_symmetric",
+        "bottom": "Warren_symmetric",
+        "cross_frame": true
+      },
+      {
+        "top": "X",
+        "bottom": "Pratt_symmetric",
+        "cross_frame": true
+      }
+    ],
+    "enable_final_strength_reserve_push": true,
+    "final_strength_push_fs_threshold": 1.5,
+    "final_strength_push_max_orbits": 12,
+    "final_strength_push_max_trials": 40,
+    "final_strength_push_max_increment_per_orbit": 1,
+    "final_strength_push_max_proxy_mass_ratio": 1.0,
+    "final_strength_push_min_abs_force_N": 30.0,
+    "final_strength_push_min_break_gain": 1.0,
+    "final_strength_push_min_fs_gain": 1.0,
+    "enable_support_pad_capacity_push": true,
+    "support_pad_push_target_kgf": 120.0,
+    "support_pad_push_max_group_sticks": 6,
+    "enable_final_strength_push_after_support": true,
+    "enable_final_mass_symmetry_trim": true,
+    "final_mass_trim_only_after_strength_target": true,
+    "final_mass_trim_strength_target_ratio": 0.995,
+    "final_strength_push_min_actual_break_gain_kgf": 0.0,
+    "plane_bracing_efficiency_allow_strength_loss_below_target": false
   }
 }

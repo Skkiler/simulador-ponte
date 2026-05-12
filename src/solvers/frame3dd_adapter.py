@@ -11,13 +11,115 @@ class Frame3DDAdapter:
         if configured_path and configured_path not in {"", "auto"}:
             p = Path(configured_path)
             if p.exists(): return p
-        for p in [Path("Frame3DD/windows/frame3dd.exe"), Path("Frame3DD/linux/frame3dd"), Path("Frame3DD/osx/frame3dd"), Path("frame3dd.exe"), Path("frame3dd")]:
-            if p.exists(): return p
-        found = shutil.which("frame3dd") or shutil.which("frame3dd.exe")
+        # Prefer the native binary for the current OS.  The previous order picked
+        # the Windows executable first; on Linux this can fail with Exec format
+        # error or rely on Wine/binfmt side effects.
+        import os
+        import platform
+
+        system = platform.system().lower()
+        if system.startswith("win"):
+            candidates = [
+                Path("Frame3DD/windows/frame3dd.exe"),
+                Path("frame3dd.exe"),
+                Path("Frame3DD/linux/frame3dd"),
+                Path("Frame3DD/osx/frame3dd"),
+                Path("frame3dd"),
+            ]
+        elif system == "darwin":
+            candidates = [
+                Path("Frame3DD/osx/frame3dd"),
+                Path("frame3dd"),
+                Path("Frame3DD/linux/frame3dd"),
+                Path("Frame3DD/windows/frame3dd.exe"),
+            ]
+        else:
+            candidates = [
+                Path("Frame3DD/linux/frame3dd"),
+                Path("frame3dd"),
+                Path("Frame3DD/osx/frame3dd"),
+                Path("Frame3DD/windows/frame3dd.exe"),
+            ]
+
+        for p in candidates:
+            if not p.exists():
+                continue
+            if str(p).endswith(".exe") and not system.startswith("win"):
+                continue
+            if not system.startswith("win") and not os.access(p, os.X_OK):
+                try:
+                    p.chmod(p.stat().st_mode | 0o111)
+                except OSError:
+                    continue
+            return p
+        found = shutil.which("frame3dd") or (shutil.which("frame3dd.exe") if system.startswith("win") else None)
         return Path(found) if found else None
     def _density(self,cfg:Dict)->float:
         gmm3=float(cfg.get('material',{}).get('density_g_per_mm3',1e-6))
         return max(gmm3*1e-6,1e-18)  # tonne/mm3
+
+    def _stabilized_reactions(self, cfg: Dict, nodes: List[Node], active: List[Support]) -> List[tuple[int, int, int, int, int, int, int]]:
+        """Return a numerically stable support set for Frame3DD.
+
+        The truss solver keeps the competition boundary condition: vertical
+        reactions on the table-contact nodes, with unilateral uplift handling.
+        Frame3DD, however, also needs the six global rigid-body modes removed.
+        The previous exporter restrained only UZ and fixed rotations at every
+        contact node, leaving UX/UY rigid translations free; Frame3DD therefore
+        aborted with a non positive-definite stiffness matrix.
+
+        This method preserves the vertical support pattern but adds the minimum
+        in-plane restraints normally used for a 3D simply-supported validation
+        model: one pinned node (UX, UY, UZ) and one laterally guided roller
+        (UY, UZ) on the opposite support line.  Other contact nodes keep UZ
+        only.  Rotational restraints are free by default because the bridge is
+        supported on tables, not clamped.
+        """
+        if not active:
+            return []
+
+        analysis = cfg.get("analysis", {}) or {}
+        stabilize = bool(analysis.get("frame3dd_stabilize_rigid_body_modes", True))
+        fix_rot = int(bool(analysis.get("frame3dd_fix_support_rotations", False)))
+        node_by_id = {int(n.id): n for n in nodes}
+
+        if not stabilize:
+            rows = []
+            for s in active:
+                rows.append((int(s.node_id), int(s.UX), int(s.UY), int(s.UZ), int(s.RX), int(s.RY), int(s.RZ)))
+            return rows
+
+        active_sorted = sorted(
+            active,
+            key=lambda sp: (
+                float(getattr(node_by_id.get(int(sp.node_id)), "x", 0.0)),
+                float(getattr(node_by_id.get(int(sp.node_id)), "y", 0.0)),
+                int(sp.node_id),
+            ),
+        )
+        pin = active_sorted[0]
+        pin_node = node_by_id.get(int(pin.node_id))
+        pin_x = float(getattr(pin_node, "x", 0.0))
+        pin_y = float(getattr(pin_node, "y", 0.0))
+
+        # Pick a second node as far as possible from the pin in plan view.
+        guide = max(
+            active_sorted,
+            key=lambda sp: (
+                (float(getattr(node_by_id.get(int(sp.node_id)), "x", 0.0)) - pin_x) ** 2
+                + (float(getattr(node_by_id.get(int(sp.node_id)), "y", 0.0)) - pin_y) ** 2,
+                int(sp.node_id),
+            ),
+        )
+
+        rows = []
+        for s in active_sorted:
+            nid = int(s.node_id)
+            ux = 1 if nid == int(pin.node_id) else 0
+            uy = 1 if nid in {int(pin.node_id), int(guide.node_id)} else 0
+            uz = 1
+            rows.append((nid, ux, uy, uz, fix_rot, fix_rot, fix_rot))
+        return rows
     def write_input(self,cfg:Dict,nodes:List[Node],members:List[Member],supports:List[Support],loads:List[Load],out_path:str|Path)->Path:
         out=Path(out_path); out.parent.mkdir(parents=True,exist_ok=True); lines=[]
         lines.append("Ponte de palitos - Frame3DD linear estabilizado (N mm tonne)")
@@ -26,10 +128,11 @@ class Frame3DDAdapter:
         lines.append("# node x y z rj")
         for n in nodes: lines.append(f"{n.id:5d} {n.x:12.6f} {n.y:12.6f} {n.z:12.6f} {0.0:12.6f}")
         active=[s for s in supports if s.active_vertical]
-        lines.append(f"{len(active)} # number of nodes with reactions")
+        frame_reactions = self._stabilized_reactions(cfg, nodes, active)
+        lines.append(f"{len(frame_reactions)} # number of nodes with reactions")
         lines.append("# node x y z xx yy zz")
-        for s in active:
-            lines.append(f"{s.node_id:5d} {int(s.UX):d} {int(s.UY):d} {int(s.UZ):d} 1 1 1")
+        for node_id, ux, uy, uz, rx, ry, rz in frame_reactions:
+            lines.append(f"{node_id:5d} {ux:d} {uy:d} {uz:d} {rx:d} {ry:d} {rz:d}")
         dens=self._density(cfg)
         # Frame3DD exige que os números dos elementos fiquem dentro do intervalo
         # 1..nE. Os IDs internos do modelo podem ter lacunas depois de remoções

@@ -2364,6 +2364,11 @@ class ActiveDesignPlanner:
                     action = "lighten" if target < n_current else "keep"
                     reason = "local_check_only_near_zero_lighten"
                     joint_after = simplify_joint_for(signed_force)
+                elif band == "low" and fs_min >= donor_fs_threshold and n_current > structural_floor:
+                    target = max(structural_floor, n_current - 1)
+                    action = "lighten" if target < n_current else "keep"
+                    reason = "local_check_only_low_force_lighten"
+                    joint_after = simplify_joint_for(signed_force)
                 else:
                     target = n_current
                     action = "keep"

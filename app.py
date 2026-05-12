@@ -925,13 +925,10 @@ with aba_simulacao:
         d1, d2, d3 = st.columns(3)
 
         with d1:
-            overlap_length_mm = _number_input_length(
-                "Sobreposição de emenda",
-                length_unit,
-                float(detail_cfg.get("overlap_length_mm", 30.0)),
-                5.0,
-                max(200.0, float(stick_length_mm) * 0.9),
-                1.0,
+            overlap_length_mm = float(detail_cfg.get("overlap_length_mm", 30.0))
+            st.caption(
+                "Sobreposição de emenda: calculada automaticamente pelo planejador a partir "
+                "do comprimento do palito, resistência da cola e força por membro."
             )
             glue_shear_strength_MPa = st.number_input(
                 "Resistência da cola ao cisalhamento [MPa]",

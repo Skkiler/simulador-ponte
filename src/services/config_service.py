@@ -124,6 +124,42 @@ class ConfigService:
                     f"maior que planner.{max_key} ({mx})."
                 )
 
+    @staticmethod
+    def _nearest_even_panel_divisor(span_mm: float, panel_mm: float, panel_min_mm: float, panel_max_mm: float) -> float:
+        span = max(1.0, float(span_mm))
+        current = max(1.0, float(panel_mm))
+        lo = max(1.0, min(float(panel_min_mm), float(panel_max_mm)))
+        hi = max(lo, max(float(panel_min_mm), float(panel_max_mm)))
+        candidates = []
+        for n_panels in range(6, 31):
+            if n_panels % 2:
+                continue
+            p = span / float(n_panels)
+            if lo - 1.0e-9 <= p <= hi + 1.0e-9:
+                candidates.append(p)
+        if not candidates:
+            return current
+        return min(candidates, key=lambda p: (abs(p - current), p))
+
+    @staticmethod
+    def _auto_splice_overlap_mm(cfg: Dict[str, Any]) -> float:
+        mat = cfg.get("material", {}) or {}
+        detail = cfg.get("detail_model", {}) or {}
+        stick_len = max(30.0, float(mat.get("stick_length_mm", 115.0)))
+        stick_w = max(1.0, float(mat.get("stick_width_mm", 7.0)))
+        glue_tau = max(0.2, float(detail.get("glue_shear_strength_MPa", 3.5)))
+        target_fs = max(1.0, float((cfg.get("analysis", {}) or {}).get("target_min_fs", 1.5)))
+
+        # Constructive floor: enough area for alignment/clamping, but not a
+        # user-tuned hidden mass penalty.  Stronger glue can use slightly
+        # shorter laps; weak glue is forced upward.
+        constructive = 0.18 * stick_len
+        glue_factor = (3.5 / glue_tau) ** 0.35
+        fs_factor = (target_fs / 1.5) ** 0.25
+        width_factor = (7.0 / stick_w) ** 0.20
+        overlap = constructive * glue_factor * fs_factor * width_factor
+        return max(14.0, min(0.35 * stick_len, overlap))
+
     def normalize(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         cfg = copy.deepcopy(cfg)
 
@@ -264,6 +300,18 @@ class ConfigService:
         bridge.setdefault("span_mm", 1200.0)
         bridge.setdefault("panel_mm", 100.0)
         bridge.setdefault("width_mm", 160.0)
+
+        if bool(analysis.get("enforce_symmetry", True)) and bool(analysis.get("snap_panel_to_even_span_divisor", True)):
+            span_val = float(bridge.get("span_mm", 1200.0))
+            old_panel = float(bridge.get("panel_mm", 100.0))
+            pmin = float(planner.get("panel_min_mm", max(40.0, old_panel * 0.55)))
+            pmax = float(planner.get("panel_max_mm", min(280.0, old_panel * 2.50)))
+            snapped = self._nearest_even_panel_divisor(span_val, old_panel, pmin, pmax)
+            if abs(snapped - old_panel) > 1.0e-6:
+                bridge["panel_mm"] = snapped
+                add_compat_warning(
+                    f"panel_mm ajustado de {old_panel:.3f} para {snapped:.3f} mm para manter número par de painéis e simetria longitudinal."
+                )
         bridge.setdefault("left_support_overhang_mm", 100.0)
         bridge.setdefault("right_support_overhang_mm", 100.0)
         bridge.setdefault("end_height_mm", 100.0)
@@ -283,6 +331,11 @@ class ConfigService:
 
         if bridge["load_application_level"] not in {"top", "bottom"}:
             bridge["load_application_level"] = "top"
+
+        bridge.setdefault("load_distribution_model", "point_stations")
+        bridge.setdefault("load_footprint_length_mm", 0.0)
+        bridge.setdefault("load_footprint_width_mm", float(bridge["width_mm"]))
+        bridge.setdefault("load_footprint_y_center_mm", 0.0)
 
         bridge["load_distribution_x_mm"] = self._normalize_load_distribution_x_mm(bridge)
 
@@ -399,7 +452,10 @@ class ConfigService:
         detail = cfg.setdefault("detail_model", {})
         detail.setdefault("enabled", True)
         detail.setdefault("splice_mode", "overlap")
+        detail.setdefault("auto_splice_overlap_enabled", True)
         detail.setdefault("overlap_length_mm", 30.0)
+        if bool(detail.get("auto_splice_overlap_enabled", True)):
+            detail["overlap_length_mm"] = self._auto_splice_overlap_mm(cfg)
         detail.setdefault("min_end_margin_mm", 10.0)
         detail.setdefault("reinforcement_length_mm", 55.0)
         detail.setdefault("reinforcement_sticks_per_splice", 2)
@@ -1029,6 +1085,24 @@ class ConfigService:
         member_sizing_cfg.setdefault("section_efficiency_min_fs_gain", 1.001)
         member_sizing_cfg.setdefault("section_efficiency_require_bracing_for_K", True)
 
+        # Mutação de eficiência dos planos superior/inferior: busca retirar massa
+        # de treliçamento não governante preservando os casos críticos.
+        member_sizing_cfg.setdefault("enable_plane_bracing_efficiency_mutation", True)
+        member_sizing_cfg.setdefault("plane_bracing_efficiency_min_break_retention", 0.995)
+        member_sizing_cfg.setdefault("plane_bracing_efficiency_min_fs_retention", 0.940)
+        member_sizing_cfg.setdefault("plane_bracing_efficiency_min_mass_saving_g", 8.0)
+        member_sizing_cfg.setdefault("plane_bracing_efficiency_allow_strength_loss_below_target", False)
+        member_sizing_cfg.setdefault(
+            "plane_bracing_efficiency_trials",
+            [
+                {"top": "X", "bottom": "Warren_symmetric", "cross_frame": True},
+                {"top": "Warren_symmetric", "bottom": "X", "cross_frame": True},
+                {"top": "Pratt_symmetric", "bottom": "X", "cross_frame": True},
+                {"top": "Warren_symmetric", "bottom": "Warren_symmetric", "cross_frame": True},
+                {"top": "X", "bottom": "Pratt_symmetric", "cross_frame": True},
+            ],
+        )
+
         # Empurrão final de resistência: usa pequena margem de massa restante
         # para reforçar órbitas primárias críticas, sem quebrar simetria.
         # Este passo é deliberadamente pós-eficiência de seção: primeiro tenta
@@ -1038,26 +1112,30 @@ class ConfigService:
         # O alvo mínimo é 80 kgf, mas o otimizador deve tentar reserva real de
         # competição. Para mirar 100 kgf, o gargalo primário precisa chegar
         # perto de FS 1,25 sob carga de 80 kgf.
-        member_sizing_cfg.setdefault("ultimate_strength_target_kgf", 100.0)
-        member_sizing_cfg.setdefault("final_strength_push_fs_threshold", 1.25)
-        member_sizing_cfg.setdefault("final_strength_push_max_orbits", 5)
-        member_sizing_cfg.setdefault("final_strength_push_max_trials", 16)
+        member_sizing_cfg.setdefault("ultimate_strength_target_kgf", 120.0)
+        member_sizing_cfg.setdefault("final_strength_push_fs_threshold", 1.50)
+        member_sizing_cfg.setdefault("final_strength_push_max_orbits", 8)
+        member_sizing_cfg.setdefault("final_strength_push_max_trials", 28)
         member_sizing_cfg.setdefault("final_strength_push_max_increment_per_orbit", 1)
-        member_sizing_cfg.setdefault("final_strength_push_max_proxy_mass_ratio", 0.990)
-        member_sizing_cfg.setdefault("final_strength_push_min_abs_force_N", 40.0)
-        member_sizing_cfg.setdefault("final_strength_push_min_break_gain", 1.001)
-        member_sizing_cfg.setdefault("final_strength_push_min_fs_gain", 1.001)
+        member_sizing_cfg.setdefault("final_strength_push_max_proxy_mass_ratio", 1.000)
+        member_sizing_cfg.setdefault("final_strength_push_min_abs_force_N", 30.0)
+        member_sizing_cfg.setdefault("final_strength_push_min_break_gain", 1.000)
+        member_sizing_cfg.setdefault("final_strength_push_min_actual_break_gain_kgf", 0.0)
+        member_sizing_cfg.setdefault("final_strength_push_min_fs_gain", 1.000)
         member_sizing_cfg.setdefault("final_strength_push_allow_if_below_target", True)
         member_sizing_cfg.setdefault("enable_support_pad_capacity_push", True)
-        member_sizing_cfg.setdefault("support_pad_push_target_kgf", 100.0)
+        member_sizing_cfg.setdefault("support_pad_push_target_kgf", 120.0)
         member_sizing_cfg.setdefault("support_pad_push_max_group_sticks", 6)
-        member_sizing_cfg.setdefault("support_pad_push_max_proxy_mass_ratio", 0.988)
+        member_sizing_cfg.setdefault("support_pad_push_max_proxy_mass_ratio", 1.000)
         member_sizing_cfg.setdefault("support_pad_push_min_break_retention", 0.995)
         member_sizing_cfg.setdefault("support_pad_push_min_fs_retention", 0.995)
-        member_sizing_cfg.setdefault("support_pad_push_proxy_mass_margin_g", 12.0)
+        member_sizing_cfg.setdefault("support_pad_push_proxy_mass_margin_g", 0.0)
         # Passo final: quando o reforço estrutural passou um pouco da massa,
         # reduzir apenas órbitas simétricas com FS folgado para voltar ao limite.
+        member_sizing_cfg.setdefault("enable_final_strength_push_after_support", True)
         member_sizing_cfg.setdefault("enable_final_mass_symmetry_trim", True)
+        member_sizing_cfg.setdefault("final_mass_trim_only_after_strength_target", True)
+        member_sizing_cfg.setdefault("final_mass_trim_strength_target_ratio", 0.995)
         member_sizing_cfg.setdefault("final_mass_trim_target_proxy_mass_ratio", 0.990)
         member_sizing_cfg.setdefault("final_mass_trim_fs_threshold", 1.22)
         member_sizing_cfg.setdefault("final_mass_trim_min_break_retention", 0.985)
@@ -1153,7 +1231,27 @@ class ConfigService:
         planner.setdefault("panel_max_mm", min(280.0, max(200.0, panel * 2.50)))
         planner.setdefault("target_load_kgf", load_kgf)
         planner.setdefault("target_breaking_load_kgf", max(80.0, load_kgf))
-        planner.setdefault("stretch_breaking_load_kgf", 120.0)
+        planner.setdefault(
+            "stretch_breaking_load_kgf",
+            max(
+                120.0,
+                float(planner.get("target_load_kgf", load_kgf))
+                * float(analysis.get("target_min_fs", 1.5)),
+            ),
+        )
+        planner.setdefault("use_stretch_breaking_load_as_acceptance", False)
+        if bool(planner.get("use_stretch_breaking_load_as_acceptance")):
+            stretch_target = float(planner.get("stretch_breaking_load_kgf", 120.0))
+            planner["target_breaking_load_kgf"] = max(
+                float(planner.get("target_breaking_load_kgf", 0.0)),
+                stretch_target,
+            )
+            analysis["acceptance_min_design_breaking_load_kgf"] = max(
+                float(analysis.get("acceptance_min_design_breaking_load_kgf", 0.0)),
+                stretch_target,
+            )
+            analysis["use_target_min_fs_as_hard_acceptance"] = True
+
         planner.setdefault("max_bridge_mass_g", mass_limit)
         planner.setdefault(
             "target_bridge_mass_g",
@@ -1442,6 +1540,7 @@ class ConfigService:
 
         if overlap_length_mm is not None:
             cfg.setdefault("detail_model", {})["overlap_length_mm"] = overlap_length_mm
+            cfg.setdefault("detail_model", {})["auto_splice_overlap_enabled"] = False
 
         if mass_limit_g is not None:
             cfg.setdefault("material", {})["mass_limit_g"] = mass_limit_g
@@ -1501,6 +1600,9 @@ class ConfigService:
                 "plateau_start_mm": span_mid / 3.0,
                 "plateau_end_mm": 2.0 * span_mid / 3.0,
                 "load_distribution_x_mm": [],
+                "load_distribution_model": "plate_surface_uniform",
+                "load_footprint_length_mm": max(0.0, min(span_mid, 0.30 * span_mid)),
+                "load_footprint_width_mm": width_mid,
                 "support_contact_y_mm": [-width_mid / 2.0, width_mid / 2.0],
                 "support_contact_x_left_mm": [-100.0, 0.0],
                 "support_contact_x_right_mm": [span_mid, span_mid + 100.0],
@@ -1532,9 +1634,10 @@ class ConfigService:
         cfg.setdefault("detail_model", {}).update(
             {
                 "glue_shear_strength_MPa": float(glue_shear_strength_MPa),
-                "overlap_length_mm": float(overlap_length_mm),
             }
         )
+        if overlap_length_mm is not None and not bool(cfg.get("detail_model", {}).get("auto_splice_overlap_enabled", True)):
+            cfg.setdefault("detail_model", {})["overlap_length_mm"] = float(overlap_length_mm)
 
         cfg.setdefault("analysis", {}).update(
             {
@@ -1544,6 +1647,8 @@ class ConfigService:
                 "planner_objective_profile": str(objective_profile),
                 "planner_adaptive_refinement": bool(adaptive_refinement),
                 "planner_stage4_iterations": int(adaptive_iterations),
+                "acceptance_min_design_breaking_load_kgf": float(target_load_kgf) * float(target_min_fs),
+                "use_target_min_fs_as_hard_acceptance": True,
             }
         )
 
@@ -1564,7 +1669,9 @@ class ConfigService:
                 "panel_min_mm": float(panel_min_mm),
                 "panel_max_mm": float(panel_max_mm),
                 "target_load_kgf": float(target_load_kgf),
-                "target_breaking_load_kgf": float(target_load_kgf),
+                "target_breaking_load_kgf": float(target_load_kgf) * float(target_min_fs),
+                "stretch_breaking_load_kgf": float(target_load_kgf) * float(target_min_fs),
+                "use_stretch_breaking_load_as_acceptance": True,
                 "max_bridge_mass_g": float(max_bridge_mass_g),
                 "target_bridge_mass_g": float(target_mass),
             }

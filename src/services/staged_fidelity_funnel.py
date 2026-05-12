@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, Iterable, List, Tuple
 
 from src.core.numeric import safe_float
 from src.domain.models import Load
+from src.services.load_distribution_service import LoadDistributionService
 from src.services.geometry_service import GeometryService
 from src.services.mass_guard import assert_mass_compliant, effective_mass_limit_g
 from src.services.rupture_estimator import estimate_rupture_load
@@ -326,233 +327,65 @@ class StagedFidelityFunnelPlanner:
         span = float(bridge.get("span_mm", 1200.0))
         total_N = abs(float(bridge.get("load_total_N", 0.0)))
 
-        level = str(bridge.get("load_application_level", "top")).strip().lower()
-        if level not in {"top", "bottom"}:
-            level = "top"
-
-        load_nodes = [
-            n
-            for n in nodes
-            if getattr(n, "level", "") == level
-            and -1.0e-6 <= float(n.x) <= span + 1.0e-6
-        ]
-
-        if not load_nodes:
-            load_nodes = [n for n in nodes if getattr(n, "level", "") == level]
-
-        if not load_nodes:
-            return []
-
-        xs = sorted({round(float(n.x), 6) for n in load_nodes})
-
-        if not xs:
-            return []
-
-        nodes_by_x: Dict[float, List[Any]] = {}
-
-        for n in load_nodes:
-            x_key = round(float(n.x), 6)
-            nodes_by_x.setdefault(x_key, []).append(n)
-
-        def configured_targets() -> List[float]:
-            raw = bridge.get("load_distribution_x_mm") or []
-            out: List[float] = []
-
-            for value in raw:
-                try:
-                    out.append(max(0.0, min(span, float(value))))
-                except (TypeError, ValueError):
-                    continue
-
-            if not out:
-                out = [0.5 * span]
-
-            return sorted(set(round(v, 6) for v in out))
-
-        def station_weights_for_x(x_target: float) -> Dict[float, float]:
-            x = max(0.0, min(span, float(x_target)))
-
-            if x <= xs[0]:
-                return {xs[0]: 1.0}
-
-            if x >= xs[-1]:
-                return {xs[-1]: 1.0}
-
-            for i in range(len(xs) - 1):
-                x0 = xs[i]
-                x1 = xs[i + 1]
-
-                if x0 - 1.0e-9 <= x <= x1 + 1.0e-9:
-                    if abs(x1 - x0) <= 1.0e-9:
-                        return {x0: 1.0}
-
-                    w1 = (x - x0) / (x1 - x0)
-                    w0 = 1.0 - w1
-
-                    out: Dict[float, float] = {}
-
-                    if w0 > 1.0e-12:
-                        out[x0] = float(w0)
-
-                    if w1 > 1.0e-12:
-                        out[x1] = float(w1)
-
-                    return out or {x0: 1.0}
-
-            return {min(xs, key=lambda xv: abs(float(xv) - x)): 1.0}
-
-        def add_station_weight_to_nodes(
-            weights: Dict[int, float],
-            x_station: float,
-            station_weight: float,
-            *,
-            side: str | None = None,
-        ) -> None:
-            station_nodes = list(nodes_by_x.get(round(float(x_station), 6), []))
-
-            if side == "left":
-                station_nodes = [n for n in station_nodes if float(n.y) < 0.0]
-            elif side == "right":
-                station_nodes = [n for n in station_nodes if float(n.y) >= 0.0]
-
-            if not station_nodes:
-                station_nodes = list(nodes_by_x.get(round(float(x_station), 6), []))
-
-            if not station_nodes:
-                return
-
-            share = float(station_weight) / max(1, len(station_nodes))
-
-            for n in station_nodes:
-                nid = int(n.id)
-                weights[nid] = weights.get(nid, 0.0) + share
-
-        def normalize_weights(weights: Dict[int, float]) -> Dict[int, float]:
-            total = sum(max(0.0, float(v)) for v in weights.values())
-
-            if total <= 1.0e-12:
-                return {}
-
-            return {
-                int(k): float(v) / total
-                for k, v in weights.items()
-                if float(v) > 1.0e-12
-            }
-
-        def collect_node_weights(
-            x_targets: Iterable[float],
-            *,
-            side: str | None = None,
-        ) -> Dict[int, float]:
-            targets = list(x_targets)
-
-            if not targets:
-                targets = [0.5 * span]
-
-            weights: Dict[int, float] = {}
-
-            for x_target in targets:
-                station_weights = station_weights_for_x(float(x_target))
-
-                for x_station, station_weight in station_weights.items():
-                    add_station_weight_to_nodes(
-                        weights,
-                        x_station,
-                        station_weight,
-                        side=side,
-                    )
-
-            return normalize_weights(weights)
-
-        def shifted_targets(delta: float) -> List[float]:
-            return [
-                max(0.0, min(span, x + delta))
-                for x in configured_targets()
-            ]
-
         offset_fraction = float(
             (cfg.get("multi_loadcase_screening", {}) or {}).get(
                 "offset_fraction_of_span",
                 0.05,
             )
         )
-
         offset_delta = offset_fraction * span
-
-        loads: List[Load] = []
         case = str(load_case_name)
+        loads: List[Load] = []
 
         if case == "center":
-            weights = collect_node_weights(configured_targets())
-
-            for nid, w in weights.items():
-                loads.append(Load(case, nid, 0.0, 0.0, -total_N * w))
-
-            return loads
+            return LoadDistributionService.build_nodal_loads(
+                cfg,
+                nodes,
+                loadcase=case,
+                total_N=total_N,
+            )
 
         if case == "left_offset":
-            weights = collect_node_weights(shifted_targets(-offset_delta))
-
-            for nid, w in weights.items():
-                loads.append(Load(case, nid, 0.0, 0.0, -total_N * w))
-
-            return loads
+            return LoadDistributionService.build_nodal_loads(
+                cfg,
+                nodes,
+                loadcase=case,
+                total_N=total_N,
+                x_targets=LoadDistributionService.shifted_targets(cfg, -offset_delta),
+            )
 
         if case == "right_offset":
-            weights = collect_node_weights(shifted_targets(offset_delta))
-
-            for nid, w in weights.items():
-                loads.append(Load(case, nid, 0.0, 0.0, -total_N * w))
-
-            return loads
+            return LoadDistributionService.build_nodal_loads(
+                cfg,
+                nodes,
+                loadcase=case,
+                total_N=total_N,
+                x_targets=LoadDistributionService.shifted_targets(cfg, offset_delta),
+            )
 
         if case == "torsion_60_40":
-            left_weights = collect_node_weights(configured_targets(), side="left")
-            right_weights = collect_node_weights(configured_targets(), side="right")
-
-            if not left_weights or not right_weights:
-                weights = collect_node_weights(configured_targets())
-
-                for nid, w in weights.items():
-                    loads.append(Load(case, nid, 0.0, 0.0, -total_N * w))
-
-                return loads
-
-            for nid, w in left_weights.items():
-                loads.append(Load(case, nid, 0.0, 0.0, -0.60 * total_N * w))
-
-            for nid, w in right_weights.items():
-                loads.append(Load(case, nid, 0.0, 0.0, -0.40 * total_N * w))
-
-            return loads
+            return LoadDistributionService.build_nodal_loads(
+                cfg,
+                nodes,
+                loadcase=case,
+                total_N=total_N,
+                side_bias={"left": 0.60, "right": 0.40},
+            )
 
         if case == "lateral_imperfection":
-            weights = collect_node_weights(configured_targets())
-
             lateral_factor = float(
                 (cfg.get("multi_loadcase_screening", {}) or {}).get(
                     "lateral_imperfection_factor",
                     0.02,
                 )
             )
-
-            node_by_id = {int(n.id): n for n in load_nodes}
-
-            for nid, w in weights.items():
-                n = node_by_id.get(int(nid))
-                sign = -1.0 if n is not None and float(n.y) < 0.0 else 1.0
-
-                loads.append(
-                    Load(
-                        case,
-                        nid,
-                        0.0,
-                        sign * lateral_factor * total_N * w,
-                        -total_N * w,
-                    )
-                )
-
-            return loads
+            return LoadDistributionService.build_nodal_loads(
+                cfg,
+                nodes,
+                loadcase=case,
+                total_N=total_N,
+                lateral_factor=lateral_factor,
+            )
 
         if case == "self_weight":
             gN = max(0.0, float(quick_mass_g) / 1000.0 * 9.80665)
@@ -573,12 +406,12 @@ class StagedFidelityFunnelPlanner:
 
             return loads
 
-        weights = collect_node_weights(configured_targets())
-
-        for nid, w in weights.items():
-            loads.append(Load(case, nid, 0.0, 0.0, -total_N * w))
-
-        return loads
+        return LoadDistributionService.build_nodal_loads(
+            cfg,
+            nodes,
+            loadcase=case,
+            total_N=total_N,
+        )
     
     def _evaluate_case_cached(
         self,
@@ -805,11 +638,14 @@ class StagedFidelityFunnelPlanner:
 
         ml_cfg = cfg.get("multi_loadcase_screening", {}) or {}
 
+        default_strength_cases = ["center", "torsion_60_40", "lateral_imperfection"]
+        if bool(ml_cfg.get("include_longitudinal_offsets_as_strength_cases", False)):
+            default_strength_cases += ["left_offset", "right_offset"]
         strength_governing_names = {
             str(v)
             for v in (
                 ml_cfg.get("strength_governing_cases")
-                or ["center", "torsion_60_40", "lateral_imperfection"]
+                or default_strength_cases
             )
         }
 
@@ -2657,6 +2493,234 @@ class StagedFidelityFunnelPlanner:
         return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
 
 
+
+
+    def _remap_member_stick_overrides_by_geometry(
+        self,
+        old_cfg: Dict[str, Any],
+        new_cfg: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Reaplica `member_sticks_by_id` quando uma mutação muda a numeração.
+
+        A numeração de membros depende da topologia. Se um plano X vira Warren,
+        IDs posteriores podem ser deslocados e overrides antigos passam a cair em
+        membros errados. O remapeamento usa grupo + coordenadas dos nós de ponta,
+        preservando seções de membros que ainda existem fisicamente e deixando os
+        membros novos herdarem o valor do grupo.
+        """
+        try:
+            old_nodes, old_members, _, _ = self.planner.geometry.generate(old_cfg)
+            new_nodes, new_members, _, _ = self.planner.geometry.generate(new_cfg)
+        except Exception:
+            return new_cfg
+
+        def node_map(nodes: List[Any]) -> Dict[int, Any]:
+            return {int(getattr(n, "id")): n for n in nodes}
+
+        old_node_by_id = node_map(old_nodes)
+        new_node_by_id = node_map(new_nodes)
+
+        def point_key(n: Any) -> Tuple[float, float, float]:
+            return (
+                round(float(getattr(n, "x", 0.0)), 3),
+                round(float(getattr(n, "y", 0.0)), 3),
+                round(float(getattr(n, "z", 0.0)), 3),
+            )
+
+        def member_key(m: Any, nodes_by_id: Dict[int, Any]) -> Tuple[str, Tuple[Tuple[float, float, float], Tuple[float, float, float]]] | None:
+            ni = nodes_by_id.get(int(getattr(m, "i")))
+            nj = nodes_by_id.get(int(getattr(m, "j")))
+            if ni is None or nj is None:
+                return None
+            pts = tuple(sorted([point_key(ni), point_key(nj)]))
+            return (str(getattr(m, "group", "")), pts)  # type: ignore[return-value]
+
+        old_n_by_key: Dict[Any, int] = {}
+        for m in old_members:
+            k = member_key(m, old_node_by_id)
+            if k is None:
+                continue
+            old_n_by_key[k] = max(1, int(getattr(m, "n_sticks", 1)))
+
+        remapped: Dict[str, int] = {}
+        for m in new_members:
+            k = member_key(m, new_node_by_id)
+            if k is None or k not in old_n_by_key:
+                continue
+            remapped[str(int(getattr(m, "id")))] = int(old_n_by_key[k])
+
+        out = copy.deepcopy(new_cfg)
+        if remapped:
+            out["member_sticks_by_id"] = remapped
+        else:
+            out.pop("member_sticks_by_id", None)
+        # IDs de ativação/desativação também são topologia-dependentes; após uma
+        # mutação de plano, evitar herdar flags por número antigo.
+        out.pop("member_active_by_id", None)
+        out.pop("disabled_member_ids", None)
+        return out
+
+
+    def _plane_bracing_efficiency_mutation(
+        self,
+        cfg: Dict[str, Any],
+        load_cases: List[str],
+        *,
+        stage_name: str,
+        tension_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Troca o padrão de treliçamento dos planos superior/inferior para economizar massa.
+
+        O output atual mostrou uma ponte governada por banzo superior, montantes e
+        sapatas, enquanto parte relevante da massa ficava em treliçamento de plano
+        inferior. Esta mutação testa alternativas simétricas de bracing e só aceita
+        a troca se a ruptura e o FS forem preservados dentro de uma margem pequena.
+        A massa liberada fica disponível para o empurrão final de resistência.
+        """
+        settings = cfg.get("member_sizing", {}) or {}
+        if not bool(settings.get("enable_plane_bracing_efficiency_mutation", True)):
+            summary = self._multi_case_summary(cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+            return {"best_cfg": cfg, "summary": summary, "trace_rows": []}
+
+        cur_cfg = self.planner.config.normalize(cfg)
+        cur_summary = self._multi_case_summary(cur_cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+        if not self._summary_valid_flag(cur_summary):
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+
+        cur_break = safe_float(cur_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        cur_fs = safe_float(cur_summary.get("min_fs_design_proxy"), 0.0) or 0.0
+        cur_mass = safe_float(cur_summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+        if cur_break <= 0.0 or cur_mass <= 0.0:
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+
+        min_break_ret = float(settings.get("plane_bracing_efficiency_min_break_retention", 0.995))
+        min_fs_ret = float(settings.get("plane_bracing_efficiency_min_fs_retention", 0.940))
+        min_mass_saving_g = float(settings.get("plane_bracing_efficiency_min_mass_saving_g", 8.0))
+        target_break = float(
+            (cur_cfg.get("analysis", {}) or {}).get(
+                "acceptance_min_design_breaking_load_kgf",
+                settings.get("ultimate_strength_target_kgf", 120.0),
+            )
+        )
+        # Abaixo da meta, economizar bracing só é aceitável se a segurança global
+        # não cair. Caso contrário o funil produz exatamente o que apareceu no
+        # output v32: mais leve, porém mais fraco.
+        allow_strength_loss_below_target = bool(
+            settings.get("plane_bracing_efficiency_allow_strength_loss_below_target", False)
+        )
+        below_strength_target = bool(cur_break < target_break)
+        trials_raw = settings.get("plane_bracing_efficiency_trials") or [
+            {"top": "X", "bottom": "Warren_symmetric", "cross_frame": True},
+            {"top": "Warren_symmetric", "bottom": "X", "cross_frame": True},
+            {"top": "Pratt_symmetric", "bottom": "X", "cross_frame": True},
+            {"top": "Warren_symmetric", "bottom": "Warren_symmetric", "cross_frame": True},
+            {"top": "X", "bottom": "Pratt_symmetric", "cross_frame": True},
+        ]
+
+        best_cfg = cur_cfg
+        best_summary = cur_summary
+        best_break = cur_break
+        best_fs = cur_fs
+        best_mass = cur_mass
+        best_score = 0.0
+        trace_rows: List[Dict[str, Any]] = []
+
+        base_bridge = cur_cfg.get("bridge", {}) or {}
+        seen: set[Tuple[str, str, bool]] = set()
+        for idx, trial_def in enumerate(trials_raw, 1):
+            top_mode = str(trial_def.get("top", base_bridge.get("top_chord_truss_type", "X")))
+            bottom_mode = str(trial_def.get("bottom", base_bridge.get("bottom_chord_truss_type", "X")))
+            cross_frame = bool(trial_def.get("cross_frame", base_bridge.get("include_cross_frame_bracing", True)))
+            key = (top_mode, bottom_mode, cross_frame)
+            if key in seen:
+                continue
+            seen.add(key)
+            if (
+                top_mode == str(base_bridge.get("top_chord_truss_type"))
+                and bottom_mode == str(base_bridge.get("bottom_chord_truss_type"))
+                and cross_frame == bool(base_bridge.get("include_cross_frame_bracing", True))
+            ):
+                continue
+
+            trial = copy.deepcopy(cur_cfg)
+            bridge = dict(trial.get("bridge", {}) or {})
+            bridge["top_chord_truss_type"] = top_mode
+            bridge["bottom_chord_truss_type"] = bottom_mode
+            bridge["include_top_x_bracing"] = top_mode.lower() != "none"
+            bridge["include_bottom_x_bracing"] = bottom_mode.lower() != "none"
+            bridge["include_cross_frame_bracing"] = cross_frame
+            trial["bridge"] = bridge
+            trial = self.planner.config.normalize(trial)
+            trial = self._remap_member_stick_overrides_by_geometry(cur_cfg, trial)
+            trial = self.planner.config.normalize(trial)
+            summary = self._multi_case_summary(trial, load_cases, stage_name=stage_name, tension_only=tension_only)
+
+            nb = safe_float(summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+            nf = safe_float(summary.get("min_fs_design_proxy"), 0.0) or 0.0
+            nm = safe_float(summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+            mass_saved = cur_mass - nm
+            valid = self._summary_valid_flag(summary)
+            strength_loss_ok = (
+                (not below_strength_target)
+                or allow_strength_loss_below_target
+                or (nb >= cur_break * 0.9999 and nf >= cur_fs * 0.9999)
+            )
+            acceptable = (
+                valid
+                and mass_saved >= min_mass_saving_g
+                and nb >= cur_break * min_break_ret
+                and nf >= cur_fs * min_fs_ret
+                and strength_loss_ok
+            )
+            # Peso alto para massa economizada, mas nunca aceitando perda relevante
+            # de segurança antes da meta de 120 kgf.
+            score = (mass_saved / max(1.0, cur_mass)) + 0.25 * (nb / max(1.0, cur_break) - 1.0)
+            accepted = acceptable and score > best_score + 1.0e-12
+            trace_rows.append(
+                {
+                    "trial_index": idx,
+                    "top_chord_truss_type": top_mode,
+                    "bottom_chord_truss_type": bottom_mode,
+                    "include_cross_frame_bracing": cross_frame,
+                    "old_break_proxy_kgf": cur_break,
+                    "new_break_proxy_kgf": nb,
+                    "old_min_fs_design_proxy": cur_fs,
+                    "new_min_fs_design_proxy": nf,
+                    "old_mass_proxy_g": cur_mass,
+                    "new_mass_proxy_g": nm,
+                    "mass_saved_g": mass_saved,
+                    "min_break_retention": min_break_ret,
+                    "min_fs_retention": min_fs_ret,
+                    "strength_loss_ok": bool(strength_loss_ok),
+                    "below_strength_target": bool(below_strength_target),
+                    "accepted": bool(accepted),
+                    "reason": "plane_bracing_efficiency_mutation" if accepted else ("not_retained" if valid else "invalid_summary"),
+                }
+            )
+            if accepted:
+                best_cfg = trial
+                best_summary = summary
+                best_break = nb
+                best_fs = nf
+                best_mass = nm
+                best_score = score
+
+        if best_cfg is not cur_cfg:
+            # Marca somente a melhor tentativa como aceita no CSV final.
+            best_top = str((best_cfg.get("bridge", {}) or {}).get("top_chord_truss_type"))
+            best_bottom = str((best_cfg.get("bridge", {}) or {}).get("bottom_chord_truss_type"))
+            best_cross = bool((best_cfg.get("bridge", {}) or {}).get("include_cross_frame_bracing", True))
+            for row in trace_rows:
+                row["accepted"] = bool(
+                    row.get("top_chord_truss_type") == best_top
+                    and row.get("bottom_chord_truss_type") == best_bottom
+                    and bool(row.get("include_cross_frame_bracing")) == best_cross
+                )
+                if bool(row["accepted"]):
+                    row["reason"] = "plane_bracing_efficiency_mutation"
+        return {"best_cfg": best_cfg, "summary": best_summary, "trace_rows": trace_rows}
+
+
     def _final_strength_reserve_push(
         self,
         cfg: Dict[str, Any],
@@ -2687,16 +2751,32 @@ class StagedFidelityFunnelPlanner:
         ms = cur_cfg.get("member_sizing", {}) or {}
         target_break = float(analysis.get("acceptance_min_design_breaking_load_kgf", 80.0))
         acceptance_fs = float(analysis.get("acceptance_min_primary_fs", 1.05))
-        threshold_fs = float(ms.get("final_strength_push_fs_threshold", max(acceptance_fs, 1.08)))
-        max_orbits = max(0, int(ms.get("final_strength_push_max_orbits", 3)))
-        max_trials = max(max_orbits, int(ms.get("final_strength_push_max_trials", 10)))
+        target_fs = float(analysis.get("target_min_fs", max(acceptance_fs, 1.5)))
+        # Quando a meta final é 80 kgf com FS=1,5, a triagem precisa mirar FS 1,5,
+        # não apenas o FS mínimo de seleção. Caso contrário o push para antes de
+        # liberar a resistência necessária para 120 kgf.
+        threshold_fs = float(ms.get("final_strength_push_fs_threshold", max(target_fs, acceptance_fs)))
+        max_orbits = max(0, int(ms.get("final_strength_push_max_orbits", 6)))
+        max_trials = max(max_orbits, int(ms.get("final_strength_push_max_trials", 24)))
         max_inc = max(1, int(ms.get("final_strength_push_max_increment_per_orbit", 1)))
-        min_abs_force = float(ms.get("final_strength_push_min_abs_force_N", 40.0))
-        min_break_gain = float(ms.get("final_strength_push_min_break_gain", 1.001))
-        min_fs_gain = float(ms.get("final_strength_push_min_fs_gain", 1.001))
+        min_abs_force = float(ms.get("final_strength_push_min_abs_force_N", 30.0))
+        cur_break0 = safe_float(cur_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        min_break_gain = float(ms.get("final_strength_push_min_break_gain", 1.000))
+        min_fs_gain = float(ms.get("final_strength_push_min_fs_gain", 1.000))
+        min_actual_break_gain_kgf = float(
+            ms.get("final_strength_push_min_actual_break_gain_kgf", 0.20 if cur_break0 < target_break else 0.0)
+        )
+        if cur_break0 < target_break:
+            # Abaixo da meta, vários membros simétricos co-governam. Exigir ganho
+            # imediato de ruptura em cada órbita bloqueia reforços cumulativos; uma
+            # órbita melhora, mas outra continua governando. Aceitar ganho zero,
+            # desde que não piore FS nem ruptura, permite avançar até o próximo
+            # gargalo real.
+            min_actual_break_gain_kgf = min(min_actual_break_gain_kgf, 0.0)
         allow_below_target = bool(ms.get("final_strength_push_allow_if_below_target", True))
         mass_limit = float(effective_mass_limit_g(cur_cfg))
-        target_proxy_mass = mass_limit * float(ms.get("final_strength_push_max_proxy_mass_ratio", 0.995))
+        default_mass_ratio = 1.0 if cur_break0 < target_break else 0.995
+        target_proxy_mass = mass_limit * float(ms.get("final_strength_push_max_proxy_mass_ratio", default_mass_ratio))
         groups = set(str(g) for g in (ms.get("final_strength_push_groups") or ["top_chord", "vertical", "diagonal"]))
         stick_mass_g = float(material.get("stick_mass_g", 1.4))
         stick_len_mm = max(1.0, float(material.get("stick_length_mm", 120.0)))
@@ -2859,7 +2939,11 @@ class StagedFidelityFunnelPlanner:
             length_total = sum(float(getattr(member_by_id[i], "L", 0.0) or 0.0) for i in orbit)
             delta_mass = length_total / stick_len_mm * stick_mass_g * max_inc
             n_abs = max(abs(float(worst_by_mid.get(i, {}).get("N_N", 0.0))) for i in orbit if i in worst_by_mid)
-            score = (group_priority.get(group, 1.0) * (1.0 / max(0.05, fs_min)) * max(1.0, n_abs / 100.0)) / max(0.5, delta_mass)
+            # Abaixo da meta de 120 kgf, a ordem correta é severidade primeiro,
+            # eficiência em massa depois. O critério antigo favorecia trechos muito
+            # curtos com FS menos crítico e desperdiçava a última margem de massa.
+            severity = max(0.01, threshold_fs - fs_min)
+            score = (group_priority.get(group, 1.0) * severity * max(1.0, n_abs / 100.0)) / max(0.5, delta_mass)
             candidates.append((score, orbit, {"group": group, "fs_min": fs_min, "delta_mass_g": delta_mass, "N_abs": n_abs, "case": meta.get("case")}))
 
         candidates.sort(key=lambda item: item[0], reverse=True)
@@ -2895,8 +2979,23 @@ class StagedFidelityFunnelPlanner:
             nm = safe_float(summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
             if nm > target_proxy_mass + 1.0e-9:
                 continue
-            improved = (nb >= best_break * min_break_gain) or (nf >= best_fs * min_fs_gain)
-            near_target_push = allow_below_target and best_break < target_break and nb >= best_break * 0.997 and nf >= best_fs * 0.997
+            actual_break_gain = nb - best_break
+            improved = (
+                actual_break_gain >= min_actual_break_gain_kgf
+                and (nb >= best_break * min_break_gain)
+                and nf >= best_fs * 0.997
+            ) or (
+                min_actual_break_gain_kgf <= 0.0
+                and nf >= best_fs * min_fs_gain
+                and nb >= best_break * 0.9999
+            )
+            near_target_push = (
+                allow_below_target
+                and best_break < target_break
+                and actual_break_gain >= min_actual_break_gain_kgf
+                and nb >= best_break * 0.9999
+                and nf >= best_fs * 0.997
+            )
             if improved or near_target_push:
                 old_ns = []
                 new_ns = []
@@ -2930,10 +3029,34 @@ class StagedFidelityFunnelPlanner:
                 ref2 = self._evaluate_case_cached(best_cfg, strength_case_names[0], stage_name=stage_name, tension_only=tension_only)
                 members2 = ref2.get("members") or []
                 member_by_id = {int(getattr(m, "id")): m for m in members2}
-                if best_break >= target_break and best_fs >= acceptance_fs:
+                if best_break >= target_break and best_fs >= target_fs:
                     break
 
         return {"best_cfg": best_cfg, "summary": best_summary, "trace_rows": trace_rows}
+
+
+    def _force_support_pad_member_overrides(
+        self,
+        cfg: Dict[str, Any],
+        n_sticks: int,
+    ) -> Dict[str, Any]:
+        """Garante que sapatas sigam o grupo mesmo quando há overrides por ID."""
+        out = copy.deepcopy(cfg)
+        try:
+            _, members, _, _ = self.planner.geometry.generate(out)
+        except Exception:
+            return out
+        by_id = dict(out.get("member_sticks_by_id", {}) or {})
+        changed = False
+        for m in members:
+            if str(getattr(m, "group", "")) != "support_pad":
+                continue
+            by_id[str(int(getattr(m, "id")))] = int(n_sticks)
+            changed = True
+        if changed:
+            out["member_sticks_by_id"] = by_id
+        return out
+
 
     def _support_pad_capacity_push(
         self,
@@ -2962,11 +3085,23 @@ class StagedFidelityFunnelPlanner:
             return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
 
         ms = cur_cfg.get("member_sizing", {}) or {}
-        target_kgf = float(ms.get("support_pad_push_target_kgf", ms.get("ultimate_strength_target_kgf", 100.0)))
+        analysis = cur_cfg.get("analysis", {}) or {}
+        target_kgf = float(
+            ms.get(
+                "support_pad_push_target_kgf",
+                ms.get(
+                    "ultimate_strength_target_kgf",
+                    analysis.get("acceptance_min_design_breaking_load_kgf", 120.0),
+                ),
+            )
+        )
         max_group_sticks = int(ms.get("support_pad_push_max_group_sticks", 6))
         mass_limit = float(effective_mass_limit_g(cur_cfg))
-        target_proxy_mass = mass_limit * float(ms.get("support_pad_push_max_proxy_mass_ratio", 0.988))
-        proxy_margin = float(ms.get("support_pad_push_proxy_mass_margin_g", 12.0))
+        current_break0 = safe_float(cur_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        default_ratio = 1.0 if current_break0 < target_kgf else 0.995
+        target_proxy_mass = mass_limit * float(ms.get("support_pad_push_max_proxy_mass_ratio", default_ratio))
+        default_margin = 0.0 if current_break0 < target_kgf else 5.0
+        proxy_margin = float(ms.get("support_pad_push_proxy_mass_margin_g", default_margin))
         target_proxy_mass = min(target_proxy_mass, mass_limit - proxy_margin)
         min_break_ret = float(ms.get("support_pad_push_min_break_retention", 0.995))
         min_fs_ret = float(ms.get("support_pad_push_min_fs_retention", 0.995))
@@ -3011,12 +3146,19 @@ class StagedFidelityFunnelPlanner:
 
         group_map = dict(best_cfg.get("member_sticks_by_group", {}) or {})
         current_n = int(safe_float(group_map.get("support_pad"), 3) or 3)
+        initial_support_pad_n = current_n
+        # O caso torsional pode ser governado por apoio mesmo quando o caso central
+        # já parece suficiente. Permite uma tentativa extra; depois disso, só
+        # continua se a margem de apoio nominal ainda estiver abaixo da meta.
+        force_one_attempt = bool(best_break < target_kgf and support_break_nominal >= target_kgf)
 
-        while current_n < max_group_sticks and support_break_nominal < target_kgf:
+        while current_n < max_group_sticks and (support_break_nominal < target_kgf or (force_one_attempt and current_n == initial_support_pad_n)):
             trial = copy.deepcopy(best_cfg)
             trial_group = dict(trial.get("member_sticks_by_group", {}) or {})
             trial_group["support_pad"] = current_n + 1
             trial["member_sticks_by_group"] = trial_group
+            trial = self.planner.config.normalize(trial)
+            trial = self._force_support_pad_member_overrides(trial, current_n + 1)
             trial = self.planner.config.normalize(trial)
 
             summary = self._multi_case_summary(trial, load_cases, stage_name=stage_name, tension_only=tension_only)
@@ -3108,6 +3250,25 @@ class StagedFidelityFunnelPlanner:
         mass_limit = float(effective_mass_limit_g(cur_cfg))
         target_proxy_mass = mass_limit * float(settings.get("final_mass_trim_target_proxy_mass_ratio", 0.990))
         cur_mass = safe_float(cur_summary.get("dead_weight_proxy_g"), 0.0) or 0.0
+        target_break = float(analysis.get("acceptance_min_design_breaking_load_kgf", 80.0))
+        cur_break = safe_float(cur_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        require_strength_first = bool(settings.get("final_mass_trim_only_after_strength_target", True))
+        strength_margin = float(settings.get("final_mass_trim_strength_target_ratio", 0.995))
+        if require_strength_first and cur_break < target_break * strength_margin and cur_mass <= mass_limit + 1.0e-9:
+            return {
+                "best_cfg": cur_cfg,
+                "summary": cur_summary,
+                "trace_rows": [
+                    {
+                        "accepted": False,
+                        "reason": "skipped_under_strength_target",
+                        "current_break_proxy_kgf": cur_break,
+                        "target_break_proxy_kgf": target_break,
+                        "current_mass_proxy_g": cur_mass,
+                        "mass_limit_g": mass_limit,
+                    }
+                ],
+            }
         if cur_mass <= target_proxy_mass + 1.0e-9:
             return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
 
@@ -4904,13 +5065,25 @@ class StagedFidelityFunnelPlanner:
                     "S6 rodará como resgate de massa local para posterior reinvestimento crítico."
                 )
             for idx, row in enumerate(keep_s5[:1], 1):
-                topo = self._topology_cleanup(
-                    row["config"],
-                    load_cases,
-                    stage_name="S6",
-                    tension_only=tension_only_s6,
-                    mass_rescue_only=mass_rescue_only,
-                )
+                try:
+                    topo = self._topology_cleanup(
+                        row["config"],
+                        load_cases,
+                        stage_name="S6",
+                        tension_only=tension_only_s6,
+                        mass_rescue_only=mass_rescue_only,
+                    )
+                except TypeError as exc:
+                    # Compatibility with monkeypatched/older cleanup callables in tests
+                    # and external scripts that do not yet accept mass_rescue_only.
+                    if "mass_rescue_only" not in str(exc):
+                        raise
+                    topo = self._topology_cleanup(
+                        row["config"],
+                        load_cases,
+                        stage_name="S6",
+                        tension_only=tension_only_s6,
+                    )
                 s = topo["summary"]
                 s6_rows.append(
                     {
@@ -5043,6 +5216,39 @@ class StagedFidelityFunnelPlanner:
                 keep_s6 = s6_rows[:1]
         GeometryService.write_csv(out / "section_efficiency_mutation.csv", section_eff_trace_rows)
 
+        # Mutação de eficiência dos planos superior/inferior: tenta reduzir bracing
+        # não governante mantendo ruptura e FS. A massa economizada pode ser
+        # reinvestida no empurrão de resistência e nas sapatas de apoio.
+        plane_bracing_eff_rows: List[Dict[str, Any]] = []
+        if bool((base.get("member_sizing", {}) or {}).get("enable_plane_bracing_efficiency_mutation", True)):
+            plane_input_cfg = (keep_s6[0]["config"] if keep_s6 else keep_s5[0]["config"])
+            plane_eff = self._plane_bracing_efficiency_mutation(
+                plane_input_cfg,
+                load_cases,
+                stage_name="S6_PLANE_BRACING_EFF",
+                tension_only=tension_only_s6,
+            )
+            plane_bracing_eff_rows = [
+                {"candidate_id": "S6PB-0001", **r}
+                for r in (plane_eff.get("trace_rows") or [])
+            ]
+            if any(bool(r.get("accepted")) for r in plane_bracing_eff_rows):
+                s = plane_eff["summary"]
+                s6_rows = [
+                    {
+                        "stage": "S6_PLANE_BRACING_EFF",
+                        "candidate_id": "S6PB-0001",
+                        "objective": s.get("objective"),
+                        "valid_for_selection": s.get("valid_for_selection"),
+                        "predicted_breaking_load_proxy_kgf": s.get("predicted_breaking_load_proxy_kgf"),
+                        "min_fs_design_proxy": s.get("min_fs_design_proxy"),
+                        "dead_weight_proxy_g": s.get("dead_weight_proxy_g"),
+                        "config": plane_eff["best_cfg"],
+                    }
+                ]
+                keep_s6 = s6_rows[:1]
+        GeometryService.write_csv(out / "plane_bracing_efficiency_mutation.csv", plane_bracing_eff_rows)
+
         # Empurrão final: se ainda há margem de massa e a ponte está abaixo da
         # meta, reforça poucas órbitas primárias críticas preservando simetria.
         final_strength_push_rows: List[Dict[str, Any]] = []
@@ -5104,6 +5310,36 @@ class StagedFidelityFunnelPlanner:
                 ]
                 keep_s6 = s6_rows[:1]
         GeometryService.write_csv(out / "support_pad_capacity_push.csv", support_pad_push_rows)
+
+        if bool((base.get("member_sizing", {}) or {}).get("enable_final_strength_push_after_support", True)):
+            push2_input_cfg = (keep_s6[0]["config"] if keep_s6 else keep_s5[0]["config"])
+            pushed2 = self._final_strength_reserve_push(
+                push2_input_cfg,
+                load_cases,
+                stage_name="S6_FINAL_STRENGTH_PUSH_AFTER_SUPPORT",
+                tension_only=tension_only_s6,
+            )
+            push2_rows = [
+                {"candidate_id": "S6P2-0001", **r}
+                for r in (pushed2.get("trace_rows") or [])
+            ]
+            if push2_rows:
+                final_strength_push_rows.extend(push2_rows)
+                GeometryService.write_csv(out / "final_strength_reserve_push.csv", final_strength_push_rows)
+                s = pushed2["summary"]
+                s6_rows = [
+                    {
+                        "stage": "S6_FINAL_STRENGTH_PUSH_AFTER_SUPPORT",
+                        "candidate_id": "S6P2-0001",
+                        "objective": s.get("objective"),
+                        "valid_for_selection": s.get("valid_for_selection"),
+                        "predicted_breaking_load_proxy_kgf": s.get("predicted_breaking_load_proxy_kgf"),
+                        "min_fs_design_proxy": s.get("min_fs_design_proxy"),
+                        "dead_weight_proxy_g": s.get("dead_weight_proxy_g"),
+                        "config": pushed2["best_cfg"],
+                    }
+                ]
+                keep_s6 = s6_rows[:1]
 
         final_mass_trim_rows: List[Dict[str, Any]] = []
         if bool((base.get("member_sizing", {}) or {}).get("enable_final_mass_symmetry_trim", True)):
@@ -5370,6 +5606,7 @@ class StagedFidelityFunnelPlanner:
             "post_topology_reinvestment": reinvest_trace_rows,
             "post_reinvest_rebalance": rebalance_trace_rows,
             "section_efficiency_mutation": section_eff_trace_rows,
+            "plane_bracing_efficiency_mutation": plane_bracing_eff_rows,
             "final_strength_reserve_push": final_strength_push_rows,
             "support_pad_capacity_push": support_pad_push_rows,
             "symmetry_audit": symmetry_audit_rows,

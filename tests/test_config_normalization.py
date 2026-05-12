@@ -22,3 +22,11 @@ def test_config_normalize_rejects_invalid_ranges(base_cfg: dict) -> None:
     cfg["planner"]["span_max_mm"] = 1200.0
     with pytest.raises(ValueError, match="planner\\.span_min_mm"):
         ConfigService().normalize(cfg)
+
+
+def test_config_normalize_strength_first_defaults(base_cfg: dict) -> None:
+    normalized = ConfigService().normalize(base_cfg)
+    ms = normalized["member_sizing"]
+
+    assert ms["plane_bracing_efficiency_allow_strength_loss_below_target"] is False
+    assert ms["final_strength_push_min_actual_break_gain_kgf"] == 0.0

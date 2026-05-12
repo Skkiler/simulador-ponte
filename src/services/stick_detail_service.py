@@ -223,9 +223,15 @@ class StickDetailService:
             res = res_by.get(m.id, {})
             chk = chk_by.get(m.id, {})
             sizing = sizing_map.get(str(m.id)) or sizing_map.get(m.id) or {}
+            member_plan = (cfg.get("member_joint_plan", {}) or {}).get(m.id) or (cfg.get("member_joint_plan", {}) or {}).get(str(m.id))
 
             N = safe_float(res.get("N_N"), 0.0) or 0.0
             n_lanes = max(1, int(m.n_sticks))
+            member_overlap = overlap
+            if isinstance(member_plan, dict):
+                planned_overlap = safe_float(member_plan.get("required_overlap_mm"), None)
+                if planned_overlap is not None:
+                    member_overlap = max(8.0, min(0.85 * stick_len, float(planned_overlap)))
 
             layout_cfg = cfg.get("section_layout_by_group", {}).get(
                 m.group,
@@ -260,7 +266,7 @@ class StickDetailService:
             # perfeito de juntas nas quatro porções da ponte.  Para
             # quadrantes ímpares, invertimos a ordem de segmentação (os
             # cortes passam a ser contados a partir da extremidade oposta).
-            intervals = self._piece_intervals(L, stick_len, overlap)
+            intervals = self._piece_intervals(L, stick_len, member_overlap)
             quadrant_id = 0
             if use_quarter_model and quarter_count > 0:
                 # Determinar qual quadrante este membro pertence com base
@@ -306,7 +312,6 @@ class StickDetailService:
             # member basis.  The plan should be a dictionary keyed by
             # member id (as int or str) containing a ``recommended_joint_model``
             # field.  When absent the global tension/compression model is used.
-            member_plan = (cfg.get("member_joint_plan", {}) or {}).get(m.id) or (cfg.get("member_joint_plan", {}) or {}).get(str(m.id))
             if member_plan and isinstance(member_plan, dict):
                 plan_model = member_plan.get("recommended_joint_model") or member_plan.get("joint_model")
             else:

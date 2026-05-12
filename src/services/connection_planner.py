@@ -59,17 +59,35 @@ class ConnectionPlanner:
         level: str,
         state: str,
         ratio: float,
+        *,
+        force_per_lane_N: float = 0.0,
+        stick_width_mm: float = 7.0,
+        glue_shear_strength_MPa: float = 3.5,
+        glue_safety_factor: float = 2.0,
+        area_factor: float = 1.0,
+        secondary_bending_factor: float = 1.0,
+        stick_length_mm: float = 115.0,
     ) -> float:
-        factor = {
-            "light": 0.90,
-            "moderate": 1.10,
-            "reinforced": 1.35,
+        severity = {
+            "light": 0.85,
+            "moderate": 1.00,
+            "reinforced": 1.20,
         }.get(level, 1.0)
         if state == "compression":
-            factor *= 1.10
+            severity *= 1.12
         if ratio >= 0.70:
-            factor *= 1.10
-        return max(8.0, base_overlap * factor)
+            severity *= 1.10
+
+        stick_w = max(1.0, float(stick_width_mm))
+        tau_design = max(0.05, float(glue_shear_strength_MPa) / max(1.0e-6, float(glue_safety_factor)))
+        area_fac = max(0.10, float(area_factor))
+        bend_fac = max(0.50, float(secondary_bending_factor))
+        demand = abs(float(force_per_lane_N)) * bend_fac
+        overlap_by_shear = demand / max(1.0e-9, tau_design * stick_w * area_fac)
+
+        constructive_min = max(10.0, 0.12 * float(stick_length_mm), 0.70 * float(base_overlap))
+        required = max(constructive_min * severity, overlap_by_shear * 1.15)
+        return max(8.0, min(0.85 * float(stick_length_mm), required))
 
     def _symmetry_partners(
         self,
@@ -214,8 +232,20 @@ class ConnectionPlanner:
             if state == "compression" and model == "butt_plain":
                 model = "double_lap"
 
-            required_overlap = self._required_overlap_mm(base_overlap, lvl, state, ratio)
             area_factor, bend_factor = self._joint_properties(model)
+            required_overlap = self._required_overlap_mm(
+                base_overlap,
+                lvl,
+                state,
+                ratio,
+                force_per_lane_N=abs_n / max(1, int(getattr(m, "n_sticks", 1))),
+                stick_width_mm=float(cfg.get("material", {}).get("stick_width_mm", 7.0)),
+                glue_shear_strength_MPa=float(detail.get("glue_shear_strength_MPa", 3.5)),
+                glue_safety_factor=float(detail.get("default_joint_safety_factor", 2.0)),
+                area_factor=area_factor,
+                secondary_bending_factor=bend_factor,
+                stick_length_mm=stick_len,
+            )
             eff_map_t = detail.get("joint_efficiency_tension_by_model", {}) or {}
             eff_map_c = detail.get("joint_efficiency_compression_by_model", {}) or {}
             eff = float(eff_map_t.get(model, 0.85)) if state != "compression" else float(eff_map_c.get(model, 0.80))

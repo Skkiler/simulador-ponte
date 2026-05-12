@@ -5,6 +5,7 @@ from typing import Dict, List, Tuple
 
 from src.domain.models import Load, Member, Node, Support
 from src.services.section_service import SectionService
+from src.services.load_distribution_service import LoadDistributionService
 
 
 class GeometryService:
@@ -491,29 +492,23 @@ class GeometryService:
             )
 
         load_total = float(cfg["bridge"]["load_total_N"])
-        load_level = str(cfg.get("bridge", {}).get("load_application_level", "top")).strip().lower()
-        if load_level not in {"top", "bottom"}:
-            load_level = "top"
-        load_xs_raw = [
-            float(v)
-            for v in cfg["bridge"].get("load_distribution_x_mm", [])
-        ]
-        load_xs = self._snap_many(load_xs_raw, xs)
-
-        if not load_xs:
-            load_xs = [self._snap_value(float(cfg["bridge"]["span_mm"]) / 2.0, xs)]
-
-        loaded_nodes_set = set()
-        for x in load_xs:
-            for y in ys:
-                loaded_nodes_set.add(nid(x, y, load_level))
-
-        loaded_nodes = sorted(loaded_nodes_set)
-        fz_each = -load_total / len(loaded_nodes)
-        loads = [
-            Load("LC1_carga_central_distribuida", node_id, 0.0, 0.0, fz_each)
-            for node_id in loaded_nodes
-        ]
+        loads = LoadDistributionService.build_nodal_loads(
+            cfg,
+            nodes,
+            loadcase="LC1_carga_central_distribuida",
+            total_N=load_total,
+        )
+        if not loads:
+            # Defensive fallback: preserve a central nodal load if the selected
+            # level has no nodes after an aggressive topology mutation.
+            load_level = LoadDistributionService.load_level(cfg)
+            mid_x = self._snap_value(float(cfg["bridge"]["span_mm"]) / 2.0, xs)
+            loaded_nodes = sorted(nid(mid_x, y, load_level) for y in ys)
+            fz_each = -load_total / max(1, len(loaded_nodes))
+            loads = [
+                Load("LC1_carga_central_distribuida", node_id, 0.0, 0.0, fz_each)
+                for node_id in loaded_nodes
+            ]
 
         return nodes, members, supports, loads
 
