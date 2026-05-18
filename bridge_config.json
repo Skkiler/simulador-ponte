@@ -67,7 +67,7 @@
     "tension_capacity_per_stick_kgf": 72.0,
     "compression_capacity_one_stick_kgf": 4.0,
     "compression_capacity_two_sticks_kgf": 11.0,
-    "compression_capacity_model": "experimental_table_with_efficiency",
+    "compression_capacity_model": "experimental_table_with_area_cap",
     "compression_capacity_table_kgf": {
       "1": 4.0,
       "2": 11.0
@@ -75,7 +75,9 @@
     "bending_strength_MPa": 55.0,
     "compression_strength_MPa": 32.0,
     "default_Ky": 1.0,
-    "default_Kz": 1.0
+    "default_Kz": 1.0,
+    "compression_area_strength_factor": 0.28,
+    "compression_area_cap_max_multiplier_vs_table": 1.75
   },
   "member_sticks_by_group": {
     "bottom_chord": 4,
@@ -396,7 +398,15 @@
     "bottom_chord_tension_donor_min_mass_saving_g": 12.0,
     "bottom_chord_tension_donor_max_compression_N": 8.0,
     "bottom_chord_tension_donor_min_break_retention": 0.995,
-    "bottom_chord_tension_donor_min_fs_retention": 0.985
+    "bottom_chord_tension_donor_min_fs_retention": 0.985,
+    "final_strength_push_dynamic_max_orbits": 16,
+    "final_strength_push_dynamic_max_trials": 64,
+    "enable_late_height_strength_mutation": true,
+    "late_height_strength_step_mm": 5.0,
+    "late_height_strength_spread_mm": 25.0,
+    "late_height_strength_max_mm": 405.0,
+    "late_height_strength_min_break_gain_kgf": 0.3,
+    "late_height_strength_min_fs_retention": 0.995
   },
   "planner_pipeline": {
     "fast_screening_keep_top_k": 8,

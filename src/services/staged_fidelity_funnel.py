@@ -2675,6 +2675,240 @@ class StagedFidelityFunnelPlanner:
         return out
 
 
+    def _plateau_width_efficiency_mutation(
+        self,
+        cfg: Dict[str, Any],
+        load_cases: List[str],
+        *,
+        stage_name: str,
+        tension_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Busca a menor largura útil do platô sem perder resistência.
+
+        Para carregamento por platô/deck, reduzir a largura dentro do intervalo do
+        edital diminui travessas, contraventamentos e braço torsor do caso 60/40.
+        A mutação é tardia: usa o candidato já dimensionado e só aceita largura
+        que preserve ruptura/FS nos casos de projeto.
+        """
+        settings = cfg.get("member_sizing", {}) or {}
+        if not bool(settings.get("enable_plateau_width_efficiency_mutation", True)):
+            summary = self._multi_case_summary(cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+            return {"best_cfg": cfg, "summary": summary, "trace_rows": []}
+
+        cur_cfg = self.planner.config.normalize(cfg)
+        bridge = cur_cfg.get("bridge", {}) or {}
+        top_profile = str(bridge.get("top_profile", "")).lower()
+        load_model = str(bridge.get("load_distribution_model", "")).lower()
+        if "plateau" not in top_profile and "plate" not in load_model:
+            summary = self._multi_case_summary(cur_cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+            return {"best_cfg": cur_cfg, "summary": summary, "trace_rows": []}
+
+        cur_summary = self._multi_case_summary(cur_cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+        if not self._summary_valid_flag(cur_summary):
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+
+        cur_width = float(bridge.get("width_mm", 150.0))
+        min_width = max(100.0, float(settings.get("plateau_width_efficiency_min_width_mm", 100.0)))
+        raw_candidates = settings.get("plateau_width_efficiency_candidates_mm") or [100.0, 105.0, 110.0, 120.0, 130.0]
+        candidates: List[float] = []
+        for raw in raw_candidates:
+            try:
+                w = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if min_width - 1.0e-9 <= w <= 200.0 + 1.0e-9:
+                candidates.append(round(w, 6))
+        candidates.append(round(cur_width, 6))
+        candidates = sorted({w for w in candidates if w <= cur_width + 1.0e-9})
+
+        cur_break = safe_float(cur_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        cur_fs = safe_float(cur_summary.get("min_fs_design_proxy"), 0.0) or 0.0
+        cur_mass = safe_float(cur_summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+        min_break_ret = float(settings.get("plateau_width_efficiency_min_break_retention", 0.995))
+        min_fs_ret = float(settings.get("plateau_width_efficiency_min_fs_retention", 0.995))
+        min_saving = float(settings.get("plateau_width_efficiency_min_mass_saving_g", 8.0))
+        update_footprint = bool(settings.get("plateau_width_efficiency_update_load_footprint", True))
+
+        best_cfg = cur_cfg
+        best_summary = cur_summary
+        best_score = -1.0e99
+        trace_rows: List[Dict[str, Any]] = []
+
+        for width in candidates:
+            if abs(width - cur_width) <= 1.0e-9:
+                continue
+            trial = copy.deepcopy(cur_cfg)
+            tb = trial.setdefault("bridge", {})
+            tb["width_mm"] = float(width)
+            tb["support_contact_y_mm"] = [-0.5 * float(width), 0.5 * float(width)]
+            if update_footprint:
+                old_fp = safe_float(tb.get("load_footprint_width_mm"), cur_width)
+                tb["load_footprint_width_mm"] = min(float(width), float(old_fp or width))
+            trial = self.planner.config.normalize(trial)
+            summary = self._multi_case_summary(trial, load_cases, stage_name=stage_name, tension_only=tension_only)
+            if not self._summary_valid_flag(summary):
+                trace_rows.append(
+                    {
+                        "old_width_mm": cur_width,
+                        "new_width_mm": width,
+                        "accepted": False,
+                        "reason": "invalid_summary",
+                    }
+                )
+                continue
+
+            nb = safe_float(summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+            nf = safe_float(summary.get("min_fs_design_proxy"), 0.0) or 0.0
+            nm = safe_float(summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+            saved = cur_mass - nm
+            retained = nb >= cur_break * min_break_ret and nf >= cur_fs * min_fs_ret
+            useful = saved >= min_saving or nb > cur_break + 1.0e-6 or nf > cur_fs + 1.0e-6
+            accepted = bool(retained and useful)
+            # Score privilegia resistência; a massa economizada só desempata.
+            score = (nb * 10.0) + (nf * 30.0) + max(0.0, saved) * 0.05
+            trace_rows.append(
+                {
+                    "old_width_mm": cur_width,
+                    "new_width_mm": width,
+                    "old_break_proxy_kgf": cur_break,
+                    "new_break_proxy_kgf": nb,
+                    "old_min_fs_design_proxy": cur_fs,
+                    "new_min_fs_design_proxy": nf,
+                    "old_mass_proxy_g": cur_mass,
+                    "new_mass_proxy_g": nm,
+                    "saved_mass_proxy_g": saved,
+                    "load_footprint_width_mm": trial.get("bridge", {}).get("load_footprint_width_mm"),
+                    "accepted": accepted,
+                    "reason": "plateau_width_efficiency_mutation" if accepted else "not_retained",
+                }
+            )
+            if accepted and score > best_score:
+                best_score = score
+                best_cfg = trial
+                best_summary = summary
+
+        return {"best_cfg": best_cfg, "summary": best_summary, "trace_rows": trace_rows}
+
+
+    def _late_height_strength_mutation(
+        self,
+        cfg: Dict[str, Any],
+        load_cases: List[str],
+        *,
+        stage_name: str,
+        tension_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Reavalia altura do platô depois das mutações de largura/seção.
+
+        A altura maior reduz esforço axial nos banzos, mas aumenta comprimento de
+        montantes, massa e sensibilidade à flambagem.  Nas etapas iniciais o
+        efeito fica mascarado por outros gargalos; por isso esta mutação é tardia
+        e só aceita altura que melhore ruptura/FS sem violar massa.
+        """
+        settings = cfg.get("member_sizing", {}) or {}
+        if not bool(settings.get("enable_late_height_strength_mutation", True)):
+            summary = self._multi_case_summary(cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+            return {"best_cfg": cfg, "summary": summary, "trace_rows": []}
+
+        cur_cfg = self.planner.config.normalize(cfg)
+        cur_summary = self._multi_case_summary(cur_cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+        if not self._summary_valid_flag(cur_summary):
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+
+        bridge = cur_cfg.get("bridge", {}) or {}
+        planner_cfg = cur_cfg.get("planner", {}) or {}
+        ms = cur_cfg.get("member_sizing", {}) or {}
+        cur_h = float(bridge.get("center_height_mm", 325.0))
+        h_min = safe_float(planner_cfg.get("height_min_mm"), 50.0) or 50.0
+        h_max = safe_float(planner_cfg.get("height_max_mm"), 450.0) or 450.0
+        h_max = min(float(h_max), float(settings.get("late_height_strength_max_mm", h_max)))
+        h_min = max(float(h_min), float(settings.get("late_height_strength_min_mm", h_min)))
+
+        raw_candidates = settings.get("late_height_strength_candidates_mm")
+        if not raw_candidates:
+            step = float(settings.get("late_height_strength_step_mm", 5.0))
+            spread = float(settings.get("late_height_strength_spread_mm", 30.0))
+            lo = max(h_min, cur_h - spread)
+            hi = min(h_max, cur_h + spread)
+            n = int(round((hi - lo) / max(step, 1.0)))
+            raw_candidates = [lo + k * step for k in range(max(0, n) + 1)] + [cur_h]
+
+        candidates: List[float] = []
+        for raw in raw_candidates:
+            try:
+                h = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if h_min - 1.0e-9 <= h <= h_max + 1.0e-9:
+                candidates.append(round(h, 6))
+        candidates = sorted(set(candidates))
+
+        cur_break = safe_float(cur_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        cur_fs = safe_float(cur_summary.get("min_fs_design_proxy"), 0.0) or 0.0
+        cur_mass = safe_float(cur_summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+        mass_limit = float(effective_mass_limit_g(cur_cfg))
+        reserve_g = float(ms.get("late_stage_detailed_mass_reserve_g", 3.0))
+        min_break_gain = float(settings.get("late_height_strength_min_break_gain_kgf", 0.30))
+        min_fs_ret = float(settings.get("late_height_strength_min_fs_retention", 0.995))
+
+        best_cfg = cur_cfg
+        best_summary = cur_summary
+        best_score = (cur_break * 10.0) + (cur_fs * 30.0) - max(0.0, cur_mass - 950.0) * 0.02
+        trace_rows: List[Dict[str, Any]] = []
+
+        for h in candidates:
+            if abs(h - cur_h) <= 1.0e-9:
+                continue
+            trial = copy.deepcopy(cur_cfg)
+            tb = trial.setdefault("bridge", {})
+            tb["center_height_mm"] = float(h)
+            # Preserve a feasible Parker/platô profile.  If the old end height is
+            # higher than the new crown, normalization will clip it, but doing it
+            # explicitly keeps traceability in config_used.json.
+            tb["end_height_mm"] = min(float(tb.get("end_height_mm", h)), float(h))
+            trial = self.planner.config.normalize(trial)
+            summary = self._multi_case_summary(trial, load_cases, stage_name=stage_name, tension_only=tension_only)
+            if not self._summary_valid_flag(summary):
+                trace_rows.append({"old_height_mm": cur_h, "new_height_mm": h, "accepted": False, "reason": "invalid_summary"})
+                continue
+            nb = safe_float(summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+            nf = safe_float(summary.get("min_fs_design_proxy"), 0.0) or 0.0
+            nm = safe_float(summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+            mass_ok, detailed_mass, mass_basis = self._late_stage_mass_ok(
+                trial,
+                proxy_mass_g=nm,
+                proxy_limit_g=mass_limit,
+                hard_limit_g=mass_limit,
+                reserve_g=reserve_g,
+                stage_name=f"{stage_name}_DETAILED_MASS",
+                tension_only=tension_only,
+            )
+            accepted = bool(mass_ok and nb >= cur_break + min_break_gain and nf >= cur_fs * min_fs_ret)
+            score = (nb * 10.0) + (nf * 30.0) - max(0.0, nm - cur_mass) * 0.02
+            trace_rows.append(
+                {
+                    "old_height_mm": cur_h,
+                    "new_height_mm": h,
+                    "old_break_proxy_kgf": cur_break,
+                    "new_break_proxy_kgf": nb,
+                    "old_min_fs_design_proxy": cur_fs,
+                    "new_min_fs_design_proxy": nf,
+                    "old_mass_proxy_g": cur_mass,
+                    "new_mass_proxy_g": nm,
+                    "new_detailed_competition_mass_g": detailed_mass,
+                    "mass_acceptance_basis": mass_basis,
+                    "accepted": accepted,
+                    "reason": "late_height_strength_mutation" if accepted else "not_improved_or_mass_limited",
+                }
+            )
+            if accepted and score > best_score:
+                best_score = score
+                best_cfg = trial
+                best_summary = summary
+
+        return {"best_cfg": best_cfg, "summary": best_summary, "trace_rows": trace_rows}
+
+
     def _plane_bracing_efficiency_mutation(
         self,
         cfg: Dict[str, Any],
@@ -2980,6 +3214,229 @@ class StagedFidelityFunnelPlanner:
             return {"best_cfg": trial, "summary": new_summary, "trace_rows": [row]}
         return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": [row]}
 
+    def _final_strength_reserve_push_dynamic(
+        self,
+        cfg: Dict[str, Any],
+        load_cases: List[str],
+        *,
+        stage_name: str,
+        tension_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Reforço final com recálculo depois de cada órbita aceita.
+
+        A versão estática montava uma lista de candidatos uma única vez.  Em
+        pontes com vários gargalos próximos, isso consumia massa em banzos que
+        eram críticos no primeiro passo, mesmo depois de um montante ou diagonal
+        passar a governar.  Este método recalcula o envelope multi-loadcase a
+        cada órbita aceita e volta a ordenar por FS atual, força e massa marginal.
+        """
+        settings = cfg.get("member_sizing", {}) or {}
+        cur_cfg = self.planner.config.normalize(cfg)
+        cur_summary = self._multi_case_summary(cur_cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+        if not self._summary_valid_flag(cur_summary):
+            return {"best_cfg": cur_cfg, "summary": cur_summary, "trace_rows": []}
+
+        analysis = cur_cfg.get("analysis", {}) or {}
+        material = cur_cfg.get("material", {}) or {}
+        ms = cur_cfg.get("member_sizing", {}) or {}
+        target_break = float(analysis.get("acceptance_min_design_breaking_load_kgf", 80.0))
+        acceptance_fs = float(analysis.get("acceptance_min_primary_fs", 1.05))
+        target_fs = float(analysis.get("target_min_fs", max(acceptance_fs, 1.5)))
+        threshold_fs = float(ms.get("final_strength_push_fs_threshold", max(target_fs, acceptance_fs)))
+        max_orbits = max(0, int(ms.get("final_strength_push_max_orbits", 8)))
+        dyn_max_orbits_raw = ms.get("final_strength_push_dynamic_max_orbits")
+        if dyn_max_orbits_raw is not None:
+            max_orbits = min(max_orbits, max(1, int(dyn_max_orbits_raw)))
+        max_trials = max(max_orbits, int(ms.get("final_strength_push_max_trials", 28)))
+        dyn_max_trials_raw = ms.get("final_strength_push_dynamic_max_trials")
+        if dyn_max_trials_raw is not None:
+            max_trials = min(max_trials, max(max_orbits, int(dyn_max_trials_raw)))
+        max_inc = max(1, int(ms.get("final_strength_push_max_increment_per_orbit", 1)))
+        min_abs_force = float(ms.get("final_strength_push_min_abs_force_N", 30.0))
+        mass_limit = float(effective_mass_limit_g(cur_cfg))
+        default_mass_ratio = 1.0 if (safe_float(cur_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0) < target_break else 0.995
+        target_proxy_mass = mass_limit * float(ms.get("final_strength_push_max_proxy_mass_ratio", default_mass_ratio))
+        detailed_mass_reserve_g = float(ms.get("late_stage_detailed_mass_reserve_g", 3.0))
+        break_ret = float(ms.get("final_strength_push_min_accept_break_retention", 0.9995))
+        fs_ret = float(ms.get("final_strength_push_min_accept_fs_retention", 0.9980))
+        groups = set(str(g) for g in (ms.get("final_strength_push_groups") or ["top_chord", "vertical", "diagonal"]))
+        stick_mass_g = float(material.get("stick_mass_g", 1.4))
+        stick_len_mm = max(1.0, float(material.get("stick_length_mm", 120.0)))
+        max_default = int(analysis.get("planner_max_sticks_per_group", 12))
+        max_by_group = analysis.get("planner_max_sticks_per_group_by_group", {}) or {}
+
+        def max_for_group(group: str) -> int:
+            raw = safe_float(max_by_group.get(group), None)
+            return int(raw) if raw is not None else max_default
+
+        ml_cfg = cur_cfg.get("multi_loadcase_screening", {}) or {}
+        strength_case_names = [
+            str(v)
+            for v in (
+                ms.get("sizing_load_cases")
+                or ml_cfg.get("strength_governing_cases")
+                or ["center", "torsion_60_40", "lateral_imperfection"]
+            )
+        ]
+        summary_cases_for_trials = strength_case_names if bool(ms.get("final_strength_push_fast_strength_cases_only", True)) else load_cases
+
+        best_cfg = cur_cfg
+        best_summary = cur_summary
+        best_break = safe_float(best_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        best_fs = safe_float(best_summary.get("min_fs_design_proxy"), 0.0) or 0.0
+        trace_rows: List[Dict[str, Any]] = []
+        group_priority = {"vertical": 9.0, "top_chord": 8.0, "diagonal": 5.0, "bottom_chord": 2.0}
+
+        for iteration in range(1, max_orbits + 1):
+            if best_break >= target_break and best_fs >= target_fs:
+                break
+
+            cases = [
+                self._evaluate_case_cached(best_cfg, c, stage_name=stage_name, tension_only=tension_only)
+                for c in strength_case_names
+            ]
+            cases = [c for c in cases if self._is_selectable_case(c)]
+            if not cases:
+                break
+
+            ref = cases[0]
+            nodes = ref.get("nodes") or []
+            members = ref.get("members") or []
+            member_by_id = {int(getattr(m, "id")): m for m in members}
+            try:
+                partners = self.planner.map_member_to_symmetry_partners(best_cfg, nodes, members)
+            except Exception:
+                partners = {}
+
+            worst_by_mid: Dict[int, Dict[str, Any]] = {}
+            for case in cases:
+                case_name = str(case.get("case", "unknown"))
+                result_by_id = {
+                    int(r.get("member_id")): r
+                    for r in (case.get("member_results") or [])
+                    if r.get("member_id") is not None
+                }
+                for chk in (case.get("member_checks") or []):
+                    mid_raw = chk.get("member_id")
+                    if mid_raw is None:
+                        continue
+                    mid = int(mid_raw)
+                    m = member_by_id.get(mid)
+                    if m is None:
+                        continue
+                    group = str(getattr(m, "group", chk.get("group", "")))
+                    if group not in groups or chk.get("design_relevant") is False:
+                        continue
+                    fs = safe_float(chk.get("FS_design"), None)
+                    if fs is None:
+                        fs = safe_float(chk.get("FS_min"), None)
+                    if fs is None:
+                        continue
+                    n_val = safe_float((result_by_id.get(mid, {}) or {}).get("N_N"), chk.get("N_N"))
+                    if abs(float(n_val or 0.0)) < min_abs_force:
+                        continue
+                    cur = worst_by_mid.get(mid)
+                    if cur is None or float(fs) < float(cur.get("FS", 1.0e99)):
+                        worst_by_mid[mid] = {"FS": float(fs), "case": case_name, "group": group, "N_N": float(n_val or 0.0)}
+
+            candidates: List[Tuple[float, Tuple[int, ...], Dict[str, Any]]] = []
+            seen: set[Tuple[int, ...]] = set()
+            for mid, meta in worst_by_mid.items():
+                group = str(meta.get("group"))
+                orbit = tuple(sorted(set([int(mid)] + [int(v) for v in partners.get(int(mid), []) if int(v) in member_by_id])))
+                if orbit in seen:
+                    continue
+                seen.add(orbit)
+                ns = [int(getattr(member_by_id[i], "n_sticks", 1)) for i in orbit]
+                if not ns or max(ns) >= max_for_group(group):
+                    continue
+                fs_vals = [worst_by_mid.get(i, {}).get("FS") for i in orbit if worst_by_mid.get(i, {}).get("FS") is not None]
+                if not fs_vals:
+                    continue
+                fs_min = min(float(v) for v in fs_vals)
+                if fs_min > threshold_fs:
+                    continue
+                n_abs = max(abs(float(worst_by_mid.get(i, {}).get("N_N", 0.0))) for i in orbit if i in worst_by_mid)
+                length_total = sum(float(getattr(member_by_id[i], "L", 0.0) or 0.0) for i in orbit)
+                delta_mass = length_total / stick_len_mm * stick_mass_g * max_inc
+                severity = max(0.01, threshold_fs - fs_min)
+                # FS atual domina.  A força e o grupo só desempatarão candidatos
+                # de severidade similar; isso evita gastar toda a margem em banzos
+                # depois que montantes passam a governar o caso torsional.
+                score = (severity ** 2) * group_priority.get(group, 1.0) * max(1.0, n_abs / 100.0) / max(0.5, delta_mass)
+                candidates.append((score, orbit, {"group": group, "fs_min": fs_min, "delta_mass_g": delta_mass, "N_abs": n_abs, "case": meta.get("case")}))
+
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            if not candidates:
+                break
+
+            accepted = False
+            for _, orbit, meta in candidates[:max_trials]:
+                trial = copy.deepcopy(best_cfg)
+                by_id = trial.setdefault("member_sticks_by_id", {})
+                old_ns: List[int] = []
+                new_ns: List[int] = []
+                for mid in orbit:
+                    m = member_by_id[int(mid)]
+                    old_n = max(1, int(getattr(m, "n_sticks", 1)))
+                    old_ns.append(old_n)
+                    new_ns.append(old_n + max_inc)
+                    by_id[str(int(mid))] = old_n + max_inc
+                trial = self.planner.config.normalize(trial)
+                summary = self._multi_case_summary(trial, summary_cases_for_trials, stage_name=stage_name, tension_only=tension_only)
+                if not self._summary_valid_flag(summary):
+                    continue
+                nb = safe_float(summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+                nf = safe_float(summary.get("min_fs_design_proxy"), 0.0) or 0.0
+                nm = safe_float(summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+                mass_ok, detailed_mass, mass_basis = self._late_stage_mass_ok(
+                    trial,
+                    proxy_mass_g=nm,
+                    proxy_limit_g=target_proxy_mass,
+                    hard_limit_g=mass_limit,
+                    reserve_g=detailed_mass_reserve_g,
+                    stage_name=f"{stage_name}_DETAILED_MASS",
+                    tension_only=tension_only,
+                )
+                if not mass_ok:
+                    continue
+                acceptable = nb >= best_break * break_ret and nf >= best_fs * fs_ret
+                if not acceptable:
+                    continue
+                trace_rows.append(
+                    {
+                        "iteration": iteration,
+                        "orbit_member_ids": ";".join(str(i) for i in orbit),
+                        "group": meta.get("group"),
+                        "old_n_sticks": ";".join(str(v) for v in old_ns),
+                        "new_n_sticks": ";".join(str(v) for v in new_ns),
+                        "FS_before": meta.get("fs_min"),
+                        "N_abs_N": meta.get("N_abs"),
+                        "worst_case": meta.get("case"),
+                        "delta_mass_g_est": meta.get("delta_mass_g"),
+                        "new_break_proxy_kgf": nb,
+                        "new_min_fs_design_proxy": nf,
+                        "new_mass_proxy_g": nm,
+                        "new_detailed_competition_mass_g": detailed_mass,
+                        "mass_acceptance_basis": mass_basis,
+                        "reason": "final_strength_reserve_push_dynamic_recompute",
+                    }
+                )
+                best_cfg = trial
+                best_summary = summary
+                best_break = nb
+                best_fs = nf
+                accepted = True
+                break
+            if not accepted:
+                break
+
+        # A seleção rápida usa só casos de resistência para custo.  Antes de
+        # devolver ao funil, revalida no conjunto completo, incluindo auditorias
+        # de contato e offsets configurados.
+        full_summary = self._multi_case_summary(best_cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+        return {"best_cfg": best_cfg, "summary": full_summary, "trace_rows": trace_rows}
+
     def _final_strength_reserve_push(
         self,
         cfg: Dict[str, Any],
@@ -2999,6 +3456,14 @@ class StagedFidelityFunnelPlanner:
         if not bool(settings.get("enable_final_strength_reserve_push", True)):
             summary = self._multi_case_summary(cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
             return {"best_cfg": cfg, "summary": summary, "trace_rows": []}
+
+        if bool(settings.get("final_strength_push_dynamic_recompute", True)):
+            return self._final_strength_reserve_push_dynamic(
+                cfg,
+                load_cases,
+                stage_name=stage_name,
+                tension_only=tension_only,
+            )
 
         cur_cfg = self.planner.config.normalize(cfg)
         cur_summary = self._multi_case_summary(cur_cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
@@ -3377,6 +3842,8 @@ class StagedFidelityFunnelPlanner:
         detailed_mass_reserve_g = float(ms.get("late_stage_detailed_mass_reserve_g", 3.0))
         min_break_ret = float(ms.get("support_pad_push_min_break_retention", 0.995))
         min_fs_ret = float(ms.get("support_pad_push_min_fs_retention", 0.995))
+        require_gain_if_not_support_limited = bool(ms.get("support_pad_push_require_gain_if_not_support_limited", True))
+        min_actual_break_gain_kgf = float(ms.get("support_pad_push_min_actual_break_gain_kgf", 0.10))
 
         best_cfg = cur_cfg
         best_summary = cur_summary
@@ -3468,7 +3935,11 @@ class StagedFidelityFunnelPlanner:
                 )
                 break
 
+            support_limited_before = bool(support_break_nominal < target_kgf)
+            actual_gain = nb - best_break
             acceptable = nb >= best_break * min_break_ret and nf >= best_fs * min_fs_ret
+            if acceptable and require_gain_if_not_support_limited and not support_limited_before:
+                acceptable = actual_gain >= min_actual_break_gain_kgf
             trace_rows.append(
                 {
                     "old_support_pad_sticks": current_n,
@@ -3482,6 +3953,8 @@ class StagedFidelityFunnelPlanner:
                     "new_detailed_competition_mass_g": detailed_mass,
                     "mass_acceptance_basis": mass_basis,
                     "nominal_support_break_kgf_before": support_break_nominal,
+                    "actual_break_gain_kgf": actual_gain,
+                    "support_limited_before": support_limited_before,
                 }
             )
             if not acceptable:
@@ -5570,6 +6043,100 @@ class StagedFidelityFunnelPlanner:
                 keep_s6 = s6_rows[:1]
         GeometryService.write_csv(out / "plane_bracing_efficiency_mutation.csv", plane_bracing_eff_rows)
 
+        # Eficiência do platô: depois de escolher o treliçamento de plano, testar
+        # larguras menores ainda dentro do edital.  Com carga por platô, larguras
+        # menores reduzem travessas e o braço torsor do load case 60/40; depois a
+        # seção é reavaliada porque os membros governantes podem mudar.
+        plateau_width_rows: List[Dict[str, Any]] = []
+        if bool((base.get("member_sizing", {}) or {}).get("enable_plateau_width_efficiency_mutation", True)):
+            width_input_cfg = (keep_s6[0]["config"] if keep_s6 else keep_s5[0]["config"])
+            width_eff = self._plateau_width_efficiency_mutation(
+                width_input_cfg,
+                load_cases,
+                stage_name="S6_PLATEAU_WIDTH_EFF",
+                tension_only=tension_only_s6,
+            )
+            plateau_width_rows = [
+                {"candidate_id": "S6W-0001", **r}
+                for r in (width_eff.get("trace_rows") or [])
+            ]
+            if any(bool(r.get("accepted")) for r in plateau_width_rows):
+                s = width_eff["summary"]
+                s6_rows = [
+                    {
+                        "stage": "S6_PLATEAU_WIDTH_EFF",
+                        "candidate_id": "S6W-0001",
+                        "objective": s.get("objective"),
+                        "valid_for_selection": s.get("valid_for_selection"),
+                        "predicted_breaking_load_proxy_kgf": s.get("predicted_breaking_load_proxy_kgf"),
+                        "min_fs_design_proxy": s.get("min_fs_design_proxy"),
+                        "dead_weight_proxy_g": s.get("dead_weight_proxy_g"),
+                        "config": width_eff["best_cfg"],
+                    }
+                ]
+                keep_s6 = s6_rows[:1]
+        GeometryService.write_csv(out / "plateau_width_efficiency_mutation.csv", plateau_width_rows)
+
+        late_section_eff_rows: List[Dict[str, Any]] = []
+        if bool((base.get("member_sizing", {}) or {}).get("enable_late_section_efficiency_after_width", True)):
+            late_section_input_cfg = (keep_s6[0]["config"] if keep_s6 else keep_s5[0]["config"])
+            late_section_eff = self._section_efficiency_mutation(
+                late_section_input_cfg,
+                load_cases,
+                stage_name="S6_LATE_SECTION_EFF",
+                tension_only=tension_only_s6,
+            )
+            late_section_eff_rows = [
+                {"candidate_id": "S6LE-0001", **r}
+                for r in (late_section_eff.get("trace_rows") or [])
+            ]
+            if any(bool(r.get("accepted")) for r in late_section_eff_rows):
+                s = late_section_eff["summary"]
+                s6_rows = [
+                    {
+                        "stage": "S6_LATE_SECTION_EFF",
+                        "candidate_id": "S6LE-0001",
+                        "objective": s.get("objective"),
+                        "valid_for_selection": s.get("valid_for_selection"),
+                        "predicted_breaking_load_proxy_kgf": s.get("predicted_breaking_load_proxy_kgf"),
+                        "min_fs_design_proxy": s.get("min_fs_design_proxy"),
+                        "dead_weight_proxy_g": s.get("dead_weight_proxy_g"),
+                        "config": late_section_eff["best_cfg"],
+                    }
+                ]
+                keep_s6 = s6_rows[:1]
+        GeometryService.write_csv(out / "late_section_efficiency_mutation.csv", late_section_eff_rows)
+
+        late_height_rows: List[Dict[str, Any]] = []
+        if bool((base.get("member_sizing", {}) or {}).get("enable_late_height_strength_mutation", True)):
+            height_input_cfg = (keep_s6[0]["config"] if keep_s6 else keep_s5[0]["config"])
+            height_eff = self._late_height_strength_mutation(
+                height_input_cfg,
+                load_cases,
+                stage_name="S6_LATE_HEIGHT_STRENGTH",
+                tension_only=tension_only_s6,
+            )
+            late_height_rows = [
+                {"candidate_id": "S6LH-0001", **r}
+                for r in (height_eff.get("trace_rows") or [])
+            ]
+            if any(bool(r.get("accepted")) for r in late_height_rows):
+                s = height_eff["summary"]
+                s6_rows = [
+                    {
+                        "stage": "S6_LATE_HEIGHT_STRENGTH",
+                        "candidate_id": "S6LH-0001",
+                        "objective": s.get("objective"),
+                        "valid_for_selection": s.get("valid_for_selection"),
+                        "predicted_breaking_load_proxy_kgf": s.get("predicted_breaking_load_proxy_kgf"),
+                        "min_fs_design_proxy": s.get("min_fs_design_proxy"),
+                        "dead_weight_proxy_g": s.get("dead_weight_proxy_g"),
+                        "config": height_eff["best_cfg"],
+                    }
+                ]
+                keep_s6 = s6_rows[:1]
+        GeometryService.write_csv(out / "late_height_strength_mutation.csv", late_height_rows)
+
         # Sapatas primeiro: no output v33 o reforço de apoio tinha o maior ganho
         # de ruptura por grama, mas era tentado depois do push genérico e acabava
         # bloqueado por uma margem proxy quase nula.  Priorizar o apoio evita gastar
@@ -5644,6 +6211,8 @@ class StagedFidelityFunnelPlanner:
         if bool((base.get("member_sizing", {}) or {}).get("enable_final_strength_reserve_push", True)):
             ms_base = base.get("member_sizing", {}) or {}
             repeat_passes = max(1, int(ms_base.get("final_strength_push_repeat_passes", 2)))
+            if bool(ms_base.get("final_strength_push_dynamic_recompute", True)):
+                repeat_passes = 1
             push_input_cfg = (keep_s6[0]["config"] if keep_s6 else keep_s5[0]["config"])
             last_pushed: Dict[str, Any] | None = None
             for pass_idx in range(repeat_passes):
@@ -5950,6 +6519,7 @@ class StagedFidelityFunnelPlanner:
             "section_efficiency_mutation": section_eff_trace_rows,
             "plane_bracing_efficiency_mutation": plane_bracing_eff_rows,
             "final_strength_reserve_push": final_strength_push_rows,
+            "late_height_strength_mutation": late_height_rows,
             "support_pad_capacity_push": support_pad_push_rows,
             "symmetry_audit": symmetry_audit_rows,
             "s7_fabrication": s7_rows,

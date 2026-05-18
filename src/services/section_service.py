@@ -191,6 +191,31 @@ class SectionService:
         return max(0.65, min(1.00, base))
 
     @staticmethod
+    def _effective_compression_stress_MPa(material: Dict[str, float]) -> float:
+        """Material-level direct-compression stress used after table anchors.
+
+        The edital gives rupture loads for one isolated stick and for a two-stick
+        glued composition.  Those values are indispensable anchors, but they are
+        not enough to extrapolate multi-stick box sections.  For n >= 3 this
+        helper estimates a conservative *direct* compression stress from the
+        measured anchors and from a user-visible fraction of the configured wood
+        compression strength.  Euler/Johnson remains checked separately and may
+        still govern long or weak-axis members.
+        """
+        b = float(material.get("stick_width_mm", 0.0) or 0.0)
+        t = float(material.get("stick_thickness_mm", 0.0) or 0.0)
+        A1 = max(1.0e-9, b * t)
+        c1 = float(material.get("compression_capacity_one_stick_N", 0.0) or 0.0)
+        c2 = float(material.get("compression_capacity_two_sticks_N", 0.0) or 0.0)
+        anchor_sigma = max(c1 / A1, c2 / (2.0 * A1), 1.0e-9)
+        wood_sigma = safe_float(material.get("compression_strength_MPa"), None)
+        if wood_sigma is None or wood_sigma <= 0:
+            return float(anchor_sigma)
+        factor = safe_float(material.get("compression_area_strength_factor"), 0.22) or 0.22
+        factor = max(0.05, min(0.60, float(factor)))
+        return float(max(anchor_sigma, min(float(wood_sigma), float(wood_sigma) * factor)))
+
+    @staticmethod
     def compression_capacity_N(
         n_sticks: int,
         material: Dict[str, float],
@@ -208,7 +233,7 @@ class SectionService:
         ).strip().lower()
 
         table = material.get("compression_capacity_table_kgf", {}) or {}
-        if model == "experimental_table_with_efficiency":
+        if model in {"experimental_table_with_efficiency", "experimental_table_with_area_cap"}:
             table_val_kgf = safe_float(table.get(str(n)), None)
             if table_val_kgf is not None:
                 return float(table_val_kgf) * 9.80665
@@ -219,6 +244,22 @@ class SectionService:
             return c2
 
         eta = SectionService._layout_efficiency(layout, n)
+        if model in {"experimental_table_with_area_cap", "table_anchor_area_cap", "experimental_table_with_efficiency_and_area_cap"}:
+            b = float(material.get("stick_width_mm", 0.0) or 0.0)
+            t = float(material.get("stick_thickness_mm", 0.0) or 0.0)
+            A = max(1.0e-9, n * b * t)
+            sigma_eff = SectionService._effective_compression_stress_MPa(material)
+            area_cap = A * sigma_eff * eta
+
+            # Preserve the edital anchors while avoiding an unconstrained jump for
+            # many sticks.  The multiplier is intentionally conservative and
+            # documented in the report/config, because adhesive quality and
+            # eccentricity dominate real popsicle-stick compression tests.
+            linear_anchor = (n / 2.0) * c2 * eta
+            max_mult = safe_float(material.get("compression_area_cap_max_multiplier_vs_table", 1.50), 1.50) or 1.50
+            max_mult = max(1.0, min(2.0, float(max_mult)))
+            return max(linear_anchor, min(area_cap, linear_anchor * max_mult))
+
         if model in {"experimental_table_with_efficiency", "one_or_two_then_linear_by_two_stick_capacity"}:
             base = (n / 2.0) * c2
             return base * eta

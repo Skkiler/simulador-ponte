@@ -1108,6 +1108,19 @@ class ConfigService:
         member_sizing_cfg.setdefault("section_efficiency_min_robustness_gain", 1.01)
         member_sizing_cfg.setdefault("section_efficiency_require_bracing_for_K", True)
 
+        # Mutação geométrica tardia do platô/largura: quando a carga é aplicada
+        # por uma placa/deck superior, a largura mínima regulamentar geralmente
+        # reduz massa de travessas e momento torsor do caso 60/40.  Esta etapa só
+        # é aplicada no funil tardio e é validada por todos os load cases.
+        member_sizing_cfg.setdefault("enable_plateau_width_efficiency_mutation", True)
+        member_sizing_cfg.setdefault("enable_late_section_efficiency_after_width", True)
+        member_sizing_cfg.setdefault("plateau_width_efficiency_candidates_mm", [100.0, 105.0, 110.0, 120.0, 130.0])
+        member_sizing_cfg.setdefault("plateau_width_efficiency_min_mass_saving_g", 8.0)
+        member_sizing_cfg.setdefault("plateau_width_efficiency_min_break_retention", 0.995)
+        member_sizing_cfg.setdefault("plateau_width_efficiency_min_fs_retention", 0.995)
+        member_sizing_cfg.setdefault("plateau_width_efficiency_min_width_mm", 100.0)
+        member_sizing_cfg.setdefault("plateau_width_efficiency_update_load_footprint", True)
+
         # Mutação de eficiência dos planos superior/inferior: busca retirar massa
         # de treliçamento não governante preservando os casos críticos.
         member_sizing_cfg.setdefault("enable_plane_bracing_efficiency_mutation", True)
@@ -1146,6 +1159,12 @@ class ConfigService:
         member_sizing_cfg.setdefault("final_strength_push_min_actual_break_gain_kgf", 0.0)
         member_sizing_cfg.setdefault("final_strength_push_min_fs_gain", 1.000)
         member_sizing_cfg.setdefault("final_strength_push_allow_if_below_target", True)
+        member_sizing_cfg.setdefault("final_strength_push_dynamic_recompute", True)
+        member_sizing_cfg.setdefault("final_strength_push_fast_strength_cases_only", True)
+        member_sizing_cfg.setdefault("final_strength_push_dynamic_max_orbits", 8)
+        member_sizing_cfg.setdefault("final_strength_push_dynamic_max_trials", 20)
+        member_sizing_cfg.setdefault("final_strength_push_min_accept_break_retention", 0.9995)
+        member_sizing_cfg.setdefault("final_strength_push_min_accept_fs_retention", 0.9980)
         member_sizing_cfg.setdefault("enable_support_pad_capacity_push", True)
         member_sizing_cfg.setdefault("support_pad_push_target_kgf", 120.0)
         member_sizing_cfg.setdefault("support_pad_push_max_group_sticks", 6)
@@ -1153,6 +1172,8 @@ class ConfigService:
         member_sizing_cfg.setdefault("support_pad_push_min_break_retention", 0.995)
         member_sizing_cfg.setdefault("support_pad_push_min_fs_retention", 0.995)
         member_sizing_cfg.setdefault("support_pad_push_proxy_mass_margin_g", 0.0)
+        member_sizing_cfg.setdefault("support_pad_push_require_gain_if_not_support_limited", True)
+        member_sizing_cfg.setdefault("support_pad_push_min_actual_break_gain_kgf", 0.10)
         # Passo final: quando o reforço estrutural passou um pouco da massa,
         # reduzir apenas órbitas simétricas com FS folgado para voltar ao limite.
         member_sizing_cfg.setdefault("enable_final_strength_push_after_support", True)

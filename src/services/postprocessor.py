@@ -50,7 +50,14 @@ class PostProcessor:
         stick_t = float(mat.get("stick_thickness_mm", 1.5))
         stick_area = max(1.0e-9, stick_w * stick_t)
         sigma_c_default = float(mat.get("compression_capacity_one_stick_N", 0.0)) / stick_area
-        sigma_c = max(1.0, float(mat.get("compression_strength_MPa", sigma_c_default)))
+        if str(mat.get("compression_capacity_model", "")).strip().lower() in {
+            "experimental_table_with_area_cap",
+            "table_anchor_area_cap",
+            "experimental_table_with_efficiency_and_area_cap",
+        }:
+            sigma_c = max(1.0, float(self.sections._effective_compression_stress_MPa(mat)))
+        else:
+            sigma_c = max(1.0, float(mat.get("compression_strength_MPa", sigma_c_default)))
         fb = max(1.0, float(mat.get("bending_strength_MPa", 55.0)))
 
         rows: List[Dict] = []
