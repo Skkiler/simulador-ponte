@@ -165,6 +165,33 @@ class ReportBundleService:
         return rows
 
     @staticmethod
+    def _load_contact_audit_rows(cfg: Dict[str, Any], optimization: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        s8_rows = list((optimization or {}).get("s8_final_validation", []) or [])
+        if s8_rows:
+            for c in (s8_rows[0].get("case_metrics") or []):
+                case = str(c.get("case") or "")
+                if case in {"center", "single_plate_center", "crown_contact", "torsion_60_40", "left_offset", "right_offset"}:
+                    rows.append(
+                        {
+                            "case": case,
+                            "predicted_breaking_load_kgf": c.get("predicted_breaking_load_proxy_kgf"),
+                            "min_fs_design": c.get("min_fs_design"),
+                            "max_displacement_mm": c.get("max_displacement_proxy_mm"),
+                            "load_path_score": c.get("load_path_score"),
+                            "interpretation": {
+                                "center": "modelo configurado de carga distribuída",
+                                "single_plate_center": "uma única placa/prato físico centrado no vão",
+                                "crown_contact": "peso solto sobre banzo arqueado; contato inicial no ponto mais alto",
+                                "torsion_60_40": "placa distribuída com assimetria lateral 60/40",
+                                "left_offset": "placa deslocada longitudinalmente para a esquerda",
+                                "right_offset": "placa deslocada longitudinalmente para a direita",
+                            }.get(case, "caso auxiliar"),
+                        }
+                    )
+        return rows
+
+    @staticmethod
     def _group_piece_plan(detailed: Dict[str, Any]) -> List[Dict[str, Any]]:
         rows = []
         grouped: Dict[tuple, Dict[str, Any]] = {}
@@ -394,6 +421,38 @@ Arquivo completo: `05_mapa_juntas_por_tipo.csv`.
         GeometryService.write_csv(out / "candidate_ranking.csv", self._candidate_ranking(optimization))
         GeometryService.write_csv(out / "donor_members.csv", donor_rows)
 
+        load_contact_rows = self._load_contact_audit_rows(cfg, optimization)
+        GeometryService.write_csv(out / "load_contact_assessment.csv", load_contact_rows)
+        bridge_cfg = cfg.get("bridge", {}) or {}
+        arch_warning = ""
+        if str(bridge_cfg.get("top_profile", "")).lower() in {"shallow_arch", "arco"}:
+            arch_warning = (
+                "\n> Atenção: banzo superior arqueado só é compatível com carga distribuída "
+                "se existir uma sela/plataforma rígida de madeira transferindo a carga "
+                "para vários nós. Sem essa sela, o caso `crown_contact` é mais representativo.\n"
+            )
+        load_contact_md_rows = "\n".join(
+            f"| {r.get('case')} | {safe_float(r.get('predicted_breaking_load_kgf'), None) if r.get('predicted_breaking_load_kgf') is not None else '—'} | {safe_float(r.get('min_fs_design'), None) if r.get('min_fs_design') is not None else '—'} | {r.get('interpretation')} |"
+            for r in load_contact_rows
+        ) or "| — | — | — | — |"
+        (out / "07_avaliacao_contato_carga.md").write_text(
+            f"""# Avaliação do contato da carga
+
+O modelo principal aceita carga distribuída por superfície, mas isso é uma hipótese construtiva: a ponte precisa ter uma região de apoio da carga que realmente transfira o peso para os nós previstos. Em banzo superior arqueado, uma anilha ou prato solto tende a encostar primeiro no ponto mais alto, concentrando força no montante/região central.
+{arch_warning}
+## Casos auditados
+| caso | ruptura estimada (kgf) | FS design | interpretação |
+| --- | ---: | ---: | --- |
+{load_contact_md_rows}
+
+## Requisito construtivo recomendado
+- Se mantiver banzo superior arqueado, fabricar uma sela/plataforma de carga com palitos e cola, alinhada, nivelada e travada lateralmente.
+- A sela deve encostar em pelo menos três estações longitudinais simétricas e nos dois planos laterais da ponte.
+- Se a carga real for aplicada por gancho/anilha pequena sem plataforma, usar `crown_contact` como caso governante, não o caso distribuído.
+""",
+            encoding="utf-8",
+        )
+
         mass_breakdown = [
             {"item": "installed_stick_mass_g", "value_g": summary.get("installed_stick_mass_g")},
             {"item": "wet_glue_mass_g", "value_g": summary.get("wet_glue_mass_g")},
@@ -605,14 +664,18 @@ Massa realocada após topologia:
 - Cola curada estimada: {summary.get('cured_glue_mass_g')}
 - Juntas abaixo do FS alvo: {summary.get('n_weak_glue_joints')}
 
-## 10. Hipóteses do modelo
+## 10. Contato real da carga
+- Ver `07_avaliacao_contato_carga.md` e `load_contact_assessment.csv`.
+- Se o topo for arqueado, a carga distribuída exige uma sela/plataforma de transferência. Sem ela, o contato físico tende a concentrar carga no ponto mais alto.
+
+## 11. Hipóteses do modelo
 - Ver `assumptions_and_warnings.md`.
 
-## 11. Links para gráficos
+## 12. Links para gráficos
 - `outputs/plots/`
 - `outputs/optimization/plot_geometry_refinement.png`
 
-## 12. Reprovação honesta
+## 13. Reprovação honesta
 {failures_md}
 
 Top 5 mudanças necessárias:

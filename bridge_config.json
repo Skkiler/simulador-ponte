@@ -46,7 +46,10 @@
     "load_distribution_model": "plate_surface_uniform",
     "load_footprint_length_mm": 400.0,
     "load_footprint_width_mm": 160.0,
-    "load_footprint_y_center_mm": 0.0
+    "load_footprint_y_center_mm": 0.0,
+    "load_footprint_interpretation": "centroid",
+    "load_footprint_center_x_mm": 600.0,
+    "load_crown_contact_z_tolerance_mm": 1.0
   },
   "material": {
     "name": "Palito de picolé equivalente",
@@ -254,10 +257,11 @@
       "spacing_z_mm": 10
     },
     "diagonal": {
-      "layout": "double_stack",
+      "layout": "box",
       "columns": 2,
-      "spacing_y_mm": 8,
-      "spacing_z_mm": 6
+      "spacing_y_mm": 10,
+      "spacing_z_mm": 10,
+      "stick_orientation": "edge"
     },
     "top_transverse": {
       "layout": "stacked",
@@ -291,7 +295,29 @@
     }
   },
   "multi_loadcase_screening": {
-    "include_longitudinal_offsets_as_strength_cases": false
+    "include_longitudinal_offsets_as_strength_cases": true,
+    "strength_governing_cases": [
+      "center",
+      "left_offset",
+      "right_offset",
+      "torsion_60_40",
+      "lateral_imperfection"
+    ],
+    "include_load_contact_audit_cases": true,
+    "load_cases": [
+      "center",
+      "left_offset",
+      "right_offset",
+      "torsion_60_40",
+      "lateral_imperfection",
+      "single_plate_center",
+      "crown_contact",
+      "self_weight"
+    ],
+    "robustness_cases": [
+      "single_plate_center",
+      "crown_contact"
+    ]
   },
   "member_sizing": {
     "support_pad_push_max_proxy_mass_ratio": 1.0,
@@ -330,8 +356,8 @@
     ],
     "enable_final_strength_reserve_push": true,
     "final_strength_push_fs_threshold": 1.5,
-    "final_strength_push_max_orbits": 12,
-    "final_strength_push_max_trials": 40,
+    "final_strength_push_max_orbits": 16,
+    "final_strength_push_max_trials": 64,
     "final_strength_push_max_increment_per_orbit": 1,
     "final_strength_push_max_proxy_mass_ratio": 1.0,
     "final_strength_push_min_abs_force_N": 30.0,
@@ -345,6 +371,37 @@
     "final_mass_trim_only_after_strength_target": true,
     "final_mass_trim_strength_target_ratio": 0.995,
     "final_strength_push_min_actual_break_gain_kgf": 0.0,
-    "plane_bracing_efficiency_allow_strength_loss_below_target": false
+    "plane_bracing_efficiency_allow_strength_loss_below_target": false,
+    "late_stage_detailed_mass_reserve_g": 3.0,
+    "late_stage_detailed_mass_max_proxy_overrun_g": 8.0,
+    "final_strength_push_repeat_passes": 4,
+    "support_pad_push_before_generic_strength_push": true,
+    "section_efficiency_groups": [
+      "top_chord",
+      "vertical",
+      "diagonal"
+    ],
+    "section_efficiency_vertical_spacing_candidates_mm": [
+      16.0,
+      22.0,
+      30.0
+    ],
+    "section_efficiency_diagonal_spacing_candidates_mm": [
+      10.0
+    ],
+    "section_efficiency_min_robustness_gain": 1.01,
+    "enable_bottom_chord_tension_donor_trim": true,
+    "bottom_chord_tension_donor_min_sticks": 1,
+    "bottom_chord_tension_donor_min_fs_after": 2.0,
+    "bottom_chord_tension_donor_min_mass_saving_g": 12.0,
+    "bottom_chord_tension_donor_max_compression_N": 8.0,
+    "bottom_chord_tension_donor_min_break_retention": 0.995,
+    "bottom_chord_tension_donor_min_fs_retention": 0.985
+  },
+  "planner_pipeline": {
+    "fast_screening_keep_top_k": 8,
+    "multi_loadcase_keep_top_k": 5,
+    "geometry_refinement_keep_top_k": 3,
+    "allow_top2_full_detailing": true
   }
 }

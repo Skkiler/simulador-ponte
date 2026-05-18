@@ -89,6 +89,51 @@ class LoadDistributionService:
         return {min(xs, key=lambda xv: abs(xv - x)): 1.0}
 
     @classmethod
+    def footprint_centers(cls, cfg: Dict[str, Any], x_targets: Iterable[float] | None = None) -> List[float]:
+        """Return physical load patch centers for plate-like loading.
+
+        `load_distribution_x_mm` was historically used both as a list of loaded
+        stations and as the center(s) of a finite footprint.  Those are different
+        assumptions.  For a real plate/platen, the safest default is one physical
+        footprint centered at `load_footprint_center_x_mm` or, when omitted, at the
+        centroid of the configured target list.  The previous multi-patch behavior
+        remains available with `load_footprint_interpretation = "multi_patch"`.
+        """
+        bridge = cfg.get("bridge", {}) or {}
+        span = float(bridge.get("span_mm", 1200.0))
+        targets = list(x_targets or cls.configured_targets(cfg))
+        targets = [cls._clamp(float(v), 0.0, span) for v in targets]
+        if not targets:
+            targets = [0.5 * span]
+
+        center_raw = bridge.get("load_footprint_center_x_mm")
+        if center_raw is not None:
+            try:
+                return [cls._clamp(float(center_raw), 0.0, span)]
+            except (TypeError, ValueError):
+                pass
+
+        interpretation = str(bridge.get("load_footprint_interpretation", "multi_patch")).strip().lower()
+        if interpretation in {"centroid", "single", "single_patch", "one_patch", "physical_plate"}:
+            return [cls._clamp(sum(targets) / max(1, len(targets)), 0.0, span)]
+        return sorted(set(round(v, 6) for v in targets))
+
+    @classmethod
+    def footprint_bounds(cls, cfg: Dict[str, Any], x_targets: Iterable[float] | None = None) -> tuple[float, float]:
+        bridge = cfg.get("bridge", {}) or {}
+        span = float(bridge.get("span_mm", 1200.0))
+        length = max(0.0, float(bridge.get("load_footprint_length_mm", 0.0) or 0.0))
+        centers = cls.footprint_centers(cfg, x_targets=x_targets)
+        if not centers:
+            centers = [0.5 * span]
+        lo = min(cls._clamp(c - 0.5 * length, 0.0, span) for c in centers)
+        hi = max(cls._clamp(c + 0.5 * length, 0.0, span) for c in centers)
+        if hi <= lo + 1.0e-9:
+            c = cls._clamp(sum(centers) / len(centers), 0.0, span)
+            return c, c
+        return lo, hi
+
+    @classmethod
     def station_weights(
         cls,
         cfg: Dict[str, Any],
@@ -112,6 +157,7 @@ class LoadDistributionService:
                     weights[station] += w
         else:
             intervals = cls._station_influence_intervals(xs, span)
+            targets = cls.footprint_centers(cfg, x_targets=targets)
             for target in targets:
                 center = cls._clamp(float(target), 0.0, span)
                 lo = cls._clamp(center - 0.5 * footprint, 0.0, span)
@@ -183,6 +229,89 @@ class LoadDistributionService:
         if total <= 1.0e-12:
             return {}
         return {int(k): float(v) / total for k, v in raw_node_weights.items() if v > 1.0e-12}
+
+    @classmethod
+    def crown_contact_weights(
+        cls,
+        cfg: Dict[str, Any],
+        nodes: List[Any],
+        *,
+        x_targets: Iterable[float] | None = None,
+        side_bias: Dict[str, float] | None = None,
+    ) -> Dict[int, float]:
+        """Conservative contact model for loose weights on an arched top chord.
+
+        A uniform plate model assumes a load spreader or deck actually transfers
+        force to every tributary station under the footprint.  If the top chord is
+        arched and the weight/plate is simply placed on it, the first contact may
+        occur only at the crown.  This method loads the highest top nodes inside
+        the footprint, preserving total load and optional left/right torsion bias.
+        """
+        bridge = cfg.get("bridge", {}) or {}
+        span = float(bridge.get("span_mm", 1200.0))
+        level = cls.load_level(cfg)
+        lo, hi = cls.footprint_bounds(cfg, x_targets=x_targets)
+        if hi <= lo + 1.0e-9:
+            c = cls._clamp(0.5 * (lo + hi), 0.0, span)
+            lo = hi = c
+
+        candidates = [
+            n for n in nodes
+            if getattr(n, "level", "") == level
+            and lo - 1.0e-6 <= float(getattr(n, "x", 0.0)) <= hi + 1.0e-6
+        ]
+        if not candidates:
+            candidates = [
+                n for n in nodes
+                if getattr(n, "level", "") == level
+                and -1.0e-6 <= float(getattr(n, "x", 0.0)) <= span + 1.0e-6
+            ]
+        if not candidates:
+            return {}
+
+        max_z = max(float(getattr(n, "z", 0.0)) for n in candidates)
+        z_tol = max(0.5, float(bridge.get("load_crown_contact_z_tolerance_mm", 1.0) or 1.0))
+        contact_nodes = [n for n in candidates if max_z - float(getattr(n, "z", 0.0)) <= z_tol]
+        if not contact_nodes:
+            contact_nodes = [max(candidates, key=lambda n: float(getattr(n, "z", 0.0)))]
+
+        side_factors = [max(0.0, cls._side_factor(float(getattr(n, "y", 0.0)), side_bias)) for n in contact_nodes]
+        total = sum(side_factors)
+        if total <= 1.0e-12:
+            side_factors = [1.0 for _ in contact_nodes]
+            total = float(len(contact_nodes))
+        return {int(n.id): float(sf) / total for n, sf in zip(contact_nodes, side_factors)}
+
+    @classmethod
+    def build_crown_contact_loads(
+        cls,
+        cfg: Dict[str, Any],
+        nodes: List[Any],
+        *,
+        loadcase: str,
+        total_N: float,
+        x_targets: Iterable[float] | None = None,
+        side_bias: Dict[str, float] | None = None,
+        lateral_factor: float = 0.0,
+    ) -> List[Load]:
+        weights = cls.crown_contact_weights(cfg, nodes, x_targets=x_targets, side_bias=side_bias)
+        if not weights:
+            return []
+        node_by_id = {int(n.id): n for n in nodes}
+        loads: List[Load] = []
+        for nid, w in weights.items():
+            n = node_by_id.get(int(nid))
+            lateral_sign = -1.0 if n is not None and float(getattr(n, "y", 0.0)) < 0.0 else 1.0
+            loads.append(
+                Load(
+                    str(loadcase),
+                    int(nid),
+                    0.0,
+                    lateral_sign * float(lateral_factor) * abs(float(total_N)) * float(w),
+                    -abs(float(total_N)) * float(w),
+                )
+            )
+        return loads
 
     @classmethod
     def build_nodal_loads(

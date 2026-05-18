@@ -1074,15 +1074,38 @@ class ConfigService:
         # Mutação de eficiência de seção: melhora a inércia de banzos/montantes
         # sem adicionar palitos. Útil quando a falha é beam_column/buckling.
         member_sizing_cfg.setdefault("enable_section_efficiency_mutation", True)
-        member_sizing_cfg.setdefault("section_efficiency_groups", ["top_chord", "vertical"])
-        member_sizing_cfg.setdefault("section_efficiency_top_chord_spacing_candidates_mm", [16.0, 18.0, 20.0, 22.0])
-        member_sizing_cfg.setdefault("section_efficiency_vertical_spacing_candidates_mm", [11.0, 12.0, 13.0, 14.0])
+        def _merge_numeric_list(key: str, defaults: list[float]) -> None:
+            raw = member_sizing_cfg.get(key)
+            vals: list[float] = []
+            if isinstance(raw, list):
+                for item in raw:
+                    try:
+                        vals.append(float(item))
+                    except (TypeError, ValueError):
+                        continue
+            for item in defaults:
+                if all(abs(float(item) - v) > 1.0e-9 for v in vals):
+                    vals.append(float(item))
+            member_sizing_cfg[key] = sorted(vals)
+
+        default_section_groups = ["top_chord", "vertical", "diagonal"]
+        raw_section_groups = member_sizing_cfg.get("section_efficiency_groups")
+        if not isinstance(raw_section_groups, list) or not raw_section_groups:
+            raw_section_groups = list(default_section_groups)
+        for group in default_section_groups:
+            if group not in raw_section_groups:
+                raw_section_groups.append(group)
+        member_sizing_cfg["section_efficiency_groups"] = [str(g) for g in raw_section_groups]
+        _merge_numeric_list("section_efficiency_top_chord_spacing_candidates_mm", [22.0, 28.0])
+        _merge_numeric_list("section_efficiency_vertical_spacing_candidates_mm", [16.0, 22.0, 30.0])
         member_sizing_cfg.setdefault("section_efficiency_top_chord_K_candidates", [0.62, 0.58])
         member_sizing_cfg.setdefault("section_efficiency_vertical_K_candidates", [0.76, 0.72])
+        _merge_numeric_list("section_efficiency_diagonal_spacing_candidates_mm", [10.0])
         member_sizing_cfg.setdefault("section_efficiency_diagonal_K_candidates", [0.82])
         member_sizing_cfg.setdefault("section_efficiency_max_proxy_mass_ratio", 0.985)
         member_sizing_cfg.setdefault("section_efficiency_min_break_gain", 1.001)
         member_sizing_cfg.setdefault("section_efficiency_min_fs_gain", 1.001)
+        member_sizing_cfg.setdefault("section_efficiency_min_robustness_gain", 1.01)
         member_sizing_cfg.setdefault("section_efficiency_require_bracing_for_K", True)
 
         # Mutação de eficiência dos planos superior/inferior: busca retirar massa
