@@ -83,3 +83,22 @@ def test_legacy_corner_cycle_is_explicit_and_eccentric() -> None:
 
     assert abs(sec["centroid_y_mm"]) > 1.0
     assert abs(sec["centroid_z_mm"]) > 1.0
+
+
+def test_unmodeled_laced_box_is_demoted_to_contact_box() -> None:
+    sec = SectionService.composite_section(
+        4,
+        MAT,
+        {
+            "layout": "box",
+            "stick_orientation": "edge",
+            "spacing_y_mm": 28.0,
+            "spacing_z_mm": 28.0,
+            "box_extra_stick_strategy": "laced_box",
+        },
+    )
+
+    assert sec["layout"] == "contact_box"
+    assert sec["section_connection_model"] == "four_side_contact_box_with_face_side_glue"
+    assert max(abs(y) for y, _ in sec["stick_positions_yz"]) < 7.0
+    assert max(abs(z) for _, z in sec["stick_positions_yz"]) < 7.0

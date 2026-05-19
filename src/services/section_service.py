@@ -46,6 +46,14 @@ class SectionService:
             return {"y": y, "z": z, "ydim": b, "zdim": t, "orientation": "flat"}
 
         mode = str(strategy or "balanced").strip().lower()
+        # Seções espaçadas/laced só são permitidas quando os elementos que fazem
+        # a ligação transversal também são modelados como palitos reais.  Como o
+        # projeto usa apenas palitos longitudinais da própria seção e cola, sem
+        # talas/lacing adicionais contabilizados, ``laced_box`` e ``spaced_box``
+        # são rebaixados para a caixa de contato buildable.  Isso evita conceder
+        # inércia de uma seção built-up sem pagar massa/conectividade por ela.
+        if mode in {"spaced", "spaced_box", "laced", "laced_box"}:
+            mode = "balanced"
         if mode in {"corner_cycle", "legacy", "legacy_corner_cycle"}:
             # Modo legado explícito para reproduzir estudos antigos: percorre os
             # cantos e pode gerar centroide excêntrico quando n é ímpar.
@@ -58,31 +66,6 @@ class SectionService:
                 (sy / 2.0, sz / 2.0),
             ]
             return [rec(corners[k % 4][0], corners[k % 4][1], "edge") for k in range(n)]
-
-        if mode in {"spaced", "spaced_box", "laced", "laced_box"} and n >= 4:
-            # Espaçado só é aceito para 4+ palitos, e deve ser interpretado como
-            # seção built-up com battens/lacing/talas.  O espaçamento vem do
-            # layout porque é parte da geometria resistente; não pode ser inferido
-            # silenciosamente.  Para n=2/3 caímos nas laminações compactas abaixo.
-            sy = max(float(spacing_y_mm if spacing_y_mm is not None else 2.0 * b), b + t)
-            sz = max(float(spacing_z_mm if spacing_z_mm is not None else 2.0 * b), b + t)
-            corners = [
-                (-sy / 2.0, -sz / 2.0),
-                (sy / 2.0, -sz / 2.0),
-                (-sy / 2.0, sz / 2.0),
-                (sy / 2.0, sz / 2.0),
-            ]
-            sticks = [rec(corners[k % 4][0], corners[k % 4][1], "edge") for k in range(4)]
-            extras = n - 4
-            # Extras balanceados: centro ou pares simétricos.
-            for k in range(extras):
-                if extras % 2 == 1 and k == 0:
-                    sticks.append(rec(0.0, 0.0, "edge"))
-                else:
-                    pair = [(-sy / 2.0, 0.0), (sy / 2.0, 0.0), (0.0, -sz / 2.0), (0.0, sz / 2.0)]
-                    y, z = pair[k % len(pair)]
-                    sticks.append(rec(y, z, "edge"))
-            return sticks
 
         if n == 1:
             return [rec(0.0, 0.0, "flat")]
@@ -302,11 +285,11 @@ class SectionService:
         zdims = [float(v.get("zdim", stick_z_mm)) for v in stick_defs]
         effective_layout = layout
         box_strategy = str(layout_cfg.get("box_extra_stick_strategy", "balanced")).strip().lower()
-        spaced_strategies = {"corner_cycle", "legacy", "legacy_corner_cycle", "spaced", "spaced_box", "laced", "laced_box"}
+        legacy_spaced_strategies = {"corner_cycle", "legacy", "legacy_corner_cycle"}
         if layout == "box" and n < 4:
             effective_layout = "tee3" if n == 3 else ("laminated2" if n == 2 else "single")
-        elif layout == "box" and box_strategy in spaced_strategies:
-            effective_layout = "laced_box"
+        elif layout == "box" and box_strategy in legacy_spaced_strategies:
+            effective_layout = "legacy_spaced_box"
         elif layout == "box":
             effective_layout = "contact_box"
         section_connection_model = {
@@ -314,7 +297,7 @@ class SectionService:
             "laminated2": "face_to_face_lamination",
             "tee3": "mixed_T_contact_lamination",
             "contact_box": "four_side_contact_box_with_face_side_glue",
-            "laced_box": "spaced_built_up_box_requires_battens_lacing",
+            "legacy_spaced_box": "legacy_spaced_box_not_recommended",
         }.get(effective_layout, effective_layout)
 
         return {
@@ -337,6 +320,8 @@ class SectionService:
             "stick_width_y_mm_by_lane": ydims,
             "stick_height_z_mm_by_lane": zdims,
             "stick_positions_yz": positions,
+            "requested_box_extra_stick_strategy": box_strategy if layout == "box" else "",
+            "laced_box_demoted_to_contact": bool(layout == "box" and box_strategy in {"spaced", "spaced_box", "laced", "laced_box"} and effective_layout == "contact_box"),
             "buckling_I_critical_mm4": min(Iy, Iz),
             "Iy_perfect": Iy_perfect,
             "Iz_perfect": Iz_perfect,

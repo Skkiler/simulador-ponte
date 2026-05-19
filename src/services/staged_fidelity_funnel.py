@@ -3788,6 +3788,408 @@ class StagedFidelityFunnelPlanner:
 
         return {"best_cfg": best_cfg, "summary": best_summary, "trace_rows": trace_rows}
 
+    def _late_cross_group_strength_swap(
+        self,
+        cfg: Dict[str, Any],
+        load_cases: List[str],
+        *,
+        stage_name: str,
+        tension_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Reinveste massa de membros superseguros em gargalos reais.
+
+        O empurrão final tradicional só adiciona palitos enquanto houver massa.
+        No v51, o melhor candidato ficou no limite de 1 kg; os gargalos eram
+        montantes e banzos comprimidos, mas ainda havia palitos em banzos
+        inferiores/sapatas/peças de baixo esforço com FS enorme.  Este passo é
+        uma troca explícita: adiciona uma órbita crítica, retira tantas órbitas
+        doadoras quantas forem necessárias para manter a massa, e só aceita se a
+        ruptura multi-loadcase melhorar.  É deliberadamente tardio para não
+        mascarar problemas de geometria nas etapas anteriores.
+        """
+        settings = cfg.get("member_sizing", {}) or {}
+        if not bool(settings.get("enable_late_cross_group_strength_swap", True)):
+            summary = self._multi_case_summary(cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+            return {"best_cfg": cfg, "summary": summary, "trace_rows": []}
+
+        best_cfg = self.planner.config.normalize(cfg)
+        best_summary = self._multi_case_summary(best_cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+        if not self._summary_valid_flag(best_summary):
+            return {"best_cfg": best_cfg, "summary": best_summary, "trace_rows": []}
+
+        material = best_cfg.get("material", {}) or {}
+        analysis = best_cfg.get("analysis", {}) or {}
+        ms = best_cfg.get("member_sizing", {}) or {}
+        ml_cfg = best_cfg.get("multi_loadcase_screening", {}) or {}
+        stick_mass_g = float(material.get("stick_mass_g", 1.4))
+        stick_len_mm = max(1.0, float(material.get("stick_length_mm", 120.0)))
+        mass_limit = float(effective_mass_limit_g(best_cfg))
+        max_mass_ratio = float(ms.get("late_cross_swap_max_proxy_mass_ratio", 1.0))
+        max_proxy_mass = mass_limit * max_mass_ratio
+        max_overrun_g = float(ms.get("late_cross_swap_proxy_mass_margin_g", 0.0))
+        max_iterations = max(0, int(ms.get("late_cross_swap_max_iterations", 6)))
+        max_critical_trials = max(1, int(ms.get("late_cross_swap_max_critical_trials", 8)))
+        max_donor_orbits = max(1, int(ms.get("late_cross_swap_max_donor_orbits", 16)))
+        min_break_gain = float(ms.get("late_cross_swap_min_break_gain_kgf", 0.20))
+        min_fs_retention = float(ms.get("late_cross_swap_min_fs_retention", 0.985))
+        min_abs_force = float(ms.get("late_cross_swap_min_abs_force_N", 25.0))
+        critical_threshold = float(ms.get("late_cross_swap_critical_fs_threshold", analysis.get("target_min_fs", 1.5)))
+        donor_threshold = float(ms.get("late_cross_swap_donor_fs_threshold", 8.0))
+        min_by_group = (analysis.get("planner_min_sticks_per_group_by_group") or {})
+        default_min = int(analysis.get("planner_min_sticks_per_group", 1))
+        max_by_group = (analysis.get("planner_max_sticks_per_group_by_group") or {})
+        default_max = int(analysis.get("planner_max_sticks_per_group", 12))
+        critical_groups = set(ms.get("late_cross_swap_critical_groups") or ["top_chord", "vertical", "diagonal"])
+        donor_groups = set(ms.get("late_cross_swap_donor_groups") or ["bottom_chord", "support_pad", "top_chord", "vertical", "diagonal"])
+        case_names = [
+            str(v)
+            for v in (
+                ms.get("late_cross_swap_cases")
+                or ml_cfg.get("strength_governing_cases")
+                or ["center", "torsion_60_40", "torsion_70_30", "torsion_80_20", "lateral_imperfection"]
+            )
+        ]
+
+        def min_for_group(group: str) -> int:
+            raw = safe_float(min_by_group.get(group), None)
+            return int(raw) if raw is not None else default_min
+
+        def max_for_group(group: str) -> int:
+            raw = safe_float(max_by_group.get(group), None)
+            return int(raw) if raw is not None else default_max
+
+        def orbit_mass_delta(members_by_id: Dict[int, Any], orbit: Tuple[int, ...], delta_n: int) -> float:
+            total_len = sum(float(getattr(members_by_id[int(mid)], "L", 0.0) or 0.0) for mid in orbit if int(mid) in members_by_id)
+            return total_len / stick_len_mm * stick_mass_g * float(delta_n)
+
+        trace_rows: List[Dict[str, Any]] = []
+        best_break = safe_float(best_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        best_fs = safe_float(best_summary.get("min_fs_design_proxy"), 0.0) or 0.0
+        best_mass = safe_float(best_summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+
+        for iteration in range(1, max_iterations + 1):
+            cases = [self._evaluate_case_cached(best_cfg, c, stage_name=stage_name, tension_only=tension_only) for c in case_names]
+            cases = [c for c in cases if self._is_selectable_case(c)]
+            if not cases:
+                break
+            ref = cases[0]
+            nodes = ref.get("nodes") or []
+            members = ref.get("members") or []
+            members_by_id = {int(getattr(m, "id")): m for m in members}
+            try:
+                partners = self.planner.map_member_to_symmetry_partners(best_cfg, nodes, members)
+            except Exception:
+                partners = {}
+
+            worst: Dict[int, Dict[str, Any]] = {}
+            for case in cases:
+                cname = str(case.get("case", "unknown"))
+                result_by_id = {
+                    int(r.get("member_id")): r
+                    for r in (case.get("member_results") or [])
+                    if r.get("member_id") is not None
+                }
+                for chk in case.get("member_checks") or []:
+                    mid_raw = chk.get("member_id")
+                    if mid_raw is None:
+                        continue
+                    mid = int(mid_raw)
+                    fs = safe_float(chk.get("FS_design"), safe_float(chk.get("FS_min"), None))
+                    if fs is None:
+                        continue
+                    m = members_by_id.get(mid)
+                    if m is None:
+                        continue
+                    nres = result_by_id.get(mid, {})
+                    N = safe_float(nres.get("N_N"), chk.get("N_N")) or 0.0
+                    cur = worst.get(mid)
+                    if cur is None or float(fs) < float(cur.get("fs", 1.0e99)):
+                        worst[mid] = {"fs": float(fs), "case": cname, "N_N": float(N), "group": str(getattr(m, "group", ""))}
+
+            orbits: Dict[Tuple[int, ...], Dict[str, Any]] = {}
+            for mid, meta in worst.items():
+                orbit = tuple(sorted(set([mid] + [int(v) for v in partners.get(mid, []) if int(v) in members_by_id])))
+                if orbit in orbits:
+                    continue
+                groups = [str(getattr(members_by_id[i], "group", "")) for i in orbit if i in members_by_id]
+                group = groups[0] if groups else str(meta.get("group", ""))
+                fs_vals = [worst.get(i, {}).get("fs") for i in orbit if worst.get(i, {}).get("fs") is not None]
+                N_vals = [abs(float(worst.get(i, {}).get("N_N", 0.0))) for i in orbit]
+                n_vals = [int(getattr(members_by_id[i], "n_sticks", 1)) for i in orbit if i in members_by_id]
+                if not fs_vals or not n_vals:
+                    continue
+                orbits[orbit] = {
+                    "orbit": orbit,
+                    "group": group,
+                    "fs_min": min(float(v) for v in fs_vals),
+                    "N_abs_max": max(N_vals) if N_vals else 0.0,
+                    "n_min": min(n_vals),
+                    "n_max": max(n_vals),
+                    "length_total": sum(float(getattr(members_by_id[i], "L", 0.0) or 0.0) for i in orbit if i in members_by_id),
+                    "case": next((worst.get(i, {}).get("case") for i in orbit if i in worst), "unknown"),
+                }
+
+            critical = [
+                o for o in orbits.values()
+                if str(o["group"]) in critical_groups
+                and float(o["fs_min"]) < critical_threshold
+                and float(o["N_abs_max"]) >= min_abs_force
+                and int(o["n_max"]) < max_for_group(str(o["group"]))
+            ]
+            donors = [
+                o for o in orbits.values()
+                if str(o["group"]) in donor_groups
+                and float(o["fs_min"]) > donor_threshold
+                and int(o["n_min"]) > min_for_group(str(o["group"]))
+            ]
+            critical.sort(key=lambda o: (float(o["fs_min"]), -float(o["N_abs_max"])))
+            donors.sort(key=lambda o: (-float(o["fs_min"]), float(o["N_abs_max"]), -float(o["length_total"])))
+            if not critical or not donors:
+                break
+
+            accepted = False
+            for crit in critical[:max_critical_trials]:
+                c_orbit = tuple(crit["orbit"])
+                trial = copy.deepcopy(best_cfg)
+                by_id = trial.setdefault("member_sticks_by_id", {})
+                for mid in c_orbit:
+                    by_id[str(mid)] = int(by_id.get(str(mid), getattr(members_by_id[mid], "n_sticks", 1))) + 1
+                est_mass = best_mass + orbit_mass_delta(members_by_id, c_orbit, +1)
+                used_donors: List[Dict[str, Any]] = []
+                donor_ids_used: set[int] = set(c_orbit)
+                for donor in donors[:max_donor_orbits]:
+                    d_orbit = tuple(donor["orbit"])
+                    if any(int(mid) in donor_ids_used for mid in d_orbit):
+                        continue
+                    # Do not pull material from a same-group orbit that is only marginally safe.
+                    if donor["group"] == crit["group"] and float(donor["fs_min"]) < donor_threshold * 1.5:
+                        continue
+                    for mid in d_orbit:
+                        old_n = int(by_id.get(str(mid), getattr(members_by_id[mid], "n_sticks", 1)))
+                        if old_n <= min_for_group(str(donor["group"])):
+                            continue
+                        by_id[str(mid)] = old_n - 1
+                    est_mass -= orbit_mass_delta(members_by_id, d_orbit, +1)
+                    donor_ids_used.update(int(mid) for mid in d_orbit)
+                    used_donors.append(donor)
+                    if est_mass <= max_proxy_mass + max_overrun_g:
+                        break
+                if est_mass > max_proxy_mass + max_overrun_g:
+                    continue
+                trial = self.planner.config.normalize(trial)
+                summary = self._multi_case_summary(trial, load_cases, stage_name=stage_name, tension_only=tension_only)
+                if not self._summary_valid_flag(summary):
+                    continue
+                nb = safe_float(summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+                nf = safe_float(summary.get("min_fs_design_proxy"), 0.0) or 0.0
+                nm = safe_float(summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+                if nm > max_proxy_mass + max_overrun_g:
+                    continue
+                if nb < best_break + min_break_gain and nf < best_fs * 1.01:
+                    continue
+                if nf < best_fs * min_fs_retention:
+                    continue
+                trace_rows.append(
+                    {
+                        "iteration": iteration,
+                        "critical_orbit": ";".join(str(i) for i in c_orbit),
+                        "critical_group": crit["group"],
+                        "critical_fs_before": crit["fs_min"],
+                        "critical_case_before": crit["case"],
+                        "donor_orbits": "|".join(";".join(str(i) for i in d["orbit"]) for d in used_donors),
+                        "donor_groups": "|".join(str(d["group"]) for d in used_donors),
+                        "donor_fs_min": min((float(d["fs_min"]) for d in used_donors), default=None),
+                        "old_break_proxy_kgf": best_break,
+                        "new_break_proxy_kgf": nb,
+                        "old_min_fs_design_proxy": best_fs,
+                        "new_min_fs_design_proxy": nf,
+                        "old_mass_proxy_g": best_mass,
+                        "new_mass_proxy_g": nm,
+                        "reason": "late_cross_group_strength_swap",
+                    }
+                )
+                best_cfg = trial
+                best_summary = summary
+                best_break = nb
+                best_fs = nf
+                best_mass = nm
+                accepted = True
+                break
+            if not accepted:
+                break
+
+        return {"best_cfg": best_cfg, "summary": best_summary, "trace_rows": trace_rows}
+
+
+    def _late_nominal_strength_topoff(
+        self,
+        cfg: Dict[str, Any],
+        load_cases: List[str],
+        *,
+        stage_name: str,
+        tension_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Use a pequena sobra de massa para atingir ruptura nominal.
+
+        O ``late_cross_group_strength_swap`` é ótimo para redistribuir massa e
+        corrigir o multi-loadcase, mas no v52 ele terminou conservador demais:
+        deixou cerca de 70 g reais de margem e o caso nominal ficou em 107 kgf.
+        Este passo é deliberadamente simples: depois que o projeto já está
+        abaixo do limite de massa, reforça apenas órbitas primárias que governam
+        o caso nominal configurado (por padrão, ``center``), sem retirar massa de
+        outros membros.  A aceitação ainda reavalia o envelope multi-loadcase para
+        impedir que a melhoria nominal piore o resultado global de forma oculta.
+        """
+        settings = cfg.get("member_sizing", {}) or {}
+        if not bool(settings.get("enable_late_nominal_strength_topoff", True)):
+            summary = self._multi_case_summary(cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+            return {"best_cfg": cfg, "summary": summary, "trace_rows": []}
+
+        best_cfg = self.planner.config.normalize(cfg)
+        best_summary = self._multi_case_summary(best_cfg, load_cases, stage_name=stage_name, tension_only=tension_only)
+        if not self._summary_valid_flag(best_summary):
+            return {"best_cfg": best_cfg, "summary": best_summary, "trace_rows": []}
+
+        ms = best_cfg.get("member_sizing", {}) or {}
+        analysis = best_cfg.get("analysis", {}) or {}
+        material = best_cfg.get("material", {}) or {}
+        target_kgf = float(ms.get("late_nominal_topoff_target_kgf", analysis.get("acceptance_min_design_breaking_load_kgf", 120.0)))
+        target_case = str(ms.get("late_nominal_topoff_case", "center"))
+        groups = set(str(g) for g in (ms.get("late_nominal_topoff_groups") or ["top_chord", "vertical"]))
+        max_iterations = max(0, int(ms.get("late_nominal_topoff_max_iterations", 8)))
+        min_abs_force = float(ms.get("late_nominal_topoff_min_abs_force_N", 40.0))
+        min_nominal_gain = float(ms.get("late_nominal_topoff_min_nominal_gain_kgf", 0.20))
+        min_multi_retention = float(ms.get("late_nominal_topoff_min_multi_retention", 0.995))
+        max_mass = float(effective_mass_limit_g(best_cfg)) * float(ms.get("late_nominal_topoff_max_proxy_mass_ratio", 0.965))
+        max_mass += float(ms.get("late_nominal_topoff_proxy_mass_margin_g", 0.0))
+        max_default = int(analysis.get("planner_max_sticks_per_group", 12))
+        max_by_group = analysis.get("planner_max_sticks_per_group_by_group", {}) or {}
+
+        def max_for_group(group: str) -> int:
+            raw = safe_float(max_by_group.get(group), None)
+            return int(raw) if raw is not None else max_default
+
+        best_multi_break = safe_float(best_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        best_multi_fs = safe_float(best_summary.get("min_fs_design_proxy"), 0.0) or 0.0
+        best_mass = safe_float(best_summary.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+        nominal_summary = self._multi_case_summary(best_cfg, [target_case], stage_name=stage_name, tension_only=tension_only)
+        best_nominal_break = safe_float(nominal_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        best_nominal_fs = safe_float(nominal_summary.get("min_fs_design_proxy"), 0.0) or 0.0
+        trace_rows: List[Dict[str, Any]] = []
+
+        for iteration in range(1, max_iterations + 1):
+            if best_nominal_break >= target_kgf or best_mass >= max_mass:
+                break
+            case = self._evaluate_case_cached(best_cfg, target_case, stage_name=stage_name, tension_only=tension_only)
+            if not self._is_selectable_case(case):
+                break
+            nodes = case.get("nodes") or []
+            members = case.get("members") or []
+            members_by_id = {int(getattr(m, "id")): m for m in members}
+            result_by_id = {
+                int(r.get("member_id")): r
+                for r in (case.get("member_results") or [])
+                if r.get("member_id") is not None
+            }
+            try:
+                partners = self.planner.map_member_to_symmetry_partners(best_cfg, nodes, members)
+            except Exception:
+                partners = {}
+
+            candidates: List[Dict[str, Any]] = []
+            seen: set[Tuple[int, ...]] = set()
+            for chk in case.get("member_checks") or []:
+                mid_raw = chk.get("member_id")
+                if mid_raw is None:
+                    continue
+                mid = int(mid_raw)
+                m = members_by_id.get(mid)
+                if m is None:
+                    continue
+                group = str(getattr(m, "group", chk.get("group", "")))
+                if group not in groups or chk.get("design_relevant") is False:
+                    continue
+                fs = safe_float(chk.get("FS_design"), safe_float(chk.get("FS_min"), None))
+                if fs is None:
+                    continue
+                N = safe_float((result_by_id.get(mid, {}) or {}).get("N_N"), chk.get("N_N")) or 0.0
+                if abs(float(N)) < min_abs_force:
+                    continue
+                orbit = tuple(sorted(set([mid] + [int(v) for v in partners.get(mid, []) if int(v) in members_by_id])))
+                if orbit in seen:
+                    continue
+                seen.add(orbit)
+                n_vals = [int(getattr(members_by_id[i], "n_sticks", 1)) for i in orbit if i in members_by_id]
+                if not n_vals or max(n_vals) >= max_for_group(group):
+                    continue
+                length_total = sum(float(getattr(members_by_id[i], "L", 0.0) or 0.0) for i in orbit if i in members_by_id)
+                mass_delta = length_total / max(1.0, float(material.get("stick_length_mm", 120.0))) * float(material.get("stick_mass_g", 1.4))
+                score = (target_kgf - best_nominal_break + 1.0) * max(0.01, float(fs) ** -2.0) * max(1.0, abs(float(N)) / 100.0) / max(0.5, mass_delta)
+                candidates.append({"orbit": orbit, "group": group, "fs": float(fs), "N_N": float(N), "mass_delta_g": mass_delta, "score": score})
+            candidates.sort(key=lambda r: float(r.get("score", 0.0)), reverse=True)
+            if not candidates:
+                break
+
+            accepted = False
+            for cand in candidates[: max(1, int(ms.get("late_nominal_topoff_max_trials", 12)))]:
+                trial = copy.deepcopy(best_cfg)
+                by_id = trial.setdefault("member_sticks_by_id", {})
+                old_ns: List[int] = []
+                new_ns: List[int] = []
+                for mid in cand["orbit"]:
+                    old_n = int(by_id.get(str(mid), getattr(members_by_id[int(mid)], "n_sticks", 1)))
+                    by_id[str(mid)] = old_n + 1
+                    old_ns.append(old_n)
+                    new_ns.append(old_n + 1)
+                trial = self.planner.config.normalize(trial)
+                nominal = self._multi_case_summary(trial, [target_case], stage_name=stage_name, tension_only=tension_only)
+                full = self._multi_case_summary(trial, load_cases, stage_name=stage_name, tension_only=tension_only)
+                if not self._summary_valid_flag(full):
+                    continue
+                nb_nom = safe_float(nominal.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+                nf_nom = safe_float(nominal.get("min_fs_design_proxy"), 0.0) or 0.0
+                nb_full = safe_float(full.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+                nf_full = safe_float(full.get("min_fs_design_proxy"), 0.0) or 0.0
+                nm = safe_float(full.get("dead_weight_proxy_g"), 1.0e99) or 1.0e99
+                if nm > max_mass + 1.0e-9:
+                    continue
+                if nb_nom < best_nominal_break + min_nominal_gain and nf_nom < best_nominal_fs * 1.01:
+                    continue
+                if nb_full < best_multi_break * min_multi_retention or nf_full < best_multi_fs * min_multi_retention:
+                    continue
+                trace_rows.append(
+                    {
+                        "iteration": iteration,
+                        "target_case": target_case,
+                        "orbit_member_ids": ";".join(str(v) for v in cand["orbit"]),
+                        "group": cand["group"],
+                        "old_n_sticks": ";".join(str(v) for v in old_ns),
+                        "new_n_sticks": ";".join(str(v) for v in new_ns),
+                        "old_nominal_break_kgf": best_nominal_break,
+                        "new_nominal_break_kgf": nb_nom,
+                        "old_multi_break_kgf": best_multi_break,
+                        "new_multi_break_kgf": nb_full,
+                        "old_mass_proxy_g": best_mass,
+                        "new_mass_proxy_g": nm,
+                        "critical_fs_before": cand["fs"],
+                        "critical_N_N": cand["N_N"],
+                        "reason": "late_nominal_strength_topoff",
+                    }
+                )
+                best_cfg = trial
+                best_summary = full
+                best_nominal_break = nb_nom
+                best_nominal_fs = nf_nom
+                best_multi_break = nb_full
+                best_multi_fs = nf_full
+                best_mass = nm
+                accepted = True
+                break
+            if not accepted:
+                break
+
+        return {"best_cfg": best_cfg, "summary": best_summary, "trace_rows": trace_rows}
+
 
     def _force_support_pad_member_overrides(
         self,
@@ -6314,6 +6716,66 @@ class StagedFidelityFunnelPlanner:
                 keep_s6 = s6_rows[:1]
         GeometryService.write_csv(out / "final_strength_reserve_push.csv", final_strength_push_rows)
 
+        late_cross_swap_rows: List[Dict[str, Any]] = []
+        if bool((base.get("member_sizing", {}) or {}).get("enable_late_cross_group_strength_swap", True)):
+            swap_input_cfg = (keep_s6[0]["config"] if keep_s6 else keep_s5[0]["config"])
+            swapped = self._late_cross_group_strength_swap(
+                swap_input_cfg,
+                load_cases,
+                stage_name="S6_LATE_CROSS_GROUP_SWAP",
+                tension_only=tension_only_s6,
+            )
+            late_cross_swap_rows = [
+                {"candidate_id": "S6X-0001", **r}
+                for r in (swapped.get("trace_rows") or [])
+            ]
+            if late_cross_swap_rows:
+                s = swapped["summary"]
+                s6_rows = [
+                    {
+                        "stage": "S6_LATE_CROSS_GROUP_SWAP",
+                        "candidate_id": "S6X-0001",
+                        "objective": s.get("objective"),
+                        "valid_for_selection": s.get("valid_for_selection"),
+                        "predicted_breaking_load_proxy_kgf": s.get("predicted_breaking_load_proxy_kgf"),
+                        "min_fs_design_proxy": s.get("min_fs_design_proxy"),
+                        "dead_weight_proxy_g": s.get("dead_weight_proxy_g"),
+                        "config": swapped["best_cfg"],
+                    }
+                ]
+                keep_s6 = s6_rows[:1]
+        GeometryService.write_csv(out / "late_cross_group_strength_swap.csv", late_cross_swap_rows)
+
+        late_nominal_topoff_rows: List[Dict[str, Any]] = []
+        if bool((base.get("member_sizing", {}) or {}).get("enable_late_nominal_strength_topoff", True)):
+            topoff_input_cfg = (keep_s6[0]["config"] if keep_s6 else keep_s5[0]["config"])
+            topoff = self._late_nominal_strength_topoff(
+                topoff_input_cfg,
+                load_cases,
+                stage_name="S6_LATE_NOMINAL_TOPOFF",
+                tension_only=tension_only_s6,
+            )
+            late_nominal_topoff_rows = [
+                {"candidate_id": "S6N-0001", **r}
+                for r in (topoff.get("trace_rows") or [])
+            ]
+            if late_nominal_topoff_rows:
+                s = topoff["summary"]
+                s6_rows = [
+                    {
+                        "stage": "S6_LATE_NOMINAL_TOPOFF",
+                        "candidate_id": "S6N-0001",
+                        "objective": s.get("objective"),
+                        "valid_for_selection": s.get("valid_for_selection"),
+                        "predicted_breaking_load_proxy_kgf": s.get("predicted_breaking_load_proxy_kgf"),
+                        "min_fs_design_proxy": s.get("min_fs_design_proxy"),
+                        "dead_weight_proxy_g": s.get("dead_weight_proxy_g"),
+                        "config": topoff["best_cfg"],
+                    }
+                ]
+                keep_s6 = s6_rows[:1]
+        GeometryService.write_csv(out / "late_nominal_strength_topoff.csv", late_nominal_topoff_rows)
+
         final_mass_trim_rows: List[Dict[str, Any]] = []
         if bool((base.get("member_sizing", {}) or {}).get("enable_final_mass_symmetry_trim", True)):
             trim_input_cfg = (keep_s6[0]["config"] if keep_s6 else keep_s5[0]["config"])
@@ -6582,6 +7044,8 @@ class StagedFidelityFunnelPlanner:
             "section_efficiency_mutation": section_eff_trace_rows,
             "plane_bracing_efficiency_mutation": plane_bracing_eff_rows,
             "final_strength_reserve_push": final_strength_push_rows,
+            "late_cross_group_strength_swap": late_cross_swap_rows,
+            "late_nominal_strength_topoff": late_nominal_topoff_rows,
             "late_height_strength_mutation": late_height_rows,
             "support_pad_capacity_push": support_pad_push_rows,
             "symmetry_audit": symmetry_audit_rows,

@@ -260,13 +260,13 @@
       "layout": "box",
       "spacing_y_mm": 24,
       "spacing_z_mm": 24,
-      "box_extra_stick_strategy": "laced_box"
+      "box_extra_stick_strategy": "balanced"
     },
     "vertical": {
       "layout": "box",
       "spacing_y_mm": 18,
       "spacing_z_mm": 24,
-      "box_extra_stick_strategy": "laced_box"
+      "box_extra_stick_strategy": "balanced"
     },
     "diagonal": {
       "layout": "box",
@@ -274,7 +274,7 @@
       "spacing_y_mm": 16,
       "spacing_z_mm": 16,
       "stick_orientation": "edge",
-      "box_extra_stick_strategy": "laced_box"
+      "box_extra_stick_strategy": "balanced"
     },
     "top_transverse": {
       "layout": "stacked",
@@ -436,7 +436,45 @@
     "enable_post_reinvest_rebalance": true,
     "enable_section_efficiency_mutation": true,
     "enable_plateau_width_efficiency_mutation": true,
-    "enable_late_section_efficiency_after_width": true
+    "enable_late_section_efficiency_after_width": true,
+    "enable_late_cross_group_strength_swap": true,
+    "late_cross_swap_max_iterations": 8,
+    "late_cross_swap_max_critical_trials": 10,
+    "late_cross_swap_max_donor_orbits": 24,
+    "late_cross_swap_max_proxy_mass_ratio": 0.955,
+    "late_cross_swap_proxy_mass_margin_g": 0.0,
+    "late_cross_swap_min_break_gain_kgf": 0.2,
+    "late_cross_swap_min_fs_retention": 0.985,
+    "late_cross_swap_min_abs_force_N": 25.0,
+    "late_cross_swap_critical_fs_threshold": 1.5,
+    "late_cross_swap_donor_fs_threshold": 8.0,
+    "late_cross_swap_critical_groups": [
+      "top_chord",
+      "vertical",
+      "diagonal"
+    ],
+    "late_cross_swap_donor_groups": [
+      "bottom_chord",
+      "support_pad",
+      "top_chord",
+      "vertical",
+      "diagonal"
+    ],
+    "enable_late_nominal_strength_topoff": true,
+    "late_nominal_topoff_target_kgf": 120.0,
+    "late_nominal_topoff_case": "center",
+    "late_nominal_topoff_groups": [
+      "top_chord",
+      "vertical"
+    ],
+    "late_nominal_topoff_max_iterations": 12,
+    "late_nominal_topoff_max_proxy_mass_ratio": 0.99,
+    "late_nominal_topoff_proxy_mass_margin_g": 0.0,
+    "late_nominal_topoff_min_nominal_gain_kgf": 0.2,
+    "late_nominal_topoff_min_multi_retention": 0.995,
+    "late_nominal_topoff_min_abs_force_N": 40.0,
+    "late_nominal_topoff_max_trials": 20,
+    "allow_unmodeled_laced_box": false
   },
   "planner_pipeline": {
     "fast_screening_keep_top_k": 8,

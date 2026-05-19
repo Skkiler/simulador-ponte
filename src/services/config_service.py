@@ -641,17 +641,20 @@ class ConfigService:
                 "stick_orientation": "edge",
                 "spacing_y_mm": 14.0,
                 "spacing_z_mm": 14.0,
+                "box_extra_stick_strategy": "balanced",
             },
             "vertical": {
                 "layout": "box",
                 "spacing_y_mm": 10.0,
                 "spacing_z_mm": 10.0,
+                "box_extra_stick_strategy": "balanced",
             },
             "diagonal": {
                 "layout": "double_stack",
                 "columns": 2,
                 "spacing_y_mm": 8.0,
                 "spacing_z_mm": 6.0,
+                "box_extra_stick_strategy": "balanced",
             },
             "top_transverse": {
                 "layout": "stacked",
@@ -1203,6 +1206,29 @@ class ConfigService:
         member_sizing_cfg.setdefault("final_strength_push_dynamic_max_trials", 20)
         member_sizing_cfg.setdefault("final_strength_push_min_accept_break_retention", 0.9995)
         member_sizing_cfg.setdefault("final_strength_push_min_accept_fs_retention", 0.9980)
+        member_sizing_cfg.setdefault("enable_late_cross_group_strength_swap", True)
+        member_sizing_cfg.setdefault("late_cross_swap_max_iterations", 6)
+        member_sizing_cfg.setdefault("late_cross_swap_max_critical_trials", 8)
+        member_sizing_cfg.setdefault("late_cross_swap_max_donor_orbits", 16)
+        member_sizing_cfg.setdefault("late_cross_swap_max_proxy_mass_ratio", 1.000)
+        member_sizing_cfg.setdefault("late_cross_swap_proxy_mass_margin_g", 0.0)
+        member_sizing_cfg.setdefault("late_cross_swap_min_break_gain_kgf", 0.20)
+        member_sizing_cfg.setdefault("late_cross_swap_min_fs_retention", 0.985)
+        member_sizing_cfg.setdefault("late_cross_swap_min_abs_force_N", 25.0)
+        member_sizing_cfg.setdefault("late_cross_swap_critical_fs_threshold", 1.50)
+        member_sizing_cfg.setdefault("late_cross_swap_donor_fs_threshold", 8.0)
+        member_sizing_cfg.setdefault("late_cross_swap_critical_groups", ["top_chord", "vertical", "diagonal"])
+        member_sizing_cfg.setdefault("late_cross_swap_donor_groups", ["bottom_chord", "support_pad", "top_chord", "vertical", "diagonal"])
+        member_sizing_cfg.setdefault("enable_late_nominal_strength_topoff", True)
+        member_sizing_cfg.setdefault("late_nominal_topoff_target_kgf", 120.0)
+        member_sizing_cfg.setdefault("late_nominal_topoff_case", "center")
+        member_sizing_cfg.setdefault("late_nominal_topoff_groups", ["top_chord", "vertical"])
+        member_sizing_cfg.setdefault("late_nominal_topoff_max_iterations", 8)
+        member_sizing_cfg.setdefault("late_nominal_topoff_max_proxy_mass_ratio", 0.965)
+        member_sizing_cfg.setdefault("late_nominal_topoff_proxy_mass_margin_g", 0.0)
+        member_sizing_cfg.setdefault("late_nominal_topoff_min_nominal_gain_kgf", 0.20)
+        member_sizing_cfg.setdefault("late_nominal_topoff_min_multi_retention", 0.995)
+        member_sizing_cfg.setdefault("late_nominal_topoff_min_abs_force_N", 40.0)
         member_sizing_cfg.setdefault("enable_support_pad_capacity_push", True)
         member_sizing_cfg.setdefault("support_pad_push_target_kgf", 120.0)
         member_sizing_cfg.setdefault("support_pad_push_max_group_sticks", 6)

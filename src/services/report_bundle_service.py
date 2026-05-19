@@ -258,7 +258,10 @@ class ReportBundleService:
             compression_dominant = int(row["compression_members"]) > 0 and int(row["compression_members"]) >= int(row["tension_members"])
 
             warnings: List[str] = []
-            construction_note = "seguir orientação e espaçamentos do gabarito"
+            construction_note = "seguir orientação do gabarito; não afastar palitos sem peça de ligação modelada"
+            if bool(sec.get("laced_box_demoted_to_contact")):
+                warnings.append("laced_box solicitado foi rebaixado para contact_box: não há lacing/talas extras modelados")
+                construction_note = "montar caixa apenas com palitos longitudinais em contato face/lado; não afastar lanes sem palitos de ligação contabilizados"
             if group == "bottom_chord" and n == 1:
                 construction_note = "banzo inferior atua majoritariamente como tirante; manter continuidade e emendas bem taladas"
                 if compression_dominant:
@@ -289,6 +292,9 @@ class ReportBundleService:
                     "centroid_offset_mm": centroid_offset,
                     "eta_I": sec.get("eta_I"),
                     "local_stick_positions_yz": json.dumps(sec.get("stick_positions_yz", []), ensure_ascii=False),
+                    "section_connection_model": sec.get("section_connection_model"),
+                    "requested_box_extra_stick_strategy": sec.get("requested_box_extra_stick_strategy"),
+                    "laced_box_demoted_to_contact": sec.get("laced_box_demoted_to_contact"),
                     "warning": "; ".join(warnings) if warnings else "OK",
                     "construction_note": construction_note,
                     "member_ids_example": ";".join(row["member_ids_example"]),
@@ -324,6 +330,7 @@ Este relatório existe porque a imagem 3D mostra apenas as linhas centrais dos m
 - `centroid_offset_mm` indica se a seção local ficou excêntrica. Se esse valor aparecer alto, a peça precisa ser montada exatamente como modelada ou recalculada.
 - Banzos inferiores finos podem ser aceitáveis quando trabalham como tirantes; o risco construtivo passa a ser continuidade, emendas e desalinhamento, não flambagem.
 - Em seção `box` com número ímpar de palitos, o modelo usa posição central/simétrica para evitar excentricidade; mover o palito extra para um canto altera centroide e inércia.
+- `laced_box`/`spaced_box` sem palitos de ligação contabilizados é automaticamente rebaixado para `contact_box`; a ponte usa apenas palitos longitudinais e cola nessa seção.
 
 ## Tabela executiva
 | grupo | n | layout | orientação | Iy [mm⁴] | Iz [mm⁴] | offset centroide [mm] | aviso | nota construtiva |
@@ -474,7 +481,7 @@ Arquivo completo: `section_layout_audit.csv`.
             layout = str(item.get("layout"))
             n = int(item.get("n_sticks") or 1)
             if g == "top_chord":
-                note = "banzo superior comprimido: montar em gabarito rígido, orientação edge, seção box sem torção; não alterar posição das lanes"
+                note = "banzo superior comprimido: montar em gabarito rígido, orientação edge, seção box de contato; não afastar lanes como lacing não modelado"
             elif g == "bottom_chord":
                 note = "banzo inferior/tirante: manter continuidade, emendas desencontradas e alinhamento longitudinal"
             elif g == "vertical":
@@ -799,10 +806,28 @@ O modelo principal aceita carga distribuída por superfície, mas isso é uma hi
         # Relatório de debug humano: os CSVs continuam internos, mas o pacote
         # de entrega precisa permitir rastrear por texto quais comparações
         # governaram o resultado.
+        # A tabela principal deve refletir o mesmo conjunto que governa o
+        # veredito.  Bracings secundários/tension-only podem ter FS de compressão
+        # baixíssimo no pós-processador, mas não participam do envelope de
+        # ruptura quando ``design_relevant`` é falso.  Misturar esses itens com
+        # membros primários gerava um debug visualmente alarmante e incompatível
+        # com o ``executive_summary``.
         worst_checks = sorted(
-            [r for r in (member_checks or []) if safe_float(r.get("FS_min"), None) is not None],
+            [
+                r for r in (member_checks or [])
+                if r.get("design_relevant") is not False
+                and safe_float(r.get("FS_min"), None) is not None
+            ],
             key=lambda r: safe_float(r.get("FS_min"), 1.0e99) or 1.0e99,
         )[:25]
+        secondary_low_checks = sorted(
+            [
+                r for r in (member_checks or [])
+                if r.get("design_relevant") is False
+                and safe_float(r.get("FS_min"), None) is not None
+            ],
+            key=lambda r: safe_float(r.get("FS_min"), 1.0e99) or 1.0e99,
+        )[:12]
         debug_rows = "\n".join(
             f"| {r.get('member_id')} | {r.get('group')} | {r.get('n_sticks')} | {r.get('layout')} | "
             f"{safe_float(r.get('N_N'), None) if r.get('N_N') is not None else '—'} | "
@@ -811,14 +836,28 @@ O modelo principal aceita carga distribuída por superfície, mas isso é uma hi
             f"{safe_float(r.get('Pcr_z_N'), None) if r.get('Pcr_z_N') is not None else '—'} |"
             for r in worst_checks
         ) or "| — | — | — | — | — | — | — | — | — |"
+        secondary_debug_rows = "\n".join(
+            f"| {r.get('member_id')} | {r.get('group')} | {r.get('n_sticks')} | {r.get('layout')} | "
+            f"{safe_float(r.get('N_N'), None) if r.get('N_N') is not None else '—'} | "
+            f"{safe_float(r.get('FS_min'), None) if r.get('FS_min') is not None else '—'} | "
+            f"{r.get('governing_mode')} |"
+            for r in secondary_low_checks
+        ) or "| — | — | — | — | — | — | — |"
         (out / "10_debug_calculos_criticos.md").write_text(
             f"""# Debug dos cálculos críticos
 
-Este arquivo resume os membros que governam a ruptura e os valores usados na comparação. Ele foi criado para evitar que a depuração dependa de planilhas.
+Este arquivo resume os membros primários que governam a ruptura e os valores usados na comparação. Ele foi criado para evitar que a depuração dependa de planilhas.
 
 | membro | grupo | palitos | layout | N [N] | FS mínimo | modo governante | Pcr y [N] | Pcr z [N] |
 | ---: | --- | ---: | --- | ---: | ---: | --- | ---: | ---: |
 {debug_rows}
+
+## Itens secundários com FS baixo, mas fora do envelope de veredito
+Esses elementos aparecem para auditoria construtiva. Eles não devem ser lidos como ruptura primária se `design_relevant = false`, mas ajudam a identificar travamentos que precisam ser montados como tension-only, em X, ou reforçados por gabarito.
+
+| membro | grupo | palitos | layout | N [N] | FS mínimo | modo governante |
+| ---: | --- | ---: | --- | ---: | ---: | --- |
+{secondary_debug_rows}
 
 ## Leituras úteis
 - Se `Pcr y/z` for muito menor que a compressão direta, o problema é flambagem/inércia, não resistência axial do palito.
@@ -859,7 +898,7 @@ Este arquivo resume os membros que governam a ruptura e os valores usados na com
 - Modelo estrutural: treliça axial linear.
 - Solver tension-only: {'ativo' if bool(cfg.get('bridge', {}).get('tension_only_bracing_solver_enabled', False)) else 'inativo'}.
 - Colunas: Euler/Johnson com ajuste de excentricidade simplificado.
-- Seção composta: ação parcial com `eta_I`. Seções `box` com 2 ou 3 palitos são automaticamente tratadas como laminação compacta; uma caixa real exige 4+ palitos e travamento local/gabarito.
+- Seção composta: ação parcial com `eta_I`. Seções `box` com 2 ou 3 palitos são automaticamente tratadas como laminação compacta; uma caixa real exige 4+ palitos em contato e não recebe inércia de lacing/talas não modelados.
 - Interação axial-flexão: verificação simplificada beam-column.
 - Limitação: modelo não substitui ensaio físico.
 """
@@ -1175,7 +1214,7 @@ Este pacote reduz a redundância dos outputs e organiza os arquivos por função
 
 ## Critérios usados
 - Solver axial linear 3D com verificações pós-processadas de tração, compressão direta, flambagem Euler/Johnson e interação axial-flexão.
-- Para membros comprimidos, o risco é dominado por `EI/(KL)^2`; portanto, orientação, seção box, lacing e travamentos alteram diretamente a capacidade.
+- Para membros comprimidos, o risco é dominado por `EI/(KL)^2`; portanto, orientação, seção box de contato e conexões coladas alteram diretamente a capacidade. Lacing/talas não modelados não são considerados.
 - `left_offset` e `right_offset` são tratados como robustez; a ruptura de projeto usa os casos governantes definidos em `multi_loadcase_screening.strength_governing_cases`.
 - O banzo superior usa palitos em `edge` por padrão, isto é, lateral para cima, para aumentar a inércia no eixo crítico.
 
