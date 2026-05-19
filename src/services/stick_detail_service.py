@@ -52,6 +52,69 @@ class StickDetailService:
         return dx / L, dy / L, dz / L, L
 
     @staticmethod
+    def _cross(a: Tuple[float, float, float], b: Tuple[float, float, float]) -> Tuple[float, float, float]:
+        return (
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        )
+
+    @staticmethod
+    def _dot(a: Tuple[float, float, float], b: Tuple[float, float, float]) -> float:
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+    @staticmethod
+    def _normalize(v: Tuple[float, float, float]) -> Tuple[float, float, float]:
+        n = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+        if n <= 1.0e-12:
+            return (0.0, 0.0, 0.0)
+        return (v[0] / n, v[1] / n, v[2] / n)
+
+    @classmethod
+    def _local_section_axes(
+        cls,
+        ux: float,
+        uy: float,
+        uz: float,
+    ) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+        """Return member-local y/z axes used to place each stick lane.
+
+        The solver member line is interpreted as the centroidal axis.  The local
+        section ``z`` axis is kept as close as possible to global vertical; for a
+        nearly vertical member we fall back to a horizontal construction frame.
+        This prevents the piece-by-piece 3D view from inventing one-sided lane
+        offsets that do not exist in the calculation.
+        """
+        d = cls._normalize((float(ux), float(uy), float(uz)))
+        if d == (0.0, 0.0, 0.0):
+            return (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
+
+        global_z = (0.0, 0.0, 1.0)
+        proj_z = (
+            global_z[0] - cls._dot(global_z, d) * d[0],
+            global_z[1] - cls._dot(global_z, d) * d[1],
+            global_z[2] - cls._dot(global_z, d) * d[2],
+        )
+        local_z = cls._normalize(proj_z)
+        if local_z == (0.0, 0.0, 0.0):
+            global_y = (0.0, 1.0, 0.0)
+            proj_y = (
+                global_y[0] - cls._dot(global_y, d) * d[0],
+                global_y[1] - cls._dot(global_y, d) * d[1],
+                global_y[2] - cls._dot(global_y, d) * d[2],
+            )
+            local_y = cls._normalize(proj_y)
+            if local_y == (0.0, 0.0, 0.0):
+                local_y = (1.0, 0.0, 0.0)
+            local_z = cls._normalize(cls._cross(d, local_y))
+            return local_y, local_z
+
+        local_y = cls._normalize(cls._cross(local_z, d))
+        if local_y == (0.0, 0.0, 0.0):
+            local_y = (0.0, 1.0, 0.0)
+        return local_y, local_z
+
+    @staticmethod
     def _piece_intervals(
         L: float,
         stick_len: float,
@@ -90,6 +153,62 @@ class StickDetailService:
             s0 += step
 
         return out
+
+
+    @staticmethod
+    def _split_interval_to_stock_limit(
+        s0: float,
+        s1: float,
+        *,
+        max_cut_mm: float,
+        overlap_mm: float,
+        cut_increment_mm: float,
+    ) -> List[Tuple[float, float, float]]:
+        """Reparte um intervalo físico para nenhum corte exceder o palito real."""
+        a = float(s0)
+        b = float(s1)
+        if b <= a + 1.0e-9:
+            return []
+        max_cut = max(1.0, float(max_cut_mm))
+        overlap = max(0.0, min(float(overlap_mm), 0.75 * max_cut))
+        inc = max(1.0, float(cut_increment_mm))
+        out: List[Tuple[float, float, float]] = []
+        cur = a
+        while cur < b - 1.0e-9:
+            nxt = min(b, cur + max_cut)
+            if nxt < b - 1.0e-9:
+                rounded = math.floor(nxt / inc) * inc
+                if rounded > cur + max(5.0, 0.30 * max_cut):
+                    nxt = rounded
+            out.append((cur, nxt, nxt - cur))
+            if nxt >= b - 1.0e-9:
+                break
+            cur = max(cur + 1.0, nxt - overlap)
+        return out
+
+    @classmethod
+    def _enforce_stock_limit_on_intervals(
+        cls,
+        intervals: List[Tuple[float, float, float]],
+        *,
+        max_cut_mm: float,
+        overlap_mm: float,
+        cut_increment_mm: float,
+    ) -> tuple[List[Tuple[float, float, float]], int]:
+        fixed: List[Tuple[float, float, float]] = []
+        splits = 0
+        for s0, s1, _cut in intervals:
+            parts = cls._split_interval_to_stock_limit(
+                float(s0),
+                float(s1),
+                max_cut_mm=max_cut_mm,
+                overlap_mm=overlap_mm,
+                cut_increment_mm=cut_increment_mm,
+            )
+            if len(parts) > 1:
+                splits += 1
+            fixed.extend(parts)
+        return fixed, splits
 
     @staticmethod
     def _pack_cuts_best_fit(
@@ -162,6 +281,12 @@ class StickDetailService:
         cut_increment_mm = max(0.5, float(detail.get("cut_increment_mm", 5.0)))
         allow_cut_rounding = bool(detail.get("allow_cut_rounding", True))
         min_cut_length_mm = max(1.0, float(detail.get("min_cut_length_mm", 5.0)))
+        max_cut_length_mm = min(
+            stick_len,
+            max(1.0, float(detail.get("max_cut_length_mm", stick_len))),
+        )
+        strict_cut_length = bool(detail.get("strict_cut_length", True))
+        stock_limit_splits = 0
         # global default joint models.  These may be overridden per member by
         # a connection planner via ``cfg['member_joint_plan']``.
         tension_joint_model = str(detail.get("tension_joint_model", "double_lap_reinforced"))
@@ -245,7 +370,17 @@ class StickDetailService:
             )
             sec = self.sections.composite_section(n_lanes, mat, layout_cfg_detail)
 
+            section_positions = list(sec.get("stick_positions_yz", []) or [])
+            if len(section_positions) < n_lanes:
+                section_positions.extend([(0.0, 0.0)] * (n_lanes - len(section_positions)))
+            cy = safe_float(sec.get("centroid_y_mm"), 0.0) or 0.0
+            cz = safe_float(sec.get("centroid_z_mm"), 0.0) or 0.0
+            local_y_axis, local_z_axis = self._local_section_axes(ux, uy, uz)
+
             stick_orientation = str(sec.get("stick_orientation", layout_cfg_detail.get("stick_orientation", "flat"))).strip().lower()
+            lane_orientations = list(sec.get("stick_orientations", []) or [])
+            lane_widths = list(sec.get("stick_width_y_mm_by_lane", []) or [])
+            lane_heights = list(sec.get("stick_height_z_mm_by_lane", []) or [])
             visual_width_mm = safe_float(sec.get("stick_width_y_mm"), None)
             visual_thickness_mm = safe_float(sec.get("stick_height_z_mm"), None)
             if visual_width_mm is None or visual_thickness_mm is None:
@@ -345,6 +480,24 @@ class StickDetailService:
             }.get(joint_model, 1.0)
 
             for lane in range(1, n_lanes + 1):
+                lane_yz = section_positions[lane - 1] if lane - 1 < len(section_positions) else (0.0, 0.0)
+                try:
+                    lane_y = float(lane_yz[0]) - cy
+                    lane_z = float(lane_yz[1]) - cz
+                except (TypeError, ValueError, IndexError):
+                    lane_y = 0.0
+                    lane_z = 0.0
+                lane_offset_vec = (
+                    lane_y * local_y_axis[0] + lane_z * local_z_axis[0],
+                    lane_y * local_y_axis[1] + lane_z * local_z_axis[1],
+                    lane_y * local_y_axis[2] + lane_z * local_z_axis[2],
+                )
+                lane_orientation = str(lane_orientations[lane - 1]).strip().lower() if lane - 1 < len(lane_orientations) else stick_orientation
+                lane_visual_width_mm = safe_float(lane_widths[lane - 1], None) if lane - 1 < len(lane_widths) else None
+                lane_visual_thickness_mm = safe_float(lane_heights[lane - 1], None) if lane - 1 < len(lane_heights) else None
+                if lane_visual_width_mm is None or lane_visual_thickness_mm is None:
+                    lane_visual_width_mm = visual_width_mm
+                    lane_visual_thickness_mm = visual_thickness_mm
                 lane_intervals = list(base_intervals)
                 if detail.get("splice_stagger_enabled", True):
                     lane_intervals = self.splice_stagger.offset_splice_positions(
@@ -354,13 +507,24 @@ class StickDetailService:
                         lane_id=lane,
                         cfg=cfg,
                     )
+                if strict_cut_length:
+                    lane_intervals, split_count = self._enforce_stock_limit_on_intervals(
+                        lane_intervals,
+                        max_cut_mm=max_cut_length_mm,
+                        overlap_mm=overlap,
+                        cut_increment_mm=cut_increment_mm,
+                    )
+                    stock_limit_splits += split_count
                 prev_id = None
                 prev_end = None
 
                 for piece_index, (s0, s1, cut_len) in enumerate(lane_intervals, 1):
                     # Arredondamento de corte para incremento de oficina (ex.: 5 mm).
                     geom_len = max(0.0, float(cut_len))
-                    if allow_cut_rounding and geom_len <= stick_len + 1.0e-9:
+                    if strict_cut_length and geom_len > max_cut_length_mm + 1.0e-9:
+                        geom_len = max_cut_length_mm
+                        s1 = min(L, s0 + geom_len)
+                    if allow_cut_rounding and geom_len <= max_cut_length_mm + 1.0e-9:
                         cut_len_rounded = self.floor_to_cut_increment(
                             geom_len,
                             increment_mm=cut_increment_mm,
@@ -374,13 +538,13 @@ class StickDetailService:
                     cut_rounding_delta = geom_len - cut_len_rounded
                     sid = f"M{m.id:03d}-L{lane:02d}-P{piece_index:02d}"
 
-                    x0 = ni.x + ux * s0
-                    y0 = ni.y + uy * s0
-                    z0 = ni.z + uz * s0
+                    x0 = ni.x + ux * s0 + lane_offset_vec[0]
+                    y0 = ni.y + uy * s0 + lane_offset_vec[1]
+                    z0 = ni.z + uz * s0 + lane_offset_vec[2]
 
-                    x1 = ni.x + ux * s1
-                    y1 = ni.y + uy * s1
-                    z1 = ni.z + uz * s1
+                    x1 = ni.x + ux * s1 + lane_offset_vec[0]
+                    y1 = ni.y + uy * s1 + lane_offset_vec[1]
+                    z1 = ni.z + uz * s1 + lane_offset_vec[2]
 
                     total_pieces += 1
                     total_cut += cut_len_rounded
@@ -400,6 +564,8 @@ class StickDetailService:
                             "geometric_piece_length_mm": geom_len,
                             "cut_length_mm": cut_len_rounded,
                             "cut_rounding_delta_mm": cut_rounding_delta,
+                            "max_cut_length_mm": max_cut_length_mm,
+                            "dimension_ok_length": bool(cut_len_rounded <= max_cut_length_mm + 1.0e-9),
                             "x0_mm": x0,
                             "y0_mm": y0,
                             "z0_mm": z0,
@@ -409,11 +575,31 @@ class StickDetailService:
                             "N_piece_N": per_lane,
                             "sigma_axial_piece_MPa": per_sigma,
                             "member_state": "tension" if N >= 0 else "compression",
-                            "stick_orientation": stick_orientation,
+                            "stick_orientation": lane_orientation,
+                            "section_layout_effective": sec.get("layout"),
+                            "section_layout_requested": sec.get("requested_layout", layout_cfg_detail.get("layout", "stacked")),
+                            "section_connection_model": sec.get("section_connection_model", sec.get("layout")),
                             "width_mm": stick_w,
                             "thickness_mm": stick_t,
-                            "visual_width_mm": visual_width_mm,
-                            "visual_thickness_mm": visual_thickness_mm,
+                            "visual_width_mm": lane_visual_width_mm,
+                            "visual_thickness_mm": lane_visual_thickness_mm,
+                            "dimension_ok_width": bool(max(lane_visual_width_mm, lane_visual_thickness_mm) <= max(stick_w, stick_t) + 1.0e-9),
+                            "dimension_ok_thickness": bool(min(lane_visual_width_mm, lane_visual_thickness_mm) <= min(stick_w, stick_t) + 1.0e-9),
+                            "section_local_y_mm": lane_y,
+                            "section_local_z_mm": lane_z,
+                            "section_global_offset_x_mm": lane_offset_vec[0],
+                            "section_global_offset_y_mm": lane_offset_vec[1],
+                            "section_global_offset_z_mm": lane_offset_vec[2],
+                            "section_axis_y_x": local_y_axis[0],
+                            "section_axis_y_y": local_y_axis[1],
+                            "section_axis_y_z": local_y_axis[2],
+                            "section_axis_z_x": local_z_axis[0],
+                            "section_axis_z_y": local_z_axis[1],
+                            "section_axis_z_z": local_z_axis[2],
+                            "section_centroid_y_mm": cy,
+                            "section_centroid_z_mm": cz,
+                            "n_sticks": n_lanes,
+                            "layout": sec.get("layout"),
                             "quadrant_id": quadrant_id,
                             "mass_g": stick_mass * cut_len_rounded / stick_len,
                         }
@@ -687,6 +873,10 @@ class StickDetailService:
             "glue_safety_factor": glue_sf,
             "cut_increment_mm": cut_increment_mm,
             "allow_cut_rounding": allow_cut_rounding,
+            "max_cut_length_mm": max_cut_length_mm,
+            "strict_cut_length": strict_cut_length,
+            "stock_limit_splits": stock_limit_splits,
+            "oversize_piece_count": int(sum(1 for r in stick_rows if (safe_float(r.get("cut_length_mm"), 0.0) or 0.0) > max_cut_length_mm + 1.0e-9)),
         }
 
         weakest = sorted(
@@ -719,6 +909,20 @@ class StickDetailService:
         )
         (out / "splice_stagger_report.json").write_text(
             json.dumps(splice_stagger_report, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        oversize_rows = [
+            r for r in stick_rows
+            if (safe_float(r.get("cut_length_mm"), 0.0) or 0.0) > max_cut_length_mm + 1.0e-9
+        ]
+        (out / "09_auditoria_conectividade_e_cortes.md").write_text(
+            "# Auditoria de cortes, dimensões e conectividade\n\n"
+            f"- Comprimento máximo permitido por palito: **{max_cut_length_mm:.1f} mm**.\n"
+            f"- Incremento de corte usado: **{cut_increment_mm:.1f} mm**.\n"
+            f"- Peças repartidas por excederem o palito real após stagger: **{stock_limit_splits}**.\n"
+            f"- Peças acima do limite após correção: **{len(oversize_rows)}**.\n\n"
+            "Nenhum corte exportado deve exigir palito maior que o lote real. "
+            "Quando o desencontro de emendas cria uma peça longa demais, ela é repartida com sobreposição.\n",
             encoding="utf-8",
         )
 

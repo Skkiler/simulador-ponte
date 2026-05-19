@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 from src.services.active_design_planner import ActiveDesignPlanner
 from src.services.report_bundle_service import ReportBundleService
+from src.services.pipeline import SimulationPipeline
 from src.services.staged_fidelity_funnel import StagedFidelityFunnelPlanner
 
 
@@ -419,3 +420,51 @@ def test_final_report_pipeline_trace(base_cfg: dict, tmp_path, monkeypatch) -> N
     assert "Melhores candidatos por estágio" in text
     assert "Comparação antes/depois da fase topológica" in text
     assert (tmp_path / "final_report" / "pipeline_stage_trace.csv").exists()
+
+
+def test_mass_compliant_fallback_understands_s8_proxy_field_names() -> None:
+    cfg = {
+        "bridge": {"load_total_N": -784.532, "load_total_kgf": 80.0},
+        "material": {"mass_limit_g": 1000.0},
+        "analysis": {
+            "acceptance_min_primary_fs": 1.05,
+            "acceptance_min_design_breaking_load_kgf": 120.0,
+            "planner_fallback_min_break_ratio": 0.20,
+            "planner_fallback_min_fs_ratio": 0.10,
+        },
+    }
+    good_cfg = {"marker": "s8"}
+    optimization = {
+        "s8_final_validation": [
+            {
+                "stage": "S8",
+                "candidate_id": "S8-0001",
+                "competition_mass_g": 975.0,
+                "predicted_breaking_load_proxy_kgf": 94.0,
+                "min_fs_design": 1.34,
+                "solver_regular": True,
+                "equilibrium_error_N": 0.0,
+                "config": good_cfg,
+            }
+        ],
+        "s3_multi_loadcase": [
+            {
+                "stage": "S3",
+                "candidate_id": "S3-old",
+                "dead_weight_proxy_g": 740.0,
+                "predicted_breaking_load_proxy_kgf": 130.0,
+                "min_fs_design_proxy": 0.50,
+                "solver_status": "regular",
+                "equilibrium_error_N": 0.0,
+                "config": {"marker": "s3"},
+            }
+        ],
+    }
+
+    selected = SimulationPipeline._select_mass_compliant_candidate(optimization, cfg)
+
+    assert selected is not None
+    assert selected["config"] == good_cfg
+    assert selected["mass_g"] == 975.0
+    assert selected["predicted_breaking_load_kgf"] == 94.0
+    assert selected["min_fs_primary"] == 1.34

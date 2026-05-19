@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 from src.core.numeric import safe_float
 from src.services.geometry_service import GeometryService
+from src.services.section_service import SectionService
 
 
 class ReportBundleService:
@@ -171,7 +172,16 @@ class ReportBundleService:
         if s8_rows:
             for c in (s8_rows[0].get("case_metrics") or []):
                 case = str(c.get("case") or "")
-                if case in {"center", "single_plate_center", "crown_contact", "torsion_60_40", "left_offset", "right_offset"}:
+                if case in {"center", "single_plate_center", "crown_contact", "torsion_60_40", "torsion_70_30", "torsion_80_20", "left_offset", "right_offset"}:
+                    interp = {
+                        "center": "modelo configurado de carga distribuída",
+                        "single_plate_center": "uma única placa/prato físico centrado no vão",
+                        "crown_contact": "peso solto sobre banzo arqueado; contato inicial no ponto mais alto",
+                        "left_offset": "placa deslocada longitudinalmente para a esquerda",
+                        "right_offset": "placa deslocada longitudinalmente para a direita",
+                    }.get(case)
+                    if interp is None and case.startswith("torsion_"):
+                        interp = f"placa distribuída com assimetria lateral {case.replace('torsion_', '').replace('_', '/')}"
                     rows.append(
                         {
                             "case": case,
@@ -179,17 +189,151 @@ class ReportBundleService:
                             "min_fs_design": c.get("min_fs_design"),
                             "max_displacement_mm": c.get("max_displacement_proxy_mm"),
                             "load_path_score": c.get("load_path_score"),
-                            "interpretation": {
-                                "center": "modelo configurado de carga distribuída",
-                                "single_plate_center": "uma única placa/prato físico centrado no vão",
-                                "crown_contact": "peso solto sobre banzo arqueado; contato inicial no ponto mais alto",
-                                "torsion_60_40": "placa distribuída com assimetria lateral 60/40",
-                                "left_offset": "placa deslocada longitudinalmente para a esquerda",
-                                "right_offset": "placa deslocada longitudinalmente para a direita",
-                            }.get(case, "caso auxiliar"),
+                            "interpretation": interp or "caso auxiliar",
                         }
                     )
         return rows
+
+
+    @staticmethod
+    def _section_layout_audit_rows(cfg: Dict[str, Any], member_checks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Summarize whether the chosen stick layouts are buildable as modeled.
+
+        The structural solver sees only equivalent A/I/J values at the member
+        centerline.  This audit exposes the hidden assumptions behind those
+        equivalent sections: stick orientation, local y/z spacing, centroid
+        offset and whether a section is tension-dominant or compression-critical.
+        """
+        mat = cfg.get("material", {}) or {}
+        layouts = cfg.get("section_layout_by_group", {}) or {}
+        detail = cfg.get("detail_model", {}) or {}
+        sectioner = SectionService()
+
+        grouped: Dict[tuple, Dict[str, Any]] = {}
+        for chk in member_checks or []:
+            group = str(chk.get("group", ""))
+            n = int(safe_float(chk.get("n_sticks"), 1) or 1)
+            layout_name = str(chk.get("layout", "")) or str((layouts.get(group, {}) or {}).get("layout", "stacked"))
+            key = (group, n, layout_name)
+            row = grouped.setdefault(
+                key,
+                {
+                    "group": group,
+                    "layout": layout_name,
+                    "n_sticks": n,
+                    "member_ids_example": [],
+                    "compression_members": 0,
+                    "tension_members": 0,
+                    "max_abs_force_N": 0.0,
+                    "min_FS_design": None,
+                    "min_FS_global": None,
+                },
+            )
+            if chk.get("member_id") is not None and len(row["member_ids_example"]) < 10:
+                row["member_ids_example"].append(str(chk.get("member_id")))
+            force = safe_float(chk.get("N_N"), 0.0) or 0.0
+            if force < -1.0e-9:
+                row["compression_members"] += 1
+            elif force > 1.0e-9:
+                row["tension_members"] += 1
+            row["max_abs_force_N"] = max(float(row["max_abs_force_N"]), abs(float(force)))
+            fs_d = safe_float(chk.get("FS_design"), None)
+            fs_g = safe_float(chk.get("FS_min"), None)
+            if fs_d is not None and (row["min_FS_design"] is None or fs_d < row["min_FS_design"]):
+                row["min_FS_design"] = float(fs_d)
+            if fs_g is not None and (row["min_FS_global"] is None or fs_g < row["min_FS_global"]):
+                row["min_FS_global"] = float(fs_g)
+
+        rows: List[Dict[str, Any]] = []
+        for (group, n, layout_name), row in grouped.items():
+            layout_cfg = dict((layouts.get(group, {}) or {}))
+            layout_cfg.setdefault("layout", layout_name)
+            layout_cfg.setdefault("composite_action", detail.get("composite_action", {}))
+            sec = sectioner.composite_section(n, mat, layout_cfg)
+            cy = safe_float(sec.get("centroid_y_mm"), 0.0) or 0.0
+            cz = safe_float(sec.get("centroid_z_mm"), 0.0) or 0.0
+            ry = SectionService.radius_of_gyration(float(sec.get("Iy", 0.0) or 0.0), float(sec.get("A", 0.0) or 0.0))
+            rz = SectionService.radius_of_gyration(float(sec.get("Iz", 0.0) or 0.0), float(sec.get("A", 0.0) or 0.0))
+            centroid_offset = (cy * cy + cz * cz) ** 0.5
+            compression_dominant = int(row["compression_members"]) > 0 and int(row["compression_members"]) >= int(row["tension_members"])
+
+            warnings: List[str] = []
+            construction_note = "seguir orientação e espaçamentos do gabarito"
+            if group == "bottom_chord" and n == 1:
+                construction_note = "banzo inferior atua majoritariamente como tirante; manter continuidade e emendas bem taladas"
+                if compression_dominant:
+                    warnings.append("banzo inferior simples com compressão detectada; revisar caso torsional")
+            if str(layout_name).lower() in {"tee3", "laminated2"}:
+                warnings.append("pedido de box subpreenchido foi convertido para laminação conectada; não é caixa")
+                construction_note = "montar face-a-face/tee conforme posições locais; não afastar como caixa"
+            if str(layout_name).lower() in {"box", "contact_box"} and n >= 5 and n % 2 == 1:
+                warnings.append("box com número ímpar usa reforço central balanceado; não mover o palito extra para um canto")
+                construction_note = "montar no gabarito exatamente na posição y/z listada; mover o palito extra altera o momento de inércia"
+            if centroid_offset > 0.5:
+                warnings.append(f"centroide local deslocado {centroid_offset:.2f} mm; controlar excentricidade na colagem")
+            if compression_dominant and min(ry, rz) < 1.0:
+                warnings.append("raio de giração baixo para membro comprimido")
+
+            out = dict(row)
+            out.update(
+                {
+                    "stick_orientation": sec.get("stick_orientation"),
+                    "section_A_mm2": sec.get("A"),
+                    "section_Iy_mm4": sec.get("Iy"),
+                    "section_Iz_mm4": sec.get("Iz"),
+                    "section_Icrit_mm4": min(float(sec.get("Iy", 0.0) or 0.0), float(sec.get("Iz", 0.0) or 0.0)),
+                    "radius_y_mm": ry,
+                    "radius_z_mm": rz,
+                    "centroid_y_mm": cy,
+                    "centroid_z_mm": cz,
+                    "centroid_offset_mm": centroid_offset,
+                    "eta_I": sec.get("eta_I"),
+                    "local_stick_positions_yz": json.dumps(sec.get("stick_positions_yz", []), ensure_ascii=False),
+                    "warning": "; ".join(warnings) if warnings else "OK",
+                    "construction_note": construction_note,
+                    "member_ids_example": ";".join(row["member_ids_example"]),
+                }
+            )
+            rows.append(out)
+
+        rows.sort(
+            key=lambda r: (
+                str(r.get("warning")) == "OK",
+                safe_float(r.get("min_FS_design"), safe_float(r.get("min_FS_global"), 1.0e9)) or 1.0e9,
+                str(r.get("group")),
+            )
+        )
+        return rows
+
+    @staticmethod
+    def _write_section_layout_audit(out: Path, rows: List[Dict[str, Any]]) -> None:
+        GeometryService.write_csv(out / "section_layout_audit.csv", rows)
+        table = "\n".join(
+            f"| {r.get('group')} | {r.get('n_sticks')} | {r.get('layout')} | {r.get('stick_orientation')} | "
+            f"{safe_float(r.get('section_Iy_mm4'), None):.1f} | {safe_float(r.get('section_Iz_mm4'), None):.1f} | "
+            f"{safe_float(r.get('centroid_offset_mm'), None):.2f} | {r.get('warning')} | {r.get('construction_note')} |"
+            for r in rows[:30]
+        ) or "| — | — | — | — | — | — | — | — | — |"
+        (out / "08_auditoria_secao_e_realismo.md").write_text(
+            f"""# Auditoria de seção, posição dos palitos e realismo construtivo
+
+Este relatório existe porque a imagem 3D mostra apenas as linhas centrais dos membros. A resistência, porém, depende da seção composta: quantidade de palitos, orientação (`edge`/`flat`), espaçamento local, ação composta da cola e centroide real da seção.
+
+## Leitura prática
+- `Iy` e `Iz` são os momentos de inércia usados no cálculo de flambagem/beam-column. O menor deles costuma controlar a flambagem.
+- `centroid_offset_mm` indica se a seção local ficou excêntrica. Se esse valor aparecer alto, a peça precisa ser montada exatamente como modelada ou recalculada.
+- Banzos inferiores finos podem ser aceitáveis quando trabalham como tirantes; o risco construtivo passa a ser continuidade, emendas e desalinhamento, não flambagem.
+- Em seção `box` com número ímpar de palitos, o modelo usa posição central/simétrica para evitar excentricidade; mover o palito extra para um canto altera centroide e inércia.
+
+## Tabela executiva
+| grupo | n | layout | orientação | Iy [mm⁴] | Iz [mm⁴] | offset centroide [mm] | aviso | nota construtiva |
+| --- | ---: | --- | --- | ---: | ---: | ---: | --- | --- |
+{table}
+
+Arquivo completo: `section_layout_audit.csv`.
+""",
+            encoding="utf-8",
+        )
 
     @staticmethod
     def _group_piece_plan(detailed: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -272,6 +416,85 @@ class ReportBundleService:
             {"step_index": 6, "title": "Inspecionar e pesar", "instruction": "Conferir massa, simetria, cura e alinhamento antes do ensaio."},
         ]
 
+    @staticmethod
+    def _subassembly_rows(detailed: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Aggregate member detail rows into practical subassemblies.
+
+        These rows are intentionally higher level than ``stick_pieces.csv`` and
+        lower level than the executive summary: one line tells the builder how a
+        family of members must be glued and oriented.
+        """
+        grouped: Dict[tuple, Dict[str, Any]] = {}
+        for r in (detailed or {}).get("member_detail_checks", []) or []:
+            key = (
+                str(r.get("group", "")),
+                str(r.get("layout", "")),
+                int(safe_float(r.get("n_lanes_sticks", r.get("n_sticks_current", 1)), 1) or 1),
+                str(r.get("joint_model", "")),
+            )
+            item = grouped.setdefault(
+                key,
+                {
+                    "member_group": key[0],
+                    "layout": key[1],
+                    "n_sticks": key[2],
+                    "joint_model": key[3],
+                    "member_count": 0,
+                    "member_ids_example": [],
+                    "min_length_mm": None,
+                    "max_length_mm": None,
+                    "pieces_per_lane": None,
+                    "total_piece_count": 0,
+                    "min_FS_global": None,
+                    "min_FS_glue": None,
+                    "construction_note": "",
+                },
+            )
+            item["member_count"] += 1
+            if r.get("member_id") is not None and len(item["member_ids_example"]) < 16:
+                item["member_ids_example"].append(str(r.get("member_id")))
+            L = safe_float(r.get("member_length_mm"), None)
+            if L is not None:
+                item["min_length_mm"] = L if item["min_length_mm"] is None else min(float(item["min_length_mm"]), L)
+                item["max_length_mm"] = L if item["max_length_mm"] is None else max(float(item["max_length_mm"]), L)
+            ppl = safe_float(r.get("pieces_per_lane"), None)
+            if ppl is not None:
+                item["pieces_per_lane"] = int(ppl)
+            item["total_piece_count"] += int(safe_float(r.get("total_piece_count"), 0) or 0)
+            fs_g = safe_float(r.get("FS_min_global"), None)
+            if fs_g is not None and (item["min_FS_global"] is None or fs_g < item["min_FS_global"]):
+                item["min_FS_global"] = float(fs_g)
+            fs_c = safe_float(r.get("FS_min_glue"), None)
+            if fs_c is not None and (item["min_FS_glue"] is None or fs_c < item["min_FS_glue"]):
+                item["min_FS_glue"] = float(fs_c)
+
+        rows: List[Dict[str, Any]] = []
+        for item in grouped.values():
+            g = str(item.get("member_group"))
+            layout = str(item.get("layout"))
+            n = int(item.get("n_sticks") or 1)
+            if g == "top_chord":
+                note = "banzo superior comprimido: montar em gabarito rígido, orientação edge, seção box sem torção; não alterar posição das lanes"
+            elif g == "bottom_chord":
+                note = "banzo inferior/tirante: manter continuidade, emendas desencontradas e alinhamento longitudinal"
+            elif g == "vertical":
+                note = "montantes: colar como subpeças retas; controlar perpendicularidade e evitar flambagem por empeno"
+            elif g == "diagonal":
+                note = "diagonais: montar em pares espelhados; não alinhar emendas em painéis vizinhos"
+            elif "bracing" in g or "transverse" in g:
+                note = "travamento/transversal: instalar antes de manusear a ponte fora do gabarito; controla torção e sidesway"
+            elif g == "support_pad":
+                note = "sapata/apoio: garantir contato plano e simétrico com a mesa"
+            else:
+                note = "seguir posição e orientação do stick_pieces.csv"
+            if layout == "box" and n % 2 == 1:
+                note += "; seção box ímpar usa palito central — não deslocar para canto"
+            item["construction_note"] = note
+            item["member_ids_example"] = ";".join(item.get("member_ids_example", []))
+            rows.append(item)
+        rows.sort(key=lambda r: (str(r.get("member_group")), int(r.get("n_sticks") or 0), str(r.get("layout"))))
+        return rows
+
     def _write_detailed_fabrication_method(
         self,
         out: Path,
@@ -280,8 +503,10 @@ class ReportBundleService:
     ) -> Dict[str, str]:
         piece_plan = self._group_piece_plan(detailed)
         joint_plan = self._joint_summary_plan(detailed)
+        subassembly_rows = self._subassembly_rows(detailed)
         assembly_rows = self._assembly_sequence_rows(detailed)
         GeometryService.write_csv(out / "04_plano_pecas_por_medida.csv", piece_plan)
+        GeometryService.write_csv(out / "04_subconjuntos_montagem.csv", subassembly_rows)
         GeometryService.write_csv(out / "05_mapa_juntas_por_tipo.csv", joint_plan)
         GeometryService.write_csv(out / "06_sequencia_montagem.csv", assembly_rows)
 
@@ -289,6 +514,13 @@ class ReportBundleService:
             f"| {r.get('member_group')} | {r.get('stick_orientation')} | {float(r.get('cut_length_mm') or 0):.1f} | {r.get('quantity')} | {r.get('example_member_ids')} |"
             for r in piece_plan[:40]
         ) or "| — | — | — | — | — |"
+        subassembly_md_rows = "\n".join(
+            f"| {r.get('member_group')} | {r.get('layout')} | {r.get('n_sticks')} | "
+            f"{safe_float(r.get('min_length_mm'), None) if r.get('min_length_mm') is not None else '—'}–"
+            f"{safe_float(r.get('max_length_mm'), None) if r.get('max_length_mm') is not None else '—'} | "
+            f"{r.get('member_count')} | {r.get('pieces_per_lane')} | {r.get('joint_model')} | {r.get('construction_note')} |"
+            for r in subassembly_rows[:50]
+        ) or "| — | — | — | — | — | — | — | — |"
         joint_rows = "\n".join(
             f"| {r.get('member_group')} | {r.get('joint_model')} | {float(r.get('overlap_length_mm') or 0):.1f} | {r.get('joint_count')} | {safe_float(r.get('min_FS_glue_shear'), None)} |"
             for r in joint_plan[:40]
@@ -316,17 +548,31 @@ Este documento consolida o que antes ficava espalhado em vários CSVs. Use os CS
 
 Arquivo completo: `04_plano_pecas_por_medida.csv`.
 
-## 3. Ligações por tipo
+## 3. Subconjuntos construtivos por grupo
+| grupo | seção/layout | palitos por membro | faixa L [mm] | membros | peças/lane | junta | instrução crítica |
+| --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+{subassembly_md_rows}
+
+Arquivo completo: `04_subconjuntos_montagem.csv`.
+
+## 4. Ligações por tipo
 | grupo | modelo de junta | overlap [mm] | quantidade | menor FS cola |
 | --- | --- | ---: | ---: | ---: |
 {joint_rows}
 
 Arquivo completo: `05_mapa_juntas_por_tipo.csv`.
 
-## 4. Sequência lógica de montagem
+## 5. Visualizações de montagem
+- Geometria 3D com cargas, apoios e FS/uso: `../plots/01_geometria_3d_fs_uso.html`.
+- Geometria 3D com prismas reais completos: `../plots/02_geometria_3d_prismas_reais_completo.html`.
+- Vistas 2D/CAD peça-a-peça gerais: `../plots/16_vistas_cad_peca_a_peca.png`.
+- Vistas 2D/CAD peça-a-peça por subconjunto: `../plots/cad_subconjuntos/`.
+- HTMLs peça-a-peça por subconjunto: `../plots/subconjuntos_html/`.
+
+## 6. Sequência lógica de montagem
 {assembly_md}
 
-## 5. Regras construtivas críticas
+## 7. Regras construtivas críticas
 - **Banzos superiores:** montar primeiro como subpeças retas/segmentadas em `edge + box`; controlar torção durante a cura.
 - **Banzos inferiores:** preservar continuidade; emendas sempre desencontradas entre lanes.
 - **Montantes centrais:** colar em pares simétricos; manter perpendicularidade ao banzo inferior.
@@ -334,19 +580,113 @@ Arquivo completo: `05_mapa_juntas_por_tipo.csv`.
 - **Cross-frames e bracing:** instalar antes de manusear a ponte fora do gabarito; eles são parte do travamento do banzo comprimido.
 - **Sapata de apoio:** conferir se há contato pleno em todos os pontos ativos. Se houver folga, corrigir lixando/ajustando antes do ensaio.
 
-## 6. Cola, cura e inspeção
+## 8. Cola, cura e inspeção
 - Overlap nominal: {detail.get('overlap_length_mm')} mm.
 - Evite excesso de cola; excesso aumenta massa e raramente aumenta resistência proporcional.
 - Prense as juntas até a pega inicial e deixe cura completa antes de fechar a estrutura 3D.
 - Antes do ensaio, conferir `symmetry_audit.csv`, massa final, ausência de torção nos banzos e alinhamento dos apoios.
 """
         (out / "04_plano_montagem_detalhado.md").write_text(method, encoding="utf-8")
+        (out / "04_subconjuntos_montagem.md").write_text(
+            "# Subconjuntos de montagem\n\n"
+            "| grupo | seção/layout | palitos por membro | faixa L [mm] | membros | peças/lane | junta | instrução crítica |\n"
+            "| --- | --- | ---: | ---: | ---: | ---: | --- | --- |\n"
+            f"{subassembly_md_rows}\n",
+            encoding="utf-8",
+        )
+        (out / "05_mapa_juntas_por_tipo.md").write_text(
+            "# Mapa de juntas por tipo\n\n"
+            "| grupo | modelo de junta | overlap [mm] | quantidade | menor FS cola |\n"
+            "| --- | --- | ---: | ---: | ---: |\n"
+            f"{joint_rows}\n",
+            encoding="utf-8",
+        )
+        (out / "06_sequencia_montagem.md").write_text(
+            "# Sequência lógica de montagem\n\n" + assembly_md + "\n",
+            encoding="utf-8",
+        )
         return {
             "detailed_fabrication_method_md": str(out / "04_plano_montagem_detalhado.md"),
+            "subassembly_plan_md": str(out / "04_subconjuntos_montagem.md"),
+            "joint_plan_md": str(out / "05_mapa_juntas_por_tipo.md"),
+            "assembly_sequence_md": str(out / "06_sequencia_montagem.md"),
             "piece_plan_csv": str(out / "04_plano_pecas_por_medida.csv"),
             "joint_plan_csv": str(out / "05_mapa_juntas_por_tipo.csv"),
+            "subassembly_plan_csv": str(out / "04_subconjuntos_montagem.csv"),
             "assembly_sequence_csv": str(out / "06_sequencia_montagem.csv"),
         }
+
+    @staticmethod
+    def _write_connectivity_cut_audit(out: Path, cfg: Dict[str, Any], detailed: Dict[str, Any]) -> str:
+        rows = list((detailed or {}).get("stick_pieces", []) or [])
+        mat = cfg.get("material", {}) or {}
+        stick_len = safe_float(mat.get("stick_length_mm"), 120.0) or 120.0
+        stick_w = safe_float(mat.get("stick_width_mm"), 7.0) or 7.0
+        stick_t = safe_float(mat.get("stick_thickness_mm"), 1.5) or 1.5
+        max_cut = safe_float((cfg.get("detail_model", {}) or {}).get("max_cut_length_mm"), stick_len) or stick_len
+        cut_limit = min(float(stick_len), float(max_cut))
+
+        total = len(rows)
+        over_len = []
+        bad_width = []
+        bad_thk = []
+        by_model: Dict[str, int] = {}
+        for r in rows:
+            cut = safe_float(r.get("cut_length_mm"), None)
+            if cut is not None and cut > cut_limit + 1.0e-9:
+                over_len.append(r)
+            vw = safe_float(r.get("visual_width_mm"), None)
+            vt = safe_float(r.get("visual_thickness_mm"), None)
+            if vw is not None and vt is not None:
+                if max(vw, vt) > max(stick_w, stick_t) + 1.0e-9:
+                    bad_width.append(r)
+                if min(vw, vt) > min(stick_w, stick_t) + 1.0e-9:
+                    bad_thk.append(r)
+            model = str(r.get("section_connection_model", r.get("section_layout_effective", "unknown")))
+            by_model[model] = by_model.get(model, 0) + 1
+
+        top_over = "\n".join(
+            f"| {r.get('stick_id')} | {r.get('member_id')} | {r.get('member_group')} | {safe_float(r.get('cut_length_mm'), None)} | {safe_float(r.get('max_cut_length_mm'), cut_limit)} |"
+            for r in over_len[:25]
+        ) or "| — | — | — | — | — |"
+        model_rows = "\n".join(
+            f"| {model} | {count} |"
+            for model, count in sorted(by_model.items(), key=lambda kv: (-kv[1], kv[0]))
+        ) or "| — | — |"
+        verdict = "OK" if not over_len and not bad_width and not bad_thk else "FALHA"
+        text = f"""# Auditoria de conectividade e limites físicos dos palitos
+
+Veredito: **{verdict}**.
+
+## Limites usados
+- Comprimento máximo de corte: **{cut_limit:.1f} mm**.
+- Dimensão individual do palito: **{stick_len:.1f} × {stick_w:.1f} × {stick_t:.1f} mm**.
+- Total de peças detalhadas: **{total}**.
+
+## Contagens de falha
+- Cortes acima do limite: **{len(over_len)}**.
+- Prismas/peças com largura visual acima do palito: **{len(bad_width)}**.
+- Prismas/peças com espessura visual acima do palito: **{len(bad_thk)}**.
+
+## Modelos de conexão usados
+| modelo de conexão | peças |
+| --- | ---: |
+{model_rows}
+
+## Cortes acima do limite
+| stick | membro | grupo | corte [mm] | limite [mm] |
+| --- | ---: | --- | ---: | ---: |
+{top_over}
+
+## Interpretação
+- `face_to_face_lamination`: palitos colados por face, sem caixa falsa.
+- `mixed_T_contact_lamination`: seção de 3 palitos conectada; não é caixa.
+- `four_side_contact_box_with_face_side_glue`: caixa de 4+ palitos por contato lateral/face, coerente com montagem física.
+- Se qualquer contagem de falha for maior que zero, o relatório estrutural não deve ser usado como memorial final sem corrigir o detalhamento.
+"""
+        path = out / "09_auditoria_conectividade_e_cortes.md"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
 
     def generate(
         self,
@@ -453,6 +793,41 @@ O modelo principal aceita carga distribuída por superfície, mas isso é uma hi
             encoding="utf-8",
         )
 
+        section_layout_rows = self._section_layout_audit_rows(cfg, member_checks)
+        self._write_section_layout_audit(out, section_layout_rows)
+
+        # Relatório de debug humano: os CSVs continuam internos, mas o pacote
+        # de entrega precisa permitir rastrear por texto quais comparações
+        # governaram o resultado.
+        worst_checks = sorted(
+            [r for r in (member_checks or []) if safe_float(r.get("FS_min"), None) is not None],
+            key=lambda r: safe_float(r.get("FS_min"), 1.0e99) or 1.0e99,
+        )[:25]
+        debug_rows = "\n".join(
+            f"| {r.get('member_id')} | {r.get('group')} | {r.get('n_sticks')} | {r.get('layout')} | "
+            f"{safe_float(r.get('N_N'), None) if r.get('N_N') is not None else '—'} | "
+            f"{safe_float(r.get('FS_min'), None) if r.get('FS_min') is not None else '—'} | "
+            f"{r.get('governing_mode')} | {safe_float(r.get('Pcr_y_N'), None) if r.get('Pcr_y_N') is not None else '—'} | "
+            f"{safe_float(r.get('Pcr_z_N'), None) if r.get('Pcr_z_N') is not None else '—'} |"
+            for r in worst_checks
+        ) or "| — | — | — | — | — | — | — | — | — |"
+        (out / "10_debug_calculos_criticos.md").write_text(
+            f"""# Debug dos cálculos críticos
+
+Este arquivo resume os membros que governam a ruptura e os valores usados na comparação. Ele foi criado para evitar que a depuração dependa de planilhas.
+
+| membro | grupo | palitos | layout | N [N] | FS mínimo | modo governante | Pcr y [N] | Pcr z [N] |
+| ---: | --- | ---: | --- | ---: | ---: | --- | ---: | ---: |
+{debug_rows}
+
+## Leituras úteis
+- Se `Pcr y/z` for muito menor que a compressão direta, o problema é flambagem/inércia, não resistência axial do palito.
+- Se o modo governante for `beam_column_interaction`, a imperfeição/excentricidade está amplificando a compressão.
+- Se uma seção aparecer como `box` com menos de 4 palitos, ela deve ser reinterpretada como laminação compacta ou seção triangular travada; não é uma caixa real.
+""",
+            encoding="utf-8",
+        )
+
         mass_breakdown = [
             {"item": "installed_stick_mass_g", "value_g": summary.get("installed_stick_mass_g")},
             {"item": "wet_glue_mass_g", "value_g": summary.get("wet_glue_mass_g")},
@@ -484,7 +859,7 @@ O modelo principal aceita carga distribuída por superfície, mas isso é uma hi
 - Modelo estrutural: treliça axial linear.
 - Solver tension-only: {'ativo' if bool(cfg.get('bridge', {}).get('tension_only_bracing_solver_enabled', False)) else 'inativo'}.
 - Colunas: Euler/Johnson com ajuste de excentricidade simplificado.
-- Seção composta: ação parcial com `eta_I`.
+- Seção composta: ação parcial com `eta_I`. Seções `box` com 2 ou 3 palitos são automaticamente tratadas como laminação compacta; uma caixa real exige 4+ palitos e travamento local/gabarito.
 - Interação axial-flexão: verificação simplificada beam-column.
 - Limitação: modelo não substitui ensaio físico.
 """
@@ -682,8 +1057,48 @@ Top 5 mudanças necessárias:
 {changes_md}
 """
         (out / "index.md").write_text(index_md, encoding="utf-8")
+        escaped_index_md = index_md.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         (out / "index.html").write_text(
-            "<html><body><pre>" + index_md.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + "</pre></body></html>",
+            f"""<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <title>Relatório final — ponte de palitos</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 24px; line-height: 1.45; color: #111827; }}
+    h1, h2 {{ margin-bottom: 0.35rem; }}
+    .grid {{ display: grid; grid-template-columns: 1fr; gap: 18px; }}
+    iframe {{ width: 100%; height: 720px; border: 1px solid #d1d5db; border-radius: 8px; }}
+    pre {{ white-space: pre-wrap; background: #f9fafb; padding: 16px; border-radius: 8px; }}
+    .links a {{ display: inline-block; margin: 0 10px 8px 0; }}
+  </style>
+</head>
+<body>
+  <h1>Relatório final — ponte de palitos</h1>
+  <p>Este HTML consolida o resumo, os links principais e as visualizações interativas úteis para montagem.</p>
+  <div class="links">
+    <a href="00_resumo_executivo.md">Resumo executivo</a>
+    <a href="01_memorial_calculo.md">Memorial de cálculo</a>
+    <a href="02_guia_fabricacao.md">Guia de fabricação</a>
+    <a href="04_plano_montagem_detalhado.md">Plano detalhado de montagem</a>
+    <a href="../plots/16_vistas_cad_peca_a_peca.png">Vistas CAD 2D peça-a-peça</a>
+    <a href="../plots/cad_subconjuntos/">CAD 2D por subconjunto</a>
+    <a href="../plots/subconjuntos_html/">3D por subconjunto</a>
+  </div>
+  <div class="grid">
+    <section>
+      <h2>3D com cargas, apoios e FS/uso</h2>
+      <iframe src="../plots/01_geometria_3d_fs_uso.html"></iframe>
+    </section>
+    <section>
+      <h2>3D com prismas reais — estrutura completa</h2>
+      <iframe src="../plots/02_geometria_3d_prismas_reais_completo.html"></iframe>
+    </section>
+  </div>
+  <h2>Resumo markdown bruto</h2>
+  <pre>{escaped_index_md}</pre>
+</body>
+</html>""",
             encoding="utf-8",
         )
 
@@ -836,6 +1251,7 @@ Este pacote reduz a redundância dos outputs e organiza os arquivos por função
 """
 
         detailed_method_paths = self._write_detailed_fabrication_method(out, cfg, detailed or {})
+        connectivity_audit_path = self._write_connectivity_cut_audit(out, cfg, detailed or {})
 
         focused_manifest = {
             "purpose": "pacote executivo/fabricacao com poucos arquivos e alta densidade de informacao",
@@ -845,17 +1261,14 @@ Este pacote reduz a redundância dos outputs e organiza os arquivos por função
                 "02_guia_fabricacao.md",
                 "03_checklist_construcao.md",
                 "04_plano_montagem_detalhado.md",
-                "04_plano_pecas_por_medida.csv",
-                "05_mapa_juntas_por_tipo.csv",
-                "06_sequencia_montagem.csv",
-                "critical_members.csv",
-                "mass_breakdown.csv",
-                "fabrication_summary.csv",
-                "symmetry_audit.csv",
-                "final_strength_reserve_push.csv",
-                "stick_pieces.csv",
-                "cutting_list.csv",
-                "glue_joints.csv",
+                "04_plano_montagem_detalhado.md",
+                "04_subconjuntos_montagem.md",
+                "05_mapa_juntas_por_tipo.md",
+                "06_sequencia_montagem.md",
+                "07_avaliacao_contato_carga.md",
+                "08_auditoria_secao_e_realismo.md",
+                "09_auditoria_conectividade_e_cortes.md",
+                "10_debug_calculos_criticos.md",
             ],
             "verdict": verdict,
             "predicted_breaking_load_kgf": pred_break,
@@ -880,6 +1293,7 @@ Este pacote reduz a redundância dos outputs e organiza os arquivos por função
             "fabrication_guide_md": str(out / "02_guia_fabricacao.md"),
             "construction_checklist_md": str(out / "03_checklist_construcao.md"),
             **detailed_method_paths,
+            "connectivity_cut_audit_md": connectivity_audit_path,
             "focused_outputs_manifest_json": str(out / "focused_outputs_manifest.json"),
             "executive_summary_json": str(out / "executive_summary.json"),
             "critical_members_csv": str(out / "critical_members.csv"),
@@ -892,4 +1306,6 @@ Este pacote reduz a redundância dos outputs e organiza os arquivos por função
             "mixed_panel_patterns_csv": str(out / "mixed_panel_patterns.csv"),
             "mass_reallocation_after_topology_csv": str(out / "mass_reallocation_after_topology.csv"),
             "pipeline_stage_trace_csv": str(out / "pipeline_stage_trace.csv"),
+            "section_layout_audit_md": str(out / "08_auditoria_secao_e_realismo.md"),
+            "section_layout_audit_csv": str(out / "section_layout_audit.csv"),
         }

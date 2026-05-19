@@ -9,13 +9,15 @@ from src.core.numeric import safe_float
 class DetailVisualizationService:
     def save_all(self, detailed: Dict, out_dir: str | Path, top_n: int = 12) -> List[Path]:
         out=Path(out_dir); out.mkdir(parents=True, exist_ok=True)
-        return [
-            self.plot_cutting_list(detailed.get('cutting_list',[]), out/'11_lista_de_cortes.png'),
-            self.plot_glue_joints(detailed.get('weakest_glue_joints',[]), out/'12_juntas_coladas_criticas.png'),
-            self.plot_mass_summary(detailed.get('summary',{}), out/'13_resumo_massa.png'),
-            self.plot_member_templates(detailed.get('stick_pieces',[]), detailed.get('weakest_members',[]), out/'14_gabaritos_membros_criticos.png', top_n),
-            self.plot_piece_map_by_group(detailed.get('member_detail_checks',[]), out/'15_pecas_por_grupo.png'),
-        ]
+        # Saídas gráficas enxutas: apenas vistas que ajudam a montar a ponte
+        # peça-a-peça.  Gráficos de massa, ranking e cortes continuam nos CSVs
+        # e no relatório textual, mas deixam de poluir a pasta de plots.
+        paths: List[Path] = []
+        pieces = detailed.get('stick_pieces', []) or []
+        if pieces:
+            paths.append(self.plot_piece_orthographic_overview(pieces, out/'16_vistas_cad_peca_a_peca.png'))
+            paths.extend(self.plot_piece_orthographic_by_group(pieces, out/'cad_subconjuntos'))
+        return paths
     def plot_cutting_list(self, rows:List[Dict], path):
         p=Path(path); fig,ax=plt.subplots(figsize=(12,7)); top=sorted(rows,key=lambda r:float(r.get('quantity',0)),reverse=True)[:25]
         if top:
@@ -55,6 +57,78 @@ class DetailVisualizationService:
             group=rows[0]['member_group'] if rows else ''
             ax.set_title(f'Membro {mid} — {group}'); ax.set_ylabel('linha'); ax.grid(True,axis='x',alpha=0.25)
         axes[-1].set_xlabel('posição ao longo do membro [mm]'); fig.tight_layout(); fig.savefig(p,dpi=220); plt.close(fig); return p
+    def plot_piece_orthographic_overview(self, pieces: List[Dict], path):
+        """Desenha vistas 2D tipo CAD do detalhamento peça-a-peça.
+
+        A imagem usa os mesmos pontos globais do ``stick_pieces.csv``.  Assim,
+        se a visualização 3D peça-a-peça estiver filtrada por grupo, a relação
+        geométrica é consistente com a ponte completa.
+        """
+        p = Path(path)
+        rows = list(pieces or [])
+        fig, axes = plt.subplots(3, 1, figsize=(14, 11))
+        titles = [
+            "Elevação lateral — x/z [mm]",
+            "Planta superior — x/y [mm]",
+            "Seções/projeções transversais — y/z [mm]",
+        ]
+        for ax, title in zip(axes, titles):
+            ax.set_title(title)
+            ax.grid(True, alpha=0.22)
+        if rows:
+            # Amostragem determinística para manter o arquivo leve quando há
+            # milhares de peças.
+            step = max(1, int(len(rows) / 1800))
+            for r in rows[::step]:
+                x0 = safe_float(r.get("x0_mm"), 0.0) or 0.0
+                y0 = safe_float(r.get("y0_mm"), 0.0) or 0.0
+                z0 = safe_float(r.get("z0_mm"), 0.0) or 0.0
+                x1 = safe_float(r.get("x1_mm"), 0.0) or 0.0
+                y1 = safe_float(r.get("y1_mm"), 0.0) or 0.0
+                z1 = safe_float(r.get("z1_mm"), 0.0) or 0.0
+                axes[0].plot([x0, x1], [z0, z1], linewidth=1.2, alpha=0.55)
+                axes[1].plot([x0, x1], [y0, y1], linewidth=1.2, alpha=0.55)
+                axes[2].plot([y0, y1], [z0, z1], linewidth=1.2, alpha=0.45)
+            axes[0].set_xlabel("x [mm]"); axes[0].set_ylabel("z [mm]")
+            axes[1].set_xlabel("x [mm]"); axes[1].set_ylabel("y [mm]")
+            axes[2].set_xlabel("y [mm]"); axes[2].set_ylabel("z [mm]")
+            axes[0].axis("equal"); axes[1].axis("equal"); axes[2].axis("equal")
+        else:
+            for ax in axes:
+                ax.text(0.5, 0.5, "Sem dados peça-a-peça", ha="center", va="center", transform=ax.transAxes)
+        fig.tight_layout()
+        fig.savefig(p, dpi=220)
+        plt.close(fig)
+        return p
+
+    def plot_piece_orthographic_by_group(self, pieces: List[Dict], out_dir):
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        rows = list(pieces or [])
+        paths: List[Path] = []
+        if not rows:
+            return paths
+        preferred = [
+            "top_chord",
+            "bottom_chord",
+            "vertical",
+            "diagonal",
+            "top_transverse",
+            "bottom_transverse",
+            "top_bracing",
+            "bottom_bracing",
+            "cross_frame_bracing",
+            "support_pad",
+        ]
+        groups = [g for g in preferred if any(str(r.get("member_group")) == g for r in rows)]
+        for group in groups:
+            safe_name = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in group)
+            paths.append(self.plot_piece_orthographic_overview(
+                [r for r in rows if str(r.get("member_group")) == group],
+                out / f"{safe_name}_vistas_2d.png",
+            ))
+        return paths
+
     def plot_piece_map_by_group(self, rows:List[Dict], path):
         p=Path(path); counts=defaultdict(float)
         for r in rows: counts[r.get('group','')]+=float(r.get('total_piece_count',0))

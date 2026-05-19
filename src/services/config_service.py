@@ -590,6 +590,8 @@ class ConfigService:
         detail.setdefault("cut_increment_mm", 5.0)
         detail.setdefault("allow_cut_rounding", True)
         detail.setdefault("min_cut_length_mm", 5.0)
+        detail.setdefault("strict_cut_length", True)
+        detail.setdefault("max_cut_length_mm", float(mat.get("stick_length_mm", 120.0)))
         detail.setdefault("allow_recommend_removal_if_fs_gt", 8.0)
         detail.setdefault("reinforce_if_fs_lt", 2.0)
         detail.setdefault("tension_only_stabilizers", True)
@@ -611,6 +613,8 @@ class ConfigService:
 
         detail.setdefault("generate_member_templates", True)
         detail.setdefault("generate_piece_views", True)
+        detail.setdefault("max_piece_prism_html_pieces", 80)
+        detail.setdefault("generate_group_piece_html", False)
 
         glue_cure = float(detail.get("glue_cure_solids_fraction", 0.50))
 
@@ -870,6 +874,24 @@ class ConfigService:
         analysis.setdefault("planner_objective_weight_mass_limit", 0.03)
         analysis.setdefault("planner_allow_infeasible_recommendation", False)
         analysis.setdefault("planner_debug_enabled", True)
+        # Limpa diretórios de saída antes de cada execução para impedir que
+        # arquivos de runs antigos (especialmente optimization/final_validation)
+        # sejam confundidos com o resultado atual.
+        analysis.setdefault("clean_output_dirs_before_run", True)
+        analysis.setdefault(
+            "output_dirs_to_clean_before_run",
+            [
+                "optimization",
+                "details",
+                "final_report",
+                "reports",
+                "model",
+                "opensees",
+                "frame3dd",
+                "plots",
+                "logs",
+            ],
+        )
         analysis.setdefault("final_variants_enabled", True)
         analysis.setdefault("final_round_step_length_mm", 5.0)
         analysis.setdefault("final_round_step_section_mm", 0.1)
@@ -918,10 +940,10 @@ class ConfigService:
         pipeline_cfg = cfg.setdefault("planner_pipeline", {})
         pipeline_cfg.setdefault("mode", "staged_fidelity_funnel")
         pipeline_cfg.setdefault("macro_candidates_count", 12)
-        pipeline_cfg.setdefault("fast_screening_keep_top_k", 3)
-        pipeline_cfg.setdefault("multi_loadcase_keep_top_k", 2)
-        pipeline_cfg.setdefault("geometry_refinement_keep_top_k", 1)
-        pipeline_cfg.setdefault("allow_top2_full_detailing", False)
+        pipeline_cfg.setdefault("fast_screening_keep_top_k", 8)
+        pipeline_cfg.setdefault("multi_loadcase_keep_top_k", 5)
+        pipeline_cfg.setdefault("geometry_refinement_keep_top_k", 3)
+        pipeline_cfg.setdefault("allow_top2_full_detailing", True)
         pipeline_cfg.setdefault("preserve_diversity_in_fast_screening", True)
         pipeline_cfg.setdefault("defer_fabrication_detailing_until_stage", "S7")
         pipeline_cfg.setdefault("defer_topology_mutation_until_stage", "S6")
@@ -933,6 +955,13 @@ class ConfigService:
         pipeline_cfg.setdefault("s2_soft_mass_factor", 1.00)
         pipeline_cfg.setdefault("s2_hard_mass_reject_factor", 1.40)
         pipeline_cfg.setdefault("s2_overweight_min_break_ratio", 0.45)
+        # Depois que seções não construtivas (box com 2/3 palitos) foram
+        # corrigidas, S3 pode parecer muito fraco antes do dimensionamento
+        # discreto de S5.  Não abortar por padrão; apenas registrar diagnóstico.
+        pipeline_cfg.setdefault("s3_hard_abort_break_ratio", 0.0)
+        pipeline_cfg.setdefault("s3_hard_abort_abs_break_kgf", 0.10)
+        pipeline_cfg.setdefault("skip_geometry_refinement_when_low_pre_sizing", False)
+        pipeline_cfg.setdefault("low_pre_sizing_s5_seed_cap", 5)
 
         # ---------------------------------------------------------------------
         # Fast screening
@@ -956,6 +985,7 @@ class ConfigService:
             [
                 "center",
                 "torsion_60_40",
+                "torsion_70_30",
                 "lateral_imperfection",
             ],
         )
@@ -964,6 +994,7 @@ class ConfigService:
             [
                 "left_offset",
                 "right_offset",
+                "torsion_80_20",
             ],
         )
         multi_loadcase.setdefault(
@@ -980,6 +1011,8 @@ class ConfigService:
                 "left_offset",
                 "right_offset",
                 "torsion_60_40",
+                "torsion_70_30",
+                "torsion_80_20",
                 "lateral_imperfection",
                 "self_weight",
             ],
@@ -1107,6 +1140,7 @@ class ConfigService:
         member_sizing_cfg.setdefault("section_efficiency_min_fs_gain", 1.001)
         member_sizing_cfg.setdefault("section_efficiency_min_robustness_gain", 1.01)
         member_sizing_cfg.setdefault("section_efficiency_require_bracing_for_K", True)
+        member_sizing_cfg.setdefault("s5_fast_strength_cases_only", True)
 
         # Mutação geométrica tardia do platô/largura: quando a carga é aplicada
         # por uma placa/deck superior, a largura mínima regulamentar geralmente
@@ -1114,11 +1148,15 @@ class ConfigService:
         # é aplicada no funil tardio e é validada por todos os load cases.
         member_sizing_cfg.setdefault("enable_plateau_width_efficiency_mutation", True)
         member_sizing_cfg.setdefault("enable_late_section_efficiency_after_width", True)
-        member_sizing_cfg.setdefault("plateau_width_efficiency_candidates_mm", [100.0, 105.0, 110.0, 120.0, 130.0])
+        member_sizing_cfg.setdefault("plateau_width_efficiency_candidates_mm", [110.0, 120.0, 130.0, 150.0])
         member_sizing_cfg.setdefault("plateau_width_efficiency_min_mass_saving_g", 8.0)
         member_sizing_cfg.setdefault("plateau_width_efficiency_min_break_retention", 0.995)
         member_sizing_cfg.setdefault("plateau_width_efficiency_min_fs_retention", 0.995)
-        member_sizing_cfg.setdefault("plateau_width_efficiency_min_width_mm", 100.0)
+        # 100 mm é o mínimo de edital, mas não é uma boa meta construtiva:
+        # pequena variação de montagem ou carga lateral pode tornar o caso
+        # torsional mais severo que 60/40.  Usar 110 mm como piso de projeto
+        # preserva folga de medição e melhora robustez prática.
+        member_sizing_cfg.setdefault("plateau_width_efficiency_min_width_mm", 110.0)
         member_sizing_cfg.setdefault("plateau_width_efficiency_update_load_footprint", True)
 
         # Mutação de eficiência dos planos superior/inferior: busca retirar massa
@@ -1195,6 +1233,7 @@ class ConfigService:
             [
                 "center",
                 "torsion_60_40",
+                "torsion_70_30",
                 "lateral_imperfection",
             ],
         )
@@ -1215,6 +1254,7 @@ class ConfigService:
         topology_cleanup.setdefault("skip_if_break_below_ratio", 0.65)
         # Mira massa abaixo de 980 g, não apenas abaixo do limite eliminatório.
         topology_cleanup.setdefault("mass_rescue_target_ratio", 0.955)
+        topology_cleanup.setdefault("skip_if_very_low_strength_before_mass_rescue", False)
         topology_cleanup.setdefault("mass_rescue_min_break_retention", 0.985)
         topology_cleanup.setdefault("mass_rescue_min_fs_retention", 0.985)
         topology_cleanup.setdefault(

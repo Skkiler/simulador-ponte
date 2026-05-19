@@ -66,102 +66,28 @@ class VisualizationService:
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
 
+        # Pacote visual enxuto: mantemos apenas a geometria 3D interativa
+        # com cargas/apoios e coloração por FS/uso.  As vistas 2D/3D de
+        # montagem peça-a-peça são geradas no DetailVisualizationService e no
+        # bloco específico de detalhamento.
         paths: List[Path] = []
-
-        paths.append(
-            self.plot_geometry_3d(
-                nodes,
-                members,
-                supports,
-                loads,
-                out / "01_geometria_3d.png",
-            )
+        fig_fs = self.plotly_geometry(
+            nodes,
+            members,
+            supports,
+            loads,
+            color_mode="risk",
+            member_results=member_results,
+            member_checks=member_checks,
         )
+        p_fs = out / "01_geometria_3d_fs_uso.html"
+        fig_fs.write_html(p_fs)
+        paths.append(p_fs)
 
-        paths.append(
-            self.plot_side(
-                nodes,
-                members,
-                "L",
-                out / "02_trelica_lateral_esquerda.png",
-            )
-        )
-
-        paths.append(
-            self.plot_side(
-                nodes,
-                members,
-                "R",
-                out / "03_trelica_lateral_direita.png",
-            )
-        )
-
-        paths.append(
-            self.plot_plan(
-                nodes,
-                members,
-                "top",
-                out / "04_plano_superior.png",
-            )
-        )
-
-        paths.append(
-            self.plot_plan(
-                nodes,
-                members,
-                "bottom",
-                out / "05_plano_inferior.png",
-            )
-        )
-
-        paths.append(
-            self.plot_axial(
-                nodes,
-                members,
-                member_results,
-                out / "06_esforcos_axiais_todos.png",
-                primary_only=False,
-            )
-        )
-
-        paths.append(
-            self.plot_axial(
-                nodes,
-                members,
-                member_results,
-                out / "07_esforcos_axiais_principais.png",
-                primary_only=True,
-            )
-        )
-
-        paths.append(
-            self.plot_deformed(
-                nodes,
-                members,
-                node_results,
-                out / "08_forma_deformada.png",
-                scale=deformed_scale,
-            )
-        )
-
-        paths.append(
-            self.plot_failure_ranking(
-                member_checks,
-                out / "09_ranking_falha_principal.png",
-            )
-        )
-
-        paths.append(
-            self.plot_supports(
-                support_checks,
-                out / "10_reacoes_apoio.png",
-            )
-        )
-
-        html = self.plotly_geometry(nodes, members, supports, loads)
-        html.write_html(out / "geometria_3d_interativa.html")
-        paths.append(out / "geometria_3d_interativa.html")
-
+        # Alias histórico usado por partes antigas do relatório.
+        legacy = out / "geometria_3d_interativa.html"
+        fig_fs.write_html(legacy)
+        paths.append(legacy)
         return paths
 
     def plot_geometry_3d(self, nodes, members, supports, loads, path):
@@ -878,9 +804,28 @@ class VisualizationService:
         thickness_mm: float,
         local_rotation: float = 0.0,
         offset: tuple[float, float, float] | None = None,
+        width_axis: tuple[float, float, float] | None = None,
+        thickness_axis: tuple[float, float, float] | None = None,
     ) -> Dict[str, List[float]]:
-        """Gera vértices/faces de um prisma orientado entre p0 e p1."""
+        """Gera vértices/faces de um prisma orientado entre p0 e p1.
+
+        Quando ``width_axis``/``thickness_axis`` são informados, o prisma usa os
+        mesmos eixos locais da seção que foram usados para posicionar as lanes de
+        palitos no detalhamento.  Sem isso, cada membro escolhia eixos visuais a
+        partir de um vetor auxiliar arbitrário; em uma ponte com muitos membros
+        inclinados, prismas de uma mesma seção podiam parecer em leque mesmo
+        quando o cálculo os mantinha colados no centroide correto.
+        """
         import numpy as _np
+
+        def _unit_or_none(v):
+            if v is None:
+                return None
+            vv = _np.array(v, dtype=float)
+            n = _np.linalg.norm(vv)
+            if n <= 1e-9:
+                return None
+            return vv / n
 
         p0v = _np.array(p0, dtype=float)
         p1v = _np.array(p1, dtype=float)
@@ -893,15 +838,37 @@ class VisualizationService:
         if L <= 1e-9:
             return {"x": [float(p0v[0])] * 8, "y": [float(p0v[1])] * 8, "z": [float(p0v[2])] * 8, "i": [], "j": [], "k": []}
         d_unit = d / L
-        aux = _np.array([0.0, 0.0, 1.0])
-        if abs(_np.dot(aux, d_unit)) > 0.9:
-            aux = _np.array([0.0, 1.0, 0.0])
-        u = _np.cross(d_unit, aux)
-        un = _np.linalg.norm(u)
-        u = _np.array([1.0, 0.0, 0.0]) if un <= 1e-9 else (u / un)
-        v = _np.cross(d_unit, u)
-        vn = _np.linalg.norm(v)
-        v = _np.array([0.0, 1.0, 0.0]) if vn <= 1e-9 else (v / vn)
+
+        u = _unit_or_none(width_axis)
+        v = _unit_or_none(thickness_axis)
+        if u is not None:
+            # Remove componente axial por segurança; o detalhamento já deve
+            # fornecer eixos perpendiculares ao membro, mas CSVs antigos não têm
+            # essa garantia.
+            u = u - _np.dot(u, d_unit) * d_unit
+            un = _np.linalg.norm(u)
+            u = None if un <= 1e-9 else (u / un)
+        if v is not None:
+            v = v - _np.dot(v, d_unit) * d_unit
+            vn = _np.linalg.norm(v)
+            v = None if vn <= 1e-9 else (v / vn)
+
+        if u is None or v is None or abs(float(_np.dot(u, v))) > 0.20:
+            aux = _np.array([0.0, 0.0, 1.0])
+            if abs(_np.dot(aux, d_unit)) > 0.9:
+                aux = _np.array([0.0, 1.0, 0.0])
+            u = _np.cross(d_unit, aux)
+            un = _np.linalg.norm(u)
+            u = _np.array([1.0, 0.0, 0.0]) if un <= 1e-9 else (u / un)
+            v = _np.cross(d_unit, u)
+            vn = _np.linalg.norm(v)
+            v = _np.array([0.0, 1.0, 0.0]) if vn <= 1e-9 else (v / vn)
+        else:
+            # Ortonormaliza preservando o eixo de largura informado; isso evita
+            # pequenos erros numéricos acumulados em prismas longos.
+            v = _np.cross(d_unit, u)
+            vn = _np.linalg.norm(v)
+            v = _np.array([0.0, 1.0, 0.0]) if vn <= 1e-9 else (v / vn)
 
         if abs(float(local_rotation)) > 1.0e-12:
             ang = float(local_rotation)
@@ -980,8 +947,16 @@ class VisualizationService:
         ]
 
         render_mode_norm = str(render_mode or "prismas reais").strip().lower()
-        use_lines = render_mode_norm in {"linhas", "linhas leves", "light_lines"}
-        exaggeration = 1.0 if render_mode_norm in {"prismas reais", "prismas_reais"} else 2.0
+        use_lines = render_mode_norm in {"linhas", "linhas leves", "light_lines", "eixos reais"}
+        # O modo exagerado existe apenas para didática.  Exagero alto faz uma
+        # ponte estreita parecer desconectada; 1.25× preserva leitura sem
+        # destruir a percepção de colagem lado-a-lado.
+        exaggeration = 1.0 if render_mode_norm in {"prismas reais", "prismas_reais"} else 1.25
+        has_real_section_offsets = any(
+            safe_float(r.get("section_global_offset_y_mm"), None) is not None
+            or safe_float(r.get("section_global_offset_z_mm"), None) is not None
+            for r in rows
+        )
 
         for gi, g in enumerate(groups):
             color = base_colors[gi % len(base_colors)]
@@ -989,9 +964,16 @@ class VisualizationService:
             for r in [rr for rr in rows if str(rr.get("member_group", "sem_grupo")) == g]:
                 lane = int(safe_float(r.get("lane"), 1) or 1)
                 pidx = int(safe_float(r.get("piece_index"), 1) or 1)
-                # Offsets para separar visualmente lanes e peças alternadas
-                off_y = (lane - 1) * lane_offset_mm
-                off_z = (0.35 * lane_offset_mm) * ((pidx % 2) - 0.5)
+                # Em versões antigas, as lanes eram afastadas artificialmente
+                # apenas para leitura visual.  Isso fazia uma seção box parecer
+                # torta/desconectada.  Quando o detalhamento já traz offsets
+                # reais de seção, renderizamos exatamente as coordenadas físicas.
+                if has_real_section_offsets:
+                    off_y = 0.0
+                    off_z = 0.0
+                else:
+                    off_y = (lane - 1) * lane_offset_mm
+                    off_z = (0.35 * lane_offset_mm) * ((pidx % 2) - 0.5)
                 x0 = safe_float(r.get("x0_mm"), 0.0) or 0.0
                 y0 = (safe_float(r.get("y0_mm"), 0.0) or 0.0) + off_y
                 z0 = (safe_float(r.get("z0_mm"), 0.0) or 0.0) + off_z
@@ -1030,6 +1012,10 @@ class VisualizationService:
                 ]
                 label_parts.append(f"Blank nominal {nominal_wmm:.1f}×{nominal_tmm:.1f} mm")
                 label_parts.append(f"Render/orientação {wmm:.1f}×{tmm:.1f} mm — {stick_orientation}")
+                sy = safe_float(r.get("section_local_y_mm"), None)
+                sz = safe_float(r.get("section_local_z_mm"), None)
+                if sy is not None and sz is not None:
+                    label_parts.append(f"Posição seção local y/z = {sy:.1f}/{sz:.1f} mm")
                 label = "<br>".join(label_parts)
                 if use_lines:
                     fig.add_trace(
@@ -1046,11 +1032,26 @@ class VisualizationService:
                         )
                     )
                 else:
+                    axis_y = (
+                        safe_float(r.get("section_axis_y_x"), None),
+                        safe_float(r.get("section_axis_y_y"), None),
+                        safe_float(r.get("section_axis_y_z"), None),
+                    )
+                    axis_z = (
+                        safe_float(r.get("section_axis_z_x"), None),
+                        safe_float(r.get("section_axis_z_y"), None),
+                        safe_float(r.get("section_axis_z_z"), None),
+                    )
+                    if any(v is None for v in axis_y) or any(v is None for v in axis_z):
+                        axis_y = None
+                        axis_z = None
                     prism = self.make_oriented_stick_prism(
                         (x0, y0, z0),
                         (x1, y1, z1),
                         width_mm=wmm * exaggeration,
                         thickness_mm=tmm * exaggeration,
+                        width_axis=axis_y,
+                        thickness_axis=axis_z,
                     )
                     fig.add_trace(
                         go.Mesh3d(
@@ -1066,6 +1067,79 @@ class VisualizationService:
                             hovertext=label,
                             hoverinfo="text",
                             showscale=False,
+                        )
+                    )
+
+        # Em seções espaçadas (box real com 4+ palitos), desenha linhas finas
+        # ligando os centros das lanes nos pontos de corte.  Isso não adiciona
+        # resistência ao modelo; serve para deixar claro no CAD/3D que a seção
+        # exige travamento local/gabarito e que os palitos não estão soltos.
+        if not use_lines:
+            by_member: Dict[int, List[Dict[str, Any]]] = {}
+            for r in rows:
+                mid = int(safe_float(r.get("member_id"), -1) or -1)
+                by_member.setdefault(mid, []).append(r)
+            for mid, mrows in by_member.items():
+                lanes = {int(safe_float(r.get("lane"), 0) or 0) for r in mrows}
+                layout_names = {str(r.get("layout", "")) for r in mrows}
+                if len(lanes) < 2 or "box" not in layout_names:
+                    continue
+                # Só liga visualmente se houver espaçamento real entre lanes.
+                max_sep = 0.0
+                centers = []
+                for r in mrows[:min(len(mrows), 20)]:
+                    centers.append((
+                        safe_float(r.get("section_local_y_mm"), 0.0) or 0.0,
+                        safe_float(r.get("section_local_z_mm"), 0.0) or 0.0,
+                    ))
+                for a in centers:
+                    for b in centers:
+                        max_sep = max(max_sep, math.hypot(a[0] - b[0], a[1] - b[1]))
+                if max_sep < 3.0:
+                    continue
+                stations: Dict[float, List[tuple[float, float, float]]] = {}
+                for r in mrows:
+                    for prefix, s_key in (("0", "s0_mm"), ("1", "s1_mm")):
+                        s_val = round(safe_float(r.get(s_key), 0.0) or 0.0, 3)
+                        pt = (
+                            safe_float(r.get(f"x{prefix}_mm"), 0.0) or 0.0,
+                            safe_float(r.get(f"y{prefix}_mm"), 0.0) or 0.0,
+                            safe_float(r.get(f"z{prefix}_mm"), 0.0) or 0.0,
+                        )
+                        stations.setdefault(s_val, []).append(pt)
+                for s_val, pts in list(stations.items())[:14]:
+                    # Remove pontos repetidos e conecta cada lane ao centroide local
+                    # da estação.  Evita uma malha completa que poluiria o desenho.
+                    uniq = []
+                    seen = set()
+                    for pt in pts:
+                        key = tuple(round(v, 3) for v in pt)
+                        if key not in seen:
+                            seen.add(key)
+                            uniq.append(pt)
+                    if len(uniq) < 2 or len(uniq) > 8:
+                        continue
+                    cx = sum(p[0] for p in uniq) / len(uniq)
+                    cy = sum(p[1] for p in uniq) / len(uniq)
+                    cz = sum(p[2] for p in uniq) / len(uniq)
+                    xs = []
+                    ys = []
+                    zs = []
+                    for px, py, pz in uniq:
+                        xs += [px, cx, None]
+                        ys += [py, cy, None]
+                        zs += [pz, cz, None]
+                    fig.add_trace(
+                        go.Scatter3d(
+                            x=xs,
+                            y=ys,
+                            z=zs,
+                            mode="lines",
+                            line={"width": 2, "color": "rgba(80,80,80,0.55)"},
+                            hoverinfo="text",
+                            hovertext=f"Travamento local visual — membro {mid}, estação {s_val:.1f} mm",
+                            name="travamento local",
+                            showlegend=False,
                         )
                     )
 
@@ -1085,8 +1159,8 @@ class VisualizationService:
                 "aspectmode": "manual",
                 "aspectratio": {
                     "x": 1.0,
-                    "y": max(y_span / x_span, 0.20),
-                    "z": max(z_span / x_span, 0.25),
+                    "y": y_span / x_span,
+                    "z": z_span / x_span,
                 },
             },
             height=650,

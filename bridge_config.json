@@ -207,7 +207,8 @@
     "optimize_variants": true,
     "snap_panel_to_even_span_divisor": true,
     "frame3dd_stabilize_rigid_body_modes": true,
-    "frame3dd_fix_support_rotations": false
+    "frame3dd_fix_support_rotations": false,
+    "strict_mass_acceptance": true
   },
   "detail_model": {
     "enabled": true,
@@ -240,30 +241,40 @@
     },
     "generate_member_templates": true,
     "generate_piece_views": true,
-    "auto_splice_overlap_enabled": true
+    "auto_splice_overlap_enabled": true,
+    "strict_cut_length": true,
+    "max_cut_length_mm": 120.0,
+    "cut_increment_mm": 5.0,
+    "allow_cut_rounding": true,
+    "max_piece_prism_html_pieces": 80,
+    "generate_group_piece_html": false
   },
   "section_layout_by_group": {
     "bottom_chord": {
       "layout": "box",
       "spacing_y_mm": 10,
-      "spacing_z_mm": 8
+      "spacing_z_mm": 8,
+      "box_extra_stick_strategy": "balanced"
     },
     "top_chord": {
       "layout": "box",
-      "spacing_y_mm": 14,
-      "spacing_z_mm": 14
+      "spacing_y_mm": 24,
+      "spacing_z_mm": 24,
+      "box_extra_stick_strategy": "laced_box"
     },
     "vertical": {
       "layout": "box",
-      "spacing_y_mm": 10,
-      "spacing_z_mm": 10
+      "spacing_y_mm": 18,
+      "spacing_z_mm": 24,
+      "box_extra_stick_strategy": "laced_box"
     },
     "diagonal": {
       "layout": "box",
       "columns": 2,
-      "spacing_y_mm": 10,
-      "spacing_z_mm": 10,
-      "stick_orientation": "edge"
+      "spacing_y_mm": 16,
+      "spacing_z_mm": 16,
+      "stick_orientation": "edge",
+      "box_extra_stick_strategy": "laced_box"
     },
     "top_transverse": {
       "layout": "stacked",
@@ -303,6 +314,7 @@
       "left_offset",
       "right_offset",
       "torsion_60_40",
+      "torsion_70_30",
       "lateral_imperfection"
     ],
     "include_load_contact_audit_cases": true,
@@ -311,6 +323,8 @@
       "left_offset",
       "right_offset",
       "torsion_60_40",
+      "torsion_70_30",
+      "torsion_80_20",
       "lateral_imperfection",
       "single_plate_center",
       "crown_contact",
@@ -318,7 +332,8 @@
     ],
     "robustness_cases": [
       "single_plate_center",
-      "crown_contact"
+      "crown_contact",
+      "torsion_80_20"
     ]
   },
   "member_sizing": {
@@ -374,7 +389,7 @@
     "final_mass_trim_strength_target_ratio": 0.995,
     "final_strength_push_min_actual_break_gain_kgf": 0.0,
     "plane_bracing_efficiency_allow_strength_loss_below_target": false,
-    "late_stage_detailed_mass_reserve_g": 3.0,
+    "late_stage_detailed_mass_reserve_g": 4.0,
     "late_stage_detailed_mass_max_proxy_overrun_g": 8.0,
     "final_strength_push_repeat_passes": 4,
     "support_pad_push_before_generic_strength_push": true,
@@ -406,12 +421,35 @@
     "late_height_strength_spread_mm": 25.0,
     "late_height_strength_max_mm": 405.0,
     "late_height_strength_min_break_gain_kgf": 0.3,
-    "late_height_strength_min_fs_retention": 0.995
+    "late_height_strength_min_fs_retention": 0.995,
+    "plateau_width_efficiency_min_width_mm": 110.0,
+    "plateau_width_efficiency_candidates_mm": [
+      110.0,
+      120.0,
+      130.0,
+      150.0
+    ],
+    "target_competition_mass_g": 950.0,
+    "s5_fast_strength_cases_only": true,
+    "max_sizing_rounds": 5,
+    "enable_post_topology_reinvestment": true,
+    "enable_post_reinvest_rebalance": true,
+    "enable_section_efficiency_mutation": true,
+    "enable_plateau_width_efficiency_mutation": true,
+    "enable_late_section_efficiency_after_width": true
   },
   "planner_pipeline": {
     "fast_screening_keep_top_k": 8,
     "multi_loadcase_keep_top_k": 5,
     "geometry_refinement_keep_top_k": 3,
-    "allow_top2_full_detailing": true
+    "allow_top2_full_detailing": true,
+    "skip_geometry_refinement_when_low_pre_sizing": false,
+    "low_pre_sizing_s5_seed_cap": 5,
+    "s3_hard_abort_break_ratio": 0.0,
+    "s3_hard_abort_abs_break_kgf": 0.1
+  },
+  "topology_cleanup": {
+    "skip_if_very_low_strength_before_mass_rescue": false,
+    "mass_rescue_target_ratio": 0.95
   }
 }

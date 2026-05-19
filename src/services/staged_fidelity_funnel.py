@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import random
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -477,13 +478,17 @@ class StagedFidelityFunnelPlanner:
                 x_targets=LoadDistributionService.shifted_targets(cfg, offset_delta),
             )
 
-        if case == "torsion_60_40":
+        torsion_match = re.fullmatch(r"torsion_(\d{1,3})_(\d{1,3})", str(case))
+        if torsion_match:
+            left_raw = float(torsion_match.group(1))
+            right_raw = float(torsion_match.group(2))
+            total_bias = max(1.0e-9, left_raw + right_raw)
             return LoadDistributionService.build_nodal_loads(
                 cfg,
                 nodes,
                 loadcase=case,
                 total_N=total_N,
-                side_bias={"left": 0.60, "right": 0.40},
+                side_bias={"left": left_raw / total_bias, "right": right_raw / total_bias},
             )
 
         if case == "lateral_imperfection":
@@ -1920,9 +1925,28 @@ class StagedFidelityFunnelPlanner:
         stage_name: str,
         tension_only: bool = False,
     ) -> Dict[str, Any]:
+        sizing_settings = cfg.get("member_sizing", {}) or {}
+        local_sizing_settings = (
+            (cfg.get("planner", {}) or {}).get("local_sizing", {}) or {}
+        )
+        ml_cfg = cfg.get("multi_loadcase_screening", {}) or {}
+        sizing_load_cases = [
+            str(v)
+            for v in (
+                sizing_settings.get("sizing_load_cases")
+                or ml_cfg.get("strength_governing_cases")
+                or ["center", "torsion_60_40", "lateral_imperfection"]
+            )
+        ]
+        # S5 é iterativo e caro.  Usar os casos de resistência para as iterações
+        # de dimensionamento e deixar a validação completa para S7/S8 evita que
+        # o pipeline pare por timeout logo depois de S3, antes de gerar qualquer
+        # relatório útil.
+        s5_iteration_cases = sizing_load_cases if bool(sizing_settings.get("s5_fast_strength_cases_only", True)) else load_cases
+
         before_summary_probe = self._multi_case_summary(
             cfg,
-            load_cases,
+            s5_iteration_cases,
             stage_name=stage_name,
             tension_only=tension_only,
         )
@@ -1936,11 +1960,6 @@ class StagedFidelityFunnelPlanner:
                 "critical": [],
                 "before_after": [],
             }
-
-        sizing_settings = cfg.get("member_sizing", {}) or {}
-        local_sizing_settings = (
-            (cfg.get("planner", {}) or {}).get("local_sizing", {}) or {}
-        )
 
         max_sizing_rounds = max(
             1,
@@ -1981,17 +2000,6 @@ class StagedFidelityFunnelPlanner:
                 80.0,
             )
         )
-
-        ml_cfg = cfg.get("multi_loadcase_screening", {}) or {}
-
-        sizing_load_cases = [
-            str(v)
-            for v in (
-                sizing_settings.get("sizing_load_cases")
-                or ml_cfg.get("strength_governing_cases")
-                or ["center", "torsion_60_40", "lateral_imperfection"]
-            )
-        ]
 
         cur_cfg = self.planner.config.normalize(cfg)
         cur_summary = before_summary_probe
@@ -2215,7 +2223,7 @@ class StagedFidelityFunnelPlanner:
             # O sizing usa casos nominais, mas a aceitação continua sendo global.
             new_summary = self._multi_case_summary(
                 new_cfg,
-                load_cases,
+                s5_iteration_cases,
                 stage_name=stage_name,
                 tension_only=tension_only,
             )
@@ -2328,6 +2336,16 @@ class StagedFidelityFunnelPlanner:
                 continue
 
             break
+
+        if s5_iteration_cases != load_cases:
+            full_summary = self._multi_case_summary(
+                best_cfg,
+                load_cases,
+                stage_name=f"{stage_name}_FULL_VALIDATE",
+                tension_only=tension_only,
+            )
+            if self._summary_valid_flag(full_summary):
+                best_summary = full_summary
 
         return {
             "best_cfg": best_cfg,
@@ -5586,12 +5604,13 @@ class StagedFidelityFunnelPlanner:
             default=0.0,
         )
 
-        if best_s3_break < min_promising_ratio * target_break:
+        s3_low_before_sizing = best_s3_break < min_promising_ratio * target_break
+        if s3_low_before_sizing:
             emit_log(
                 "[S3:LOW_PROMISE] Candidatos regulares, mas ainda fracos antes do sizing: "
                 f"melhor ruptura proxy {best_s3_break:.2f} kgf < "
                 f"{min_promising_ratio:.2f} × meta {target_break:.2f} kgf. "
-                "Prosseguindo para S4/S5 porque o reforço discreto ainda não foi aplicado."
+                "Prosseguindo para S5 porque o reforço discreto ainda não foi aplicado."
             )
 
         best_s3_nominal = max(
@@ -5609,11 +5628,15 @@ class StagedFidelityFunnelPlanner:
             )
         )
 
-        if best_s3_nominal < 0.10 * target_break:
-            raise RuntimeError(
-                f"S3 nominal inviável: melhor ruptura proxy "
-                f"{best_s3_nominal:.2f} kgf < 10% da meta {target_break:.2f} kgf. "
-                "Provável erro de load case, classificação de membro ou distribuição de carga."
+        s3_abort_ratio = float(pp.get("s3_hard_abort_break_ratio", 0.0))
+        s3_abort_abs = float(pp.get("s3_hard_abort_abs_break_kgf", 0.10))
+        if best_s3_nominal < max(s3_abort_abs, s3_abort_ratio * target_break):
+            emit_log(
+                "[S3:VERY_LOW_NOMINAL] Melhor ruptura proxy antes do sizing = "
+                f"{best_s3_nominal:.2f} kgf. Valor abaixo do limiar de diagnóstico "
+                f"({max(s3_abort_abs, s3_abort_ratio * target_break):.2f} kgf), "
+                "mas o funil continuará para S4/S5 porque as seções ainda não foram "
+                "redimensionadas. Use os logs S5/S7/S8 para decidir se há erro real."
             )
 
         emit_progress(0.50, "S4: refinamento geométrico local")
@@ -5632,49 +5655,83 @@ class StagedFidelityFunnelPlanner:
         before_after_rows: List[Dict[str, Any]] = []
         s4_input_rows = keep_s3[:top_k_s4]
 
-        for idx, row in enumerate(s4_input_rows, 1):
-            refined = self._trust_region_refine(
-                row["config"],
-                s4_refine_cases,
-                stage_name="S4",
-                tension_only=tension_only_s4,
-            )
+        skip_s4_low = bool(pp.get("skip_geometry_refinement_when_low_pre_sizing", True)) and bool(s3_low_before_sizing)
+        if skip_s4_low:
+            low_cap = max(1, int(pp.get("low_pre_sizing_s5_seed_cap", 1)))
+            s4_input_rows = keep_s3[:low_cap]
 
-            # Validação completa pós-refinamento. A busca local é barata, mas a seleção
-            # continua usando todos os load cases obrigatórios.
-            summary = self._multi_case_summary(
-                refined["best_cfg"],
-                load_cases,
-                stage_name="S4_VALIDATE",
-                tension_only=tension_only_s4,
+        if skip_s4_low:
+            emit_log(
+                "[S4:SKIPPED_LOW_PRE_SIZING] Refinamento geométrico local ignorado "
+                "porque S3 está muito abaixo da meta antes do dimensionamento. "
+                "Isto evita gastar minutos refinando uma geometria ainda subdimensionada; "
+                "S5 aplicará o reforço discreto primeiro."
             )
-            s4_rows.append(
-                {
-                    **{k: v for k, v in row.items() if k != "config"},
-                    "stage": "S4",
-                    "candidate_id": f"S4-{idx:04d}",
-                    "objective": summary.get("objective"),
-                    "valid_for_selection": summary.get("valid_for_selection"),
-                    "predicted_breaking_load_proxy_kgf": summary.get("predicted_breaking_load_proxy_kgf"),
-                    "min_fs_design_proxy": summary.get("min_fs_design_proxy"),
-                    "dead_weight_proxy_g": summary.get("dead_weight_proxy_g"),
-                    "config": refined["best_cfg"],
-                }
-            )
-            for tr in refined["trace_rows"]:
-                s4_trace_rows.append(
+            for idx, row in enumerate(s4_input_rows, 1):
+                s4_rows.append(
                     {
+                        **{k: v for k, v in row.items() if k != "config"},
+                        "stage": "S4_SKIPPED",
                         "candidate_id": f"S4-{idx:04d}",
-                        **tr,
+                        "objective": row.get("objective"),
+                        "valid_for_selection": row.get("valid_for_selection"),
+                        "predicted_breaking_load_proxy_kgf": row.get("predicted_breaking_load_proxy_kgf"),
+                        "min_fs_design_proxy": row.get("min_fs_design_proxy"),
+                        "dead_weight_proxy_g": row.get("dead_weight_proxy_g"),
+                        "config": row["config"],
                     }
                 )
-            before_after_rows.append(
-                {
-                    "candidate_id": f"S4-{idx:04d}",
-                    "before": json.dumps(refined.get("before", {}), ensure_ascii=False),
-                    "after": json.dumps(refined.get("after", {}), ensure_ascii=False),
-                }
-            )
+                before_after_rows.append(
+                    {
+                        "candidate_id": f"S4-{idx:04d}",
+                        "before": "S4 skipped: low pre-sizing strength",
+                        "after": "unchanged",
+                    }
+                )
+        else:
+            for idx, row in enumerate(s4_input_rows, 1):
+                refined = self._trust_region_refine(
+                    row["config"],
+                    s4_refine_cases,
+                    stage_name="S4",
+                    tension_only=tension_only_s4,
+                )
+
+                # Validação completa pós-refinamento. A busca local é barata, mas a seleção
+                # continua usando todos os load cases obrigatórios.
+                summary = self._multi_case_summary(
+                    refined["best_cfg"],
+                    load_cases,
+                    stage_name="S4_VALIDATE",
+                    tension_only=tension_only_s4,
+                )
+                s4_rows.append(
+                    {
+                        **{k: v for k, v in row.items() if k != "config"},
+                        "stage": "S4",
+                        "candidate_id": f"S4-{idx:04d}",
+                        "objective": summary.get("objective"),
+                        "valid_for_selection": summary.get("valid_for_selection"),
+                        "predicted_breaking_load_proxy_kgf": summary.get("predicted_breaking_load_proxy_kgf"),
+                        "min_fs_design_proxy": summary.get("min_fs_design_proxy"),
+                        "dead_weight_proxy_g": summary.get("dead_weight_proxy_g"),
+                        "config": refined["best_cfg"],
+                    }
+                )
+                for tr in refined["trace_rows"]:
+                    s4_trace_rows.append(
+                        {
+                            "candidate_id": f"S4-{idx:04d}",
+                            **tr,
+                        }
+                    )
+                before_after_rows.append(
+                    {
+                        "candidate_id": f"S4-{idx:04d}",
+                        "before": json.dumps(refined.get("before", {}), ensure_ascii=False),
+                        "after": json.dumps(refined.get("after", {}), ensure_ascii=False),
+                    }
+                )
 
         s4_rows = sorted(s4_rows, key=lambda r: safe_float(r.get("objective"), -1.0e99) or -1.0e99, reverse=True)
         keep_s4 = [
@@ -5816,9 +5873,15 @@ class StagedFidelityFunnelPlanner:
         )
         mass_rescue_target_g = mass_rescue_target_ratio * mass_limit
 
+        skip_topology_low_strength_regardless_mass = bool(
+            (base.get("topology_cleanup", {}) or {}).get(
+                "skip_if_very_low_strength_before_mass_rescue",
+                True,
+            )
+        )
         skip_topology_when_weak_and_within_mass = (
             best_s5_break < s6_skip_break_ratio * target_break
-            and best_s5_mass <= mass_rescue_target_g
+            and (best_s5_mass <= mass_rescue_target_g or skip_topology_low_strength_regardless_mass)
         )
 
         # Mass rescue não deve ocorrer apenas quando passa de 1000 g.
@@ -5842,7 +5905,7 @@ class StagedFidelityFunnelPlanner:
         if skip_topology_when_weak_and_within_mass:
             emit_log(
                 "[S6:SKIPPED] Topologia fina ignorada porque o candidato ainda está "
-                "muito abaixo da meta e já está dentro da massa. "
+                "muito abaixo da meta; S6 foi ignorado para evitar timeout em resgate de massa antes de haver capacidade estrutural. "
                 f"ruptura={best_s5_break:.2f} kgf, "
                 f"massa={best_s5_mass:.1f} g, "
                 f"limite={mass_limit:.1f} g. "

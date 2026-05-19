@@ -10,6 +10,107 @@ class SectionService:
     """Section properties and simplified strength models for stick members."""
 
     @staticmethod
+    def _contact_box_sticks(
+        n: int,
+        stick_width_mm: float,
+        stick_thickness_mm: float,
+        *,
+        strategy: str = "balanced",
+        spacing_y_mm: float | None = None,
+        spacing_z_mm: float | None = None,
+    ) -> List[Dict[str, float | str]]:
+        """Return per-stick geometry for a buildable contact box/tee section.
+
+        Local axes: y = bridge/transverse width of the member section, z =
+        vertical/depth of the member section.  A realistic four-stick box is not
+        four equal sticks floating at the corners.  It is two vertical webs
+        (edge orientation) and two horizontal caps/flanges (flat orientation),
+        touching side/face around the perimeter.  That geometry is less stiff
+        than the old artificial spaced box, but it is buildable and keeps the
+        centroid on the solver member axis.
+
+        Underfilled boxes are not boxes:
+        - n=2: compact face-contact lamination;
+        - n=3: compact mixed T/I-like lamination, dynamically checked by
+          Euler/Johnson through its real I_y/I_z;
+        - n>=4: contact box with balanced extra sticks added at the centroid,
+          alternating flat/edge orientation.
+        """
+        n = max(1, int(n))
+        b = float(stick_width_mm)
+        t = float(stick_thickness_mm)
+        # flat: broad face in y, thickness in z. edge: thickness in y, broad face in z.
+        def rec(y: float, z: float, orient: str) -> Dict[str, float | str]:
+            if orient == "edge":
+                return {"y": y, "z": z, "ydim": t, "zdim": b, "orientation": "edge"}
+            return {"y": y, "z": z, "ydim": b, "zdim": t, "orientation": "flat"}
+
+        mode = str(strategy or "balanced").strip().lower()
+        if mode in {"corner_cycle", "legacy", "legacy_corner_cycle"}:
+            # Modo legado explícito para reproduzir estudos antigos: percorre os
+            # cantos e pode gerar centroide excêntrico quando n é ímpar.
+            sy = max(float(spacing_y_mm if spacing_y_mm is not None else 2.0 * b), b + t)
+            sz = max(float(spacing_z_mm if spacing_z_mm is not None else 2.0 * b), b + t)
+            corners = [
+                (-sy / 2.0, -sz / 2.0),
+                (sy / 2.0, -sz / 2.0),
+                (-sy / 2.0, sz / 2.0),
+                (sy / 2.0, sz / 2.0),
+            ]
+            return [rec(corners[k % 4][0], corners[k % 4][1], "edge") for k in range(n)]
+
+        if mode in {"spaced", "spaced_box", "laced", "laced_box"} and n >= 4:
+            # Espaçado só é aceito para 4+ palitos, e deve ser interpretado como
+            # seção built-up com battens/lacing/talas.  O espaçamento vem do
+            # layout porque é parte da geometria resistente; não pode ser inferido
+            # silenciosamente.  Para n=2/3 caímos nas laminações compactas abaixo.
+            sy = max(float(spacing_y_mm if spacing_y_mm is not None else 2.0 * b), b + t)
+            sz = max(float(spacing_z_mm if spacing_z_mm is not None else 2.0 * b), b + t)
+            corners = [
+                (-sy / 2.0, -sz / 2.0),
+                (sy / 2.0, -sz / 2.0),
+                (-sy / 2.0, sz / 2.0),
+                (sy / 2.0, sz / 2.0),
+            ]
+            sticks = [rec(corners[k % 4][0], corners[k % 4][1], "edge") for k in range(4)]
+            extras = n - 4
+            # Extras balanceados: centro ou pares simétricos.
+            for k in range(extras):
+                if extras % 2 == 1 and k == 0:
+                    sticks.append(rec(0.0, 0.0, "edge"))
+                else:
+                    pair = [(-sy / 2.0, 0.0), (sy / 2.0, 0.0), (0.0, -sz / 2.0), (0.0, sz / 2.0)]
+                    y, z = pair[k % len(pair)]
+                    sticks.append(rec(y, z, "edge"))
+            return sticks
+
+        if n == 1:
+            return [rec(0.0, 0.0, "flat")]
+        if n == 2:
+            # Face-to-face cap lamination; no diagonal floating pair.
+            return [rec(0.0, -t / 2.0, "flat"), rec(0.0, t / 2.0, "flat")]
+        if n == 3:
+            # Mixed compact T/I-like lamination: one web plus two caps.  This is
+            # a connected 3-stick section and usually improves the weak axis
+            # relative to a pure stack without pretending to be a box.
+            return [rec(0.0, 0.0, "edge"), rec(0.0, -t, "flat"), rec(0.0, t, "flat")]
+
+        d = max(0.0, 0.5 * b - 0.5 * t)
+        sticks: List[Dict[str, float | str]] = [
+            rec(-d, 0.0, "edge"),
+            rec(d, 0.0, "edge"),
+            rec(0.0, -d, "flat"),
+            rec(0.0, d, "flat"),
+        ]
+        # Add balanced extra material at the centroid.  Alternating orientations
+        # keeps I_y and I_z similar and avoids a hidden eccentric section.
+        extras = n - 4
+        for k in range(extras):
+            sticks.append(rec(0.0, 0.0, "flat" if k % 2 == 0 else "edge"))
+        return sticks
+
+
+    @staticmethod
     def rectangular_section(width_mm: float, thickness_mm: float) -> Dict[str, float]:
         b = float(width_mm)
         h = float(thickness_mm)
@@ -97,6 +198,7 @@ class SectionService:
         Iz1 = stick_z_mm * stick_y_mm**3 / 12.0
 
         positions: List[Tuple[float, float]] = []
+        stick_defs: List[Dict[str, float | str]] | None = None
         if layout == "single":
             positions = [(0.0, 0.0)]
         elif layout == "side_by_side":
@@ -114,17 +216,15 @@ class SectionService:
                 r = idx // cols
                 positions.append((y0 + c * sy, z0 + r * sz))
         elif layout == "box":
-            sy = max(float(layout_cfg.get("spacing_y_mm", stick_y_mm + 2.0)), stick_y_mm)
-            sz = max(float(layout_cfg.get("spacing_z_mm", stick_z_mm + 2.0)), stick_z_mm)
-            if n == 1:
-                positions = [(0.0, 0.0)]
-            elif n == 2:
-                positions = [(-sy / 2, -sz / 2), (sy / 2, sz / 2)]
-            elif n == 3:
-                positions = [(-sy / 2, -sz / 2), (sy / 2, -sz / 2), (0.0, sz / 2)]
-            else:
-                base = [(-sy / 2, -sz / 2), (sy / 2, -sz / 2), (-sy / 2, sz / 2), (sy / 2, sz / 2)]
-                positions = [base[k % 4] for k in range(n)]
+            stick_defs = cls._contact_box_sticks(
+                n,
+                b,
+                t,
+                strategy=str(layout_cfg.get("box_extra_stick_strategy", "balanced")),
+                spacing_y_mm=safe_float(layout_cfg.get("spacing_y_mm"), None),
+                spacing_z_mm=safe_float(layout_cfg.get("spacing_z_mm"), None),
+            )
+            positions = [(float(v["y"]), float(v["z"])) for v in stick_defs]
         elif layout == "custom":
             raw = layout_cfg.get("stick_positions_yz", []) or []
             for yz in raw[:n]:
@@ -140,21 +240,82 @@ class SectionService:
 
         eta_I, eta_A = cls._resolve_composite_action(material, layout_cfg)
 
-        A_perfect = n * A1
-        cy = sum(y * A1 for y, _ in positions) / A_perfect if A_perfect > 0 else 0.0
-        cz = sum(z * A1 for _, z in positions) / A_perfect if A_perfect > 0 else 0.0
+        if stick_defs is None:
+            stick_defs = [
+                {
+                    "y": y,
+                    "z": z,
+                    "ydim": stick_y_mm,
+                    "zdim": stick_z_mm,
+                    "orientation": stick_orientation,
+                }
+                for y, z in positions
+            ]
 
-        Iy_perfect = sum(Iy1 + A1 * (z - cz) ** 2 for y, z in positions)
-        Iz_perfect = sum(Iz1 + A1 * (y - cy) ** 2 for y, z in positions)
-        Iy_noncomp = n * Iy1
-        Iz_noncomp = n * Iz1
+        A_perfect = sum(float(v["ydim"]) * float(v["zdim"]) for v in stick_defs)
+        cy = (
+            sum(float(v["y"]) * float(v["ydim"]) * float(v["zdim"]) for v in stick_defs) / A_perfect
+            if A_perfect > 0
+            else 0.0
+        )
+        cz = (
+            sum(float(v["z"]) * float(v["ydim"]) * float(v["zdim"]) for v in stick_defs) / A_perfect
+            if A_perfect > 0
+            else 0.0
+        )
+
+        Iy_perfect = 0.0
+        Iz_perfect = 0.0
+        Iy_noncomp = 0.0
+        Iz_noncomp = 0.0
+        for v in stick_defs:
+            y = float(v["y"])
+            z = float(v["z"])
+            yd = float(v["ydim"])
+            zd = float(v["zdim"])
+            Ai = yd * zd
+            Iyi = yd * zd**3 / 12.0
+            Izi = zd * yd**3 / 12.0
+            Iy_noncomp += Iyi
+            Iz_noncomp += Izi
+            Iy_perfect += Iyi + Ai * (z - cz) ** 2
+            Iz_perfect += Izi + Ai * (y - cy) ** 2
+
         Iy = Iy_noncomp + eta_I * (Iy_perfect - Iy_noncomp)
         Iz = Iz_noncomp + eta_I * (Iz_perfect - Iz_noncomp)
 
         A = A_perfect * eta_A
         J = max(1e-9, 0.35 * (Iy + Iz))
-        width = (max(y for y, _ in positions) - min(y for y, _ in positions) + stick_y_mm) if positions else stick_y_mm
-        height = (max(z for _, z in positions) - min(z for _, z in positions) + stick_z_mm) if positions else stick_z_mm
+        if stick_defs:
+            y_min = min(float(v["y"]) - 0.5 * float(v["ydim"]) for v in stick_defs)
+            y_max = max(float(v["y"]) + 0.5 * float(v["ydim"]) for v in stick_defs)
+            z_min = min(float(v["z"]) - 0.5 * float(v["zdim"]) for v in stick_defs)
+            z_max = max(float(v["z"]) + 0.5 * float(v["zdim"]) for v in stick_defs)
+            width = y_max - y_min
+            height = z_max - z_min
+        else:
+            width = stick_y_mm
+            height = stick_z_mm
+
+        orientations = [str(v.get("orientation", stick_orientation)) for v in stick_defs]
+        ydims = [float(v.get("ydim", stick_y_mm)) for v in stick_defs]
+        zdims = [float(v.get("zdim", stick_z_mm)) for v in stick_defs]
+        effective_layout = layout
+        box_strategy = str(layout_cfg.get("box_extra_stick_strategy", "balanced")).strip().lower()
+        spaced_strategies = {"corner_cycle", "legacy", "legacy_corner_cycle", "spaced", "spaced_box", "laced", "laced_box"}
+        if layout == "box" and n < 4:
+            effective_layout = "tee3" if n == 3 else ("laminated2" if n == 2 else "single")
+        elif layout == "box" and box_strategy in spaced_strategies:
+            effective_layout = "laced_box"
+        elif layout == "box":
+            effective_layout = "contact_box"
+        section_connection_model = {
+            "single": "single_stick",
+            "laminated2": "face_to_face_lamination",
+            "tee3": "mixed_T_contact_lamination",
+            "contact_box": "four_side_contact_box_with_face_side_glue",
+            "laced_box": "spaced_built_up_box_requires_battens_lacing",
+        }.get(effective_layout, effective_layout)
 
         return {
             "A": A,
@@ -166,10 +327,15 @@ class SectionService:
             "thickness_mm": height,
             "centroid_y_mm": cy,
             "centroid_z_mm": cz,
-            "layout": layout,
-            "stick_orientation": stick_orientation,
+            "layout": effective_layout,
+            "requested_layout": layout,
+            "stick_orientation": stick_orientation if len(set(orientations)) == 1 else "mixed",
+            "stick_orientations": orientations,
+            "section_connection_model": section_connection_model,
             "stick_width_y_mm": stick_y_mm,
             "stick_height_z_mm": stick_z_mm,
+            "stick_width_y_mm_by_lane": ydims,
+            "stick_height_z_mm_by_lane": zdims,
             "stick_positions_yz": positions,
             "buckling_I_critical_mm4": min(Iy, Iz),
             "Iy_perfect": Iy_perfect,

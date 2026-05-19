@@ -1572,10 +1572,11 @@ with aba_simulacao:
         assembly_tutorial = r.get("detailed", {}).get("assembly_tutorial", {}) or {}
         render_mode = st.radio(
             "Render dos palitos",
-            ["prismas reais", "prismas exagerados", "linhas leves"],
+            ["linhas leves", "prismas reais", "prismas exagerados"],
             horizontal=True,
             index=0,
             key="stick_render_mode",
+            help="Linhas leves é o modo mais estável para ver conectividade. Prismas reais usa a seção física; prismas exagerados é apenas didático.",
         )
 
         tutorial_steps = assembly_tutorial.get("assembly_steps", []) or []

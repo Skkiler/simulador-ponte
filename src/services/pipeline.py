@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
 
@@ -203,6 +205,40 @@ class SimulationPipeline:
         )
         min_break_ratio = max(0.0, float(analysis.get("planner_fallback_min_break_ratio", 0.20)))
         min_break_floor_kgf = target_load_kgf * min_break_ratio
+        # Para o modo return_all usado pela validação detalhada, aceite também
+        # candidatos um pouco acima da massa: eles podem ser trazidos para baixo
+        # por micro-trim de member_sticks_by_id.  Sem isso, o S5/S7 forte, mas
+        # 3–6% acima do limite, era descartado antes de qualquer tentativa de
+        # aliviar massa; o pipeline caía para S3 fraco e leve.
+        overmass_trim_ratio = max(0.0, float(analysis.get("planner_fallback_trim_overmass_ratio", 0.08)))
+        mass_screen_limit = eff_limit * (1.0 + overmass_trim_ratio if return_all else 1.0)
+
+        def row_mass_g(row: Dict[str, Any]) -> float | None:
+            for key in ("mass_g", "competition_mass_g", "dead_weight_proxy_g", "mass_proxy_g", "mass_proxy"):
+                val = safe_float(row.get(key), None)
+                if val is not None:
+                    return float(val)
+            return None
+
+        def row_break_kgf(row: Dict[str, Any]) -> float | None:
+            for key in ("predicted_breaking_load_kgf", "predicted_breaking_load_proxy_kgf", "estimated_breaking_load_kgf"):
+                val = safe_float(row.get(key), None)
+                if val is not None:
+                    return float(val)
+            return None
+
+        def row_fs(row: Dict[str, Any]) -> float | None:
+            for key in ("min_fs_primary", "min_fs_design", "min_fs_design_proxy", "min_fs_preliminary"):
+                val = safe_float(row.get(key), None)
+                if val is not None:
+                    return float(val)
+            return None
+
+        def row_solver_status(row: Dict[str, Any]) -> str:
+            raw = row.get("solver_status")
+            if raw is None and bool(row.get("solver_regular", False)):
+                return "regular"
+            return str(raw or "regular")
 
         stage_priority = {
             "s8_final_validation": 0,
@@ -224,44 +260,57 @@ class SimulationPipeline:
 
         valid_rows: List[tuple[int, Dict[str, Any]]] = []
         for prio, row in ranked_rows:
-            mass_val = safe_float(row.get("mass_g"), None)
-            if mass_val is None or mass_val > eff_limit + 1.0e-6:
+            mass_val = row_mass_g(row)
+            if mass_val is None or mass_val > mass_screen_limit + 1.0e-6:
                 continue
-            if not SimulationPipeline._solver_is_regular(row.get("solver_status", "")):
+            if not SimulationPipeline._solver_is_regular(row_solver_status(row)):
                 continue
             eq_err = abs(safe_float(row.get("equilibrium_error_N"), 0.0) or 0.0)
             if eq_err > eq_tol_N:
                 continue
-            fs_val = safe_float(row.get("min_fs_primary"), None)
+            fs_val = row_fs(row)
             if fs_val is None or fs_val < min_fs_floor:
                 continue
-            break_val = safe_float(row.get("predicted_breaking_load_kgf"), None)
+            break_val = row_break_kgf(row)
             if break_val is None or break_val < min_break_floor_kgf:
                 continue
-            valid_rows.append((prio, row))
+            normalized_row = dict(row)
+            normalized_row.setdefault("mass_g", mass_val)
+            normalized_row.setdefault("predicted_breaking_load_kgf", break_val)
+            normalized_row.setdefault("min_fs_primary", fs_val)
+            normalized_row.setdefault("solver_status", row_solver_status(row))
+            valid_rows.append((prio, normalized_row))
 
         if not valid_rows:
             return [] if return_all else None
 
+        # Primeiro a fidelidade do estágio, depois desempenho.  Sem isto uma
+        # linha antiga/grosseira de S3/S6 pode vencer uma validação S7/S8 por
+        # ter ruptura proxy maior, levando ao relatório final uma configuração
+        # pesada, fraca e diferente da que foi detalhada.
         valid_rows.sort(
             key=lambda item: (
+                item[0],
                 -(safe_float(item[1].get("predicted_breaking_load_kgf"), 0.0) or 0.0),
                 -(safe_float(item[1].get("min_fs_primary"), 0.0) or 0.0),
                 -(safe_float(item[1].get("score"), -1.0e99) or -1.0e99),
                 (safe_float(item[1].get("mass_g"), 1.0e99) or 1.0e99),
-                item[0],
             )
         )
         if return_all:
             return [row for _, row in valid_rows]
         return valid_rows[0][1]
 
-    @staticmethod
-    def _build_mass_trim_variants(cfg: Dict[str, Any]) -> List[tuple[str, Dict[str, Any]]]:
-        sticks = (cfg.get("member_sticks_by_group", {}) or {})
-        if not isinstance(sticks, dict):
-            return []
-        # Ordem conservadora: primeiro grupos com menor impacto global esperado.
+    def _build_mass_trim_variants(self, cfg: Dict[str, Any]) -> List[tuple[str, Dict[str, Any]]]:
+        """Generate conservative trim variants for a near-overweight fallback.
+
+        Strong candidates often use ``member_sticks_by_id`` overrides, not just
+        group counts.  The previous trimmer reduced only ``member_sticks_by_group``;
+        therefore it could not actually lighten an S5/S7 candidate and the
+        pipeline fell back to a much weaker S3.  This method first creates
+        ID-level trims in non-primary groups, then falls back to group-level trims.
+        """
+        out: List[tuple[str, Dict[str, Any]]] = []
         priority = [
             "support_pad",
             "top_bracing",
@@ -272,17 +321,60 @@ class SimulationPipeline:
             "bottom_chord",
             "top_chord",
         ]
-        out: List[tuple[str, Dict[str, Any]]] = []
-        for group in priority:
-            cur = safe_float(sticks.get(group), None)
-            if cur is None:
-                continue
-            cur_i = max(1, int(cur))
-            if cur_i <= 1:
-                continue
-            vcfg = copy.deepcopy(cfg)
-            vcfg.setdefault("member_sticks_by_group", {})[group] = cur_i - 1
-            out.append((f"{group}:{cur_i}->{cur_i - 1}", vcfg))
+        min_by_group = {
+            "support_pad": 1,
+            "top_bracing": 1,
+            "bottom_bracing": 1,
+            "cross_frame_bracing": 1,
+            "top_transverse": 1,
+            "bottom_transverse": 1,
+            "bottom_chord": 1,
+            "top_chord": 3,
+            "vertical": 3,
+            "diagonal": 2,
+        }
+
+        by_id = cfg.get("member_sticks_by_id", {}) or {}
+        if isinstance(by_id, dict) and by_id:
+            try:
+                _, members, _, _ = self.geometry.generate(cfg)
+                member_group = {str(int(m.id)): str(m.group) for m in members}
+            except Exception:
+                member_group = {}
+
+            for group in priority:
+                trim_ids: List[str] = []
+                for mid, raw_n in by_id.items():
+                    g = member_group.get(str(mid))
+                    if g != group:
+                        continue
+                    cur_i = max(1, int(safe_float(raw_n, 1) or 1))
+                    if cur_i > min_by_group.get(group, 1):
+                        trim_ids.append(str(mid))
+                if not trim_ids:
+                    continue
+                # Variações progressivas: alivia 25%, 50% e 100% dos IDs do grupo.
+                for frac in (0.25, 0.50, 1.00):
+                    n_take = max(1, int(round(len(trim_ids) * frac)))
+                    vcfg = copy.deepcopy(cfg)
+                    v_by_id = vcfg.setdefault("member_sticks_by_id", {})
+                    for mid in trim_ids[:n_take]:
+                        old_n = max(1, int(safe_float(v_by_id.get(mid), 1) or 1))
+                        v_by_id[mid] = old_n - 1
+                    out.append((f"id_trim_{group}_{n_take}members", vcfg))
+
+        sticks = (cfg.get("member_sticks_by_group", {}) or {})
+        if isinstance(sticks, dict):
+            for group in priority:
+                cur = safe_float(sticks.get(group), None)
+                if cur is None:
+                    continue
+                cur_i = max(1, int(cur))
+                if cur_i <= min_by_group.get(group, 1):
+                    continue
+                vcfg = copy.deepcopy(cfg)
+                vcfg.setdefault("member_sticks_by_group", {})[group] = cur_i - 1
+                out.append((f"group_trim_{group}:{cur_i}->{cur_i - 1}", vcfg))
         return out
 
     def run(
@@ -293,6 +385,38 @@ class SimulationPipeline:
         log_callback: Callable[[str], None] | None = None,
     ) -> Dict:
         input_cfg = self.config_service.normalize(cfg)
+        self.output_root.mkdir(parents=True, exist_ok=True)
+        run_started_at = datetime.now(timezone.utc).isoformat()
+        run_id = run_started_at.replace(":", "").replace("+", "Z")
+        analysis0 = input_cfg.get("analysis", {}) or {}
+        cleaned_dirs: List[str] = []
+        if bool(analysis0.get("clean_output_dirs_before_run", True)):
+            for rel in analysis0.get("output_dirs_to_clean_before_run", []) or []:
+                # Defensive: clean only direct children of output_root.
+                rel_str = str(rel).strip().replace("\\", "/").strip("/")
+                if not rel_str or "/" in rel_str or rel_str in {".", ".."}:
+                    continue
+                path = self.output_root / rel_str
+                if path.exists():
+                    shutil.rmtree(path, ignore_errors=True)
+                cleaned_dirs.append(rel_str)
+        input_cfg.setdefault("runtime", {})["run_id"] = run_id
+        input_cfg.setdefault("runtime", {})["started_at_utc"] = run_started_at
+        input_cfg.setdefault("runtime", {})["cleaned_output_dirs"] = cleaned_dirs
+        (self.output_root / "run_metadata.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "started_at_utc": run_started_at,
+                    "cleaned_output_dirs": cleaned_dirs,
+                    "clean_output_dirs_before_run": bool(analysis0.get("clean_output_dirs_before_run", True)),
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
         debug_logger = PlannerDebugLogger(
             self.output_root / "logs",
             enabled=bool(input_cfg.get("analysis", {}).get("planner_debug_enabled", True)),
@@ -301,11 +425,13 @@ class SimulationPipeline:
             "config_loaded",
             stage="pipeline",
             metrics={
+                "run_id": run_id,
+                "cleaned_output_dirs": cleaned_dirs,
                 "enforce_symmetry": bool(input_cfg.get("analysis", {}).get("enforce_symmetry", True)),
                 "use_quarter_model_requested": bool(input_cfg.get("analysis", {}).get("use_quarter_model", False)),
             },
         )
-        debug_logger.event("user_inputs_normalized", stage="pipeline")
+        debug_logger.event("user_inputs_normalized", stage="pipeline", metrics={"run_id": run_id})
 
         execution_logs: List[str] = []
         warnings: List[Dict[str, str]] = []
@@ -342,14 +468,14 @@ class SimulationPipeline:
             warnings.append({"code": code, "stage": stage, "message": message})
             emit_log(f"[WARN:{code}] {message}")
 
-        self.output_root.mkdir(parents=True, exist_ok=True)
-
         model_dir = self.output_root / "model"
         solver_dir = self.output_root / "opensees"
         plot_dir = self.output_root / "plots"
         detail_dir = self.output_root / "details"
         frame_dir = self.output_root / "frame3dd"
         report_dir = self.output_root / "reports"
+
+        plot_dir.mkdir(parents=True, exist_ok=True)
 
         optimization = None
         cfg = input_cfg
@@ -432,10 +558,30 @@ class SimulationPipeline:
                         input_cfg,
                         return_all=True,
                     ) or []
-                    for fallback_row in list(fallback_rows)[:fallback_validation_cap]:
+                    emit_log(
+                        f"Fallback por massa/estágio: {len(fallback_rows)} candidato(s) elegíveis; "
+                        f"validando até {fallback_validation_cap}."
+                    )
+                    debug_logger.event(
+                        "fallback_candidate_pool",
+                        stage="planner",
+                        metrics={
+                            "eligible_count": len(fallback_rows),
+                            "validation_cap": fallback_validation_cap,
+                            "strict_mass_acceptance": strict_mass_acceptance,
+                        },
+                    )
+                    for fallback_idx, fallback_row in enumerate(list(fallback_rows)[:fallback_validation_cap], 1):
                         if fallback_row.get("config") is None:
                             continue
                         fallback_cfg = self.config_service.normalize(fallback_row.get("config"))
+                        emit_log(
+                            "Validando fallback "
+                            f"#{fallback_idx}: estágio={fallback_row.get('stage')} | "
+                            f"ruptura={safe_float(fallback_row.get('predicted_breaking_load_kgf'), 0.0) or 0.0:.1f} kgf | "
+                            f"massa={safe_float(fallback_row.get('mass_g'), 0.0) or 0.0:.1f} g | "
+                            f"FS={safe_float(fallback_row.get('min_fs_primary'), 0.0) or 0.0:.3f}."
+                        )
                         try:
                             val_dir = self.output_root / "optimization" / "fallback_validation"
                             fallback_metrics = self.optimizer._evaluate_config(
@@ -450,6 +596,22 @@ class SimulationPipeline:
                         mass_ok = bool(fallback_metrics.get("mass_compliant", False))
                         solver_ok = self._solver_is_regular(fallback_metrics.get("solver_status", ""))
                         eq_ok = bool(fallback_metrics.get("equilibrium_ok", False))
+                        debug_logger.event(
+                            "fallback_candidate_validation",
+                            stage="planner",
+                            metrics={
+                                "index": fallback_idx,
+                                "mass_g": fallback_metrics.get("mass_g"),
+                                "mass_limit_g": fallback_metrics.get("mass_limit_effective_g"),
+                                "break_kgf": fallback_metrics.get("estimated_breaking_load_kgf"),
+                                "min_fs_primary": fallback_metrics.get("min_fs_primary"),
+                                "solver_status": fallback_metrics.get("solver_status"),
+                                "equilibrium_error_N": fallback_metrics.get("equilibrium_error_N"),
+                                "mass_ok": mass_ok,
+                                "solver_ok": solver_ok,
+                                "equilibrium_ok": eq_ok,
+                            },
+                        )
                         if not (mass_ok and solver_ok and eq_ok):
                             # Se o candidato está próximo do limite, tenta microajustes de massa
                             # antes de descartá-lo (ex.: aliviar support_pad em 1 palito).
@@ -463,7 +625,7 @@ class SimulationPipeline:
                                 and mass_val <= (limit_val * 1.05)
                             ):
                                 trim_variants = self._build_mass_trim_variants(fallback_cfg)
-                                for trim_label, trim_cfg_raw in trim_variants[:4]:
+                                for trim_label, trim_cfg_raw in trim_variants[:16]:
                                     trim_cfg = self.config_service.normalize(trim_cfg_raw)
                                     try:
                                         trim_dir = self.output_root / "optimization" / "fallback_trim_validation"
@@ -574,13 +736,31 @@ class SimulationPipeline:
                     best_solver_status = str((best or {}).get("solver_status", "regular"))
                     best_regular = self._solver_is_regular(best_solver_status)
 
-                    if best_regular:
+                    diagnostic_mass_ok = True
+                    if strict_mass_acceptance:
+                        try:
+                            diagnostic_mass = best_mass
+                            if diagnostic_mass is None:
+                                preview_nodes, preview_members, _, _ = self.geometry.generate(best_cfg)
+                                diagnostic_mass, _ = self.optimizer._quick_mass_estimate(best_cfg, preview_members)
+                            diagnostic_mass_ok = float(diagnostic_mass) <= float(effective_mass_limit_g(best_cfg)) + 1.0e-6
+                        except (TypeError, ValueError, RuntimeError, KeyError):
+                            diagnostic_mass_ok = False
+
+                    if best_regular and diagnostic_mass_ok:
                         cfg = self.config_service.normalize(best_cfg)
                         emit_warning(
                             "WARN_PLANNER_BEST_NONFEASIBLE_APPLIED_FOR_DIAGNOSTIC",
-                            "Planejador retornou proposta não viável, mas regular. "
-                            "Ela será aplicada ao pipeline final como melhor diagnóstico, "
-                            "com veredito reprovado se não atingir massa/ruptura/FS.",
+                            "Planejador retornou proposta não viável, mas regular e dentro do limite de massa. "
+                            "Ela será aplicada ao pipeline final como diagnóstico, "
+                            "com veredito reprovado se não atingir ruptura/FS.",
+                            stage="planner",
+                        )
+                    elif best_regular and strict_mass_acceptance:
+                        emit_warning(
+                            "WARN_PLANNER_BEST_NONFEASIBLE_NOT_APPLIED_OVER_MASS",
+                            "Planejador retornou proposta regular, porém não viável e/ou acima do limite de massa. "
+                            "Como a aceitação estrita de massa está ativa, ela não será aplicada ao pipeline final.",
                             stage="planner",
                         )
                     else:
@@ -633,6 +813,37 @@ class SimulationPipeline:
                         f"Planejador falhou e o pipeline seguirá com a configuração solicitada: {exc!r}",
                         stage="planner",
                     )
+
+        # Se o pipeline escolheu um fallback validado após o funil, a pasta
+        # optimization ainda pode conter o final_validation_summary gerado pelo
+        # candidato S8 original.  Reescrever o resumo evita mismatch entre
+        # final_report e optimization/final_validation_summary.json.
+        try:
+            best_opt = (optimization or {}).get("best") or {}
+            if best_opt and (optimization or {}).get("best_mass_compliant_fallback"):
+                opt_dir = self.output_root / "optimization"
+                opt_dir.mkdir(parents=True, exist_ok=True)
+                fv = {
+                    "verdict": "FALLBACK_MASS_COMPLIANT_REPROVADO",
+                    "failed_restriction": "fallback_mass_compliant_but_strength_or_fs_below_target",
+                    "predicted_breaking_load_kgf": best_opt.get("predicted_breaking_load_kgf"),
+                    "target_breaking_load_kgf": cfg.get("analysis", {}).get("acceptance_min_design_breaking_load_kgf", 120.0),
+                    "competition_mass_g": best_opt.get("mass_g"),
+                    "min_fs_design": best_opt.get("min_fs_primary"),
+                    "solver_regular": self._solver_is_regular(str(best_opt.get("solver_status", "regular"))),
+                    "equilibrium_ok": abs(safe_float(best_opt.get("equilibrium_error_N"), 0.0) or 0.0) <= 1.0e-6,
+                    "source": "pipeline_best_mass_compliant_fallback",
+                }
+                (opt_dir / "final_validation_summary.json").write_text(
+                    json.dumps(fv, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            emit_warning(
+                "WARN_FINAL_VALIDATION_REWRITE_FAILED",
+                f"Falha ao sincronizar final_validation_summary com fallback aplicado: {exc!r}",
+                stage="planner",
+            )
 
         emit_progress(0.62, "Gerando geometria estrutural")
         nodes, members, supports, loads = self.geometry.generate(cfg)
@@ -1283,7 +1494,67 @@ class SimulationPipeline:
             )
 
         if cfg.get("detail_model", {}).get("generate_piece_views", True):
+            emit_progress(0.875, "Gerando vistas 2D peça-a-peça")
             self.detail_viz.save_all(detailed, plot_dir)
+            try:
+                pieces = (detailed or {}).get("stick_pieces", []) or []
+                detail_cfg = cfg.get("detail_model", {}) or {}
+                max_piece_html = max(50, int(detail_cfg.get("max_piece_prism_html_pieces", 600)))
+                generate_group_html = bool(detail_cfg.get("generate_group_piece_html", False))
+                if pieces:
+                    prism_html = plot_dir / "02_geometria_3d_prismas_reais_completo.html"
+                    legacy_prism_html = plot_dir / "17_modelo_peca_a_peca_prismas_reais.html"
+                    emit_progress(0.882, f"Gerando 3D peça-a-peça amostrado ({min(len(pieces), max_piece_html)}/{len(pieces)} peças)")
+                    fig_prisms = self.viz.plotly_stick_pieces(
+                        pieces,
+                        max_pieces=max_piece_html,
+                        render_mode="prismas reais",
+                    )
+                    fig_prisms.write_html(prism_html)
+                    # Alias de compatibilidade para relatórios antigos.
+                    fig_prisms.write_html(legacy_prism_html)
+                    group_files = []
+                    if generate_group_html:
+                        group_dir = plot_dir / "subconjuntos_html"
+                        group_dir.mkdir(parents=True, exist_ok=True)
+                        preferred_groups = [
+                            "top_chord",
+                            "bottom_chord",
+                            "vertical",
+                            "diagonal",
+                            "top_transverse",
+                            "bottom_transverse",
+                            "top_bracing",
+                            "bottom_bracing",
+                            "cross_frame_bracing",
+                            "support_pad",
+                        ]
+                        for group_name in preferred_groups:
+                            subset = [r for r in pieces if str(r.get("member_group")) == group_name]
+                            if not subset:
+                                continue
+                            safe_name = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in group_name)
+                            path = group_dir / f"{safe_name}_peca_a_peca.html"
+                            self.viz.plotly_stick_pieces(
+                                subset,
+                                max_pieces=min(max_piece_html, 600),
+                                render_mode="prismas reais",
+                            ).write_html(path)
+                            group_files.append(str(path))
+                    detailed["piece_view_files"] = {
+                        "real_prisms_all_html": str(prism_html),
+                        "legacy_real_prisms_all_html": str(legacy_prism_html),
+                        "group_html": group_files,
+                        "orthographic_overview_png": str(plot_dir / "16_vistas_cad_peca_a_peca.png"),
+                        "piece_html_sampled_count": min(len(pieces), max_piece_html),
+                        "piece_html_total_count": len(pieces),
+                    }
+            except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
+                emit_warning(
+                    "WARN_PIECE_VIEW_EXPORT_FAILED",
+                    f"Falha ao exportar visualizações peça-a-peça: {exc!r}",
+                    stage="detail",
+                )
         emit_progress(0.90, "Gerando recomendações e relatório")
 
         primary = [
@@ -1566,14 +1837,82 @@ class SimulationPipeline:
 
         self.config_service.save(cfg, self.output_root / "config_used.json")
         self.config_service.save(input_cfg, self.output_root / "config_requested.json")
+
+        final_mass = safe_float(
+            detailed_summary.get("competition_mass_g"),
+            safe_float(detailed_summary.get("estimated_total_mass_g"), None),
+        )
+        final_break = safe_float(metrics.get("predicted_breaking_load_kgf"), None)
+        integrity_rows: List[Dict[str, Any]] = []
+        opt_fv_path = self.output_root / "optimization" / "final_validation_summary.json"
+        opt_final: Dict[str, Any] = {}
+        if opt_fv_path.exists():
+            try:
+                opt_final = json.loads(opt_fv_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, TypeError):
+                opt_final = {"read_error": True}
+        opt_break = safe_float(opt_final.get("predicted_breaking_load_kgf"), None)
+        opt_mass = safe_float(opt_final.get("competition_mass_g"), None)
+        mass_delta = None if (final_mass is None or opt_mass is None) else final_mass - opt_mass
+        break_delta = None if (final_break is None or opt_break is None) else final_break - opt_break
+        integrity_status = "OK"
+        integrity_reasons: List[str] = []
+        if not opt_fv_path.exists():
+            integrity_status = "WARN"
+            integrity_reasons.append("optimization/final_validation_summary.json ausente no run atual")
+        if mass_delta is not None and abs(mass_delta) > 2.0:
+            integrity_status = "MISMATCH"
+            integrity_reasons.append(f"massa final difere da validação S8 em {mass_delta:+.2f} g")
+        if break_delta is not None and abs(break_delta) > 2.0:
+            integrity_status = "MISMATCH"
+            integrity_reasons.append(f"ruptura final difere da validação S8 em {break_delta:+.2f} kgf")
+        if final_mass is not None and final_mass > effective_mass_limit_g(cfg) + 1.0e-6:
+            integrity_reasons.append("relatório final acima do limite de massa")
+        integrity = {
+            "run_id": run_id,
+            "status": integrity_status,
+            "reasons": integrity_reasons,
+            "final_report": {
+                "predicted_breaking_load_kgf": final_break,
+                "competition_mass_g": final_mass,
+                "mass_limit_g": effective_mass_limit_g(cfg),
+            },
+            "optimization_final_validation": opt_final,
+            "deltas": {
+                "break_final_minus_s8_kgf": break_delta,
+                "mass_final_minus_s8_g": mass_delta,
+            },
+            "cleaned_output_dirs": cleaned_dirs,
+        }
+        (self.output_root / "output_integrity_report.json").write_text(
+            json.dumps(integrity, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (self.output_root / "final_report" / "11_integridade_execucao.md").write_text(
+            "# Integridade da execução\n\n"
+            f"- Run ID: `{run_id}`\n"
+            f"- Status: **{integrity_status}**\n"
+            f"- Diretórios limpos no início: `{', '.join(cleaned_dirs) if cleaned_dirs else 'nenhum'}`\n"
+            f"- Massa final: **{final_mass if final_mass is not None else '—'} g**\n"
+            f"- Massa S8: **{opt_mass if opt_mass is not None else '—'} g**\n"
+            f"- Ruptura final: **{final_break if final_break is not None else '—'} kgf**\n"
+            f"- Ruptura S8: **{opt_break if opt_break is not None else '—'} kgf**\n\n"
+            "## Motivos / alertas\n"
+            + ("\n".join(f"- {r}" for r in integrity_reasons) if integrity_reasons else "- Nenhum alerta de divergência entre S8 e relatório final.")
+            + "\n\nArquivo bruto: `../output_integrity_report.json`.\n",
+            encoding="utf-8",
+        )
+        if integrity_status == "MISMATCH":
+            emit_warning(
+                "WARN_OUTPUT_INTEGRITY_MISMATCH",
+                "O relatório final divergiu da validação S8. Consulte final_report/11_integridade_execucao.md.",
+                stage="pipeline",
+            )
         debug_logger.event(
             "mass_limit_check",
             stage="pipeline",
             metrics={
-                "mass_g": safe_float(
-                    detailed_summary.get("competition_mass_g"),
-                    safe_float(detailed_summary.get("estimated_total_mass_g"), None),
-                ),
+                "mass_g": final_mass,
                 "mass_limit_g": effective_mass_limit_g(cfg),
             },
         )
@@ -1639,32 +1978,24 @@ class SimulationPipeline:
             "final_report/02_guia_fabricacao.md",
             "final_report/03_checklist_construcao.md",
             "final_report/04_plano_montagem_detalhado.md",
-            "final_report/04_plano_pecas_por_medida.csv",
-            "final_report/05_mapa_juntas_por_tipo.csv",
-            "final_report/06_sequencia_montagem.csv",
+            "final_report/04_subconjuntos_montagem.md",
+            "final_report/05_mapa_juntas_por_tipo.md",
+            "final_report/06_sequencia_montagem.md",
+            "final_report/08_auditoria_secao_e_realismo.md",
+            "final_report/09_auditoria_conectividade_e_cortes.md",
+            "final_report/10_debug_calculos_criticos.md",
+            "final_report/11_integridade_execucao.md",
             "final_report/focused_outputs_manifest.json",
+            "output_integrity_report.json",
+            "run_metadata.json",
             "final_report/executive_summary.json",
-            "final_report/critical_members.csv",
-            "final_report/mass_breakdown.csv",
-            "final_report/fabrication_summary.csv",
-            "final_report/pipeline_stage_trace.csv",
             "optimization/final_validation_summary.json",
             "optimization/pipeline_trace.json",
-            "optimization/symmetry_audit.csv",
-            "optimization/section_efficiency_mutation.csv",
-            "optimization/post_topology_reinvestment.csv",
-            "optimization/post_reinvest_rebalance.csv",
-            "optimization/final_strength_reserve_push.csv",
-            "optimization/support_pad_capacity_push.csv",
-            "optimization/s8_case_diagnostics.csv",
-            "optimization/s7_fabrication/stick_pieces.csv",
-            "optimization/s7_fabrication/cutting_list.csv",
-            "optimization/s7_fabrication/glue_joints.csv",
-            "optimization/s7_fabrication/connection_plan.csv",
-            "optimization/s7_fabrication/assembly_steps.csv",
-            "optimization/s7_fabrication/member_detail_checks.csv",
+            "plots/01_geometria_3d_fs_uso.html",
             "plots/geometria_3d_interativa.html",
-            "plots/14_gabaritos_membros_criticos.png",
+            "plots/02_geometria_3d_prismas_reais_completo.html",
+            "plots/16_vistas_cad_peca_a_peca.png",
+            "plots/17_modelo_peca_a_peca_prismas_reais.html",
         ]
 
         with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:
