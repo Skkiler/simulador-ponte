@@ -250,6 +250,33 @@ class ReportBundleService:
             layout_cfg.setdefault("layout", layout_name)
             layout_cfg.setdefault("composite_action", detail.get("composite_action", {}))
             sec = sectioner.composite_section(n, mat, layout_cfg)
+            # Audit simple 2D cross-section intersections.  Palitos podem tocar,
+            # mas não podem ocupar o mesmo volume no corte y/z.  Isso captura o
+            # erro antigo em que contact_box/tee3 aumentavam I por interpenetração
+            # de retângulos, o que não é montável com palitos íntegros.
+            overlap_pairs = 0
+            overlap_area_mm2 = 0.0
+            positions = list(sec.get("stick_positions_yz", []) or [])
+            y_dims = list(sec.get("stick_width_y_mm_by_lane", []) or [])
+            z_dims = list(sec.get("stick_height_z_mm_by_lane", []) or [])
+            rects = []
+            for idx, yz in enumerate(positions):
+                if not isinstance(yz, (list, tuple)) or len(yz) < 2:
+                    continue
+                yd = safe_float(y_dims[idx] if idx < len(y_dims) else sec.get("stick_width_y_mm"), 0.0) or 0.0
+                zd = safe_float(z_dims[idx] if idx < len(z_dims) else sec.get("stick_height_z_mm"), 0.0) or 0.0
+                y = safe_float(yz[0], 0.0) or 0.0
+                z = safe_float(yz[1], 0.0) or 0.0
+                rects.append((y - 0.5 * yd, y + 0.5 * yd, z - 0.5 * zd, z + 0.5 * zd))
+            for i in range(len(rects)):
+                for j in range(i + 1, len(rects)):
+                    a = rects[i]
+                    b = rects[j]
+                    oy = max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
+                    oz = max(0.0, min(a[3], b[3]) - max(a[2], b[2]))
+                    if oy > 1.0e-9 and oz > 1.0e-9:
+                        overlap_pairs += 1
+                        overlap_area_mm2 += oy * oz
             cy = safe_float(sec.get("centroid_y_mm"), 0.0) or 0.0
             cz = safe_float(sec.get("centroid_z_mm"), 0.0) or 0.0
             ry = SectionService.radius_of_gyration(float(sec.get("Iy", 0.0) or 0.0), float(sec.get("A", 0.0) or 0.0))
@@ -272,6 +299,8 @@ class ReportBundleService:
             if str(layout_name).lower() in {"box", "contact_box"} and n >= 5 and n % 2 == 1:
                 warnings.append("box com número ímpar usa reforço central balanceado; não mover o palito extra para um canto")
                 construction_note = "montar no gabarito exatamente na posição y/z listada; mover o palito extra altera o momento de inércia"
+            if overlap_pairs > 0:
+                warnings.append(f"interpenetração física detectada: {overlap_pairs} pares, área {overlap_area_mm2:.2f} mm²")
             if centroid_offset > 0.5:
                 warnings.append(f"centroide local deslocado {centroid_offset:.2f} mm; controlar excentricidade na colagem")
             if compression_dominant and min(ry, rz) < 1.0:
@@ -291,6 +320,8 @@ class ReportBundleService:
                     "centroid_z_mm": cz,
                     "centroid_offset_mm": centroid_offset,
                     "eta_I": sec.get("eta_I"),
+                    "section_overlap_pair_count": overlap_pairs,
+                    "section_overlap_area_mm2": overlap_area_mm2,
                     "local_stick_positions_yz": json.dumps(sec.get("stick_positions_yz", []), ensure_ascii=False),
                     "section_connection_model": sec.get("section_connection_model"),
                     "requested_box_extra_stick_strategy": sec.get("requested_box_extra_stick_strategy"),
@@ -331,6 +362,7 @@ Este relatório existe porque a imagem 3D mostra apenas as linhas centrais dos m
 - Banzos inferiores finos podem ser aceitáveis quando trabalham como tirantes; o risco construtivo passa a ser continuidade, emendas e desalinhamento, não flambagem.
 - Em seção `box` com número ímpar de palitos, o modelo usa posição central/simétrica para evitar excentricidade; mover o palito extra para um canto altera centroide e inércia.
 - `laced_box`/`spaced_box` sem palitos de ligação contabilizados é automaticamente rebaixado para `contact_box`; a ponte usa apenas palitos longitudinais e cola nessa seção.
+- O relatório também verifica interpenetração de retângulos no corte da seção; contato é permitido, sobreposição de volumes não é.
 
 ## Tabela executiva
 | grupo | n | layout | orientação | Iy [mm⁴] | Iz [mm⁴] | offset centroide [mm] | aviso | nota construtiva |
@@ -638,6 +670,8 @@ Arquivo completo: `05_mapa_juntas_por_tipo.csv`.
         bad_width = []
         bad_thk = []
         by_model: Dict[str, int] = {}
+        by_x_layer: Dict[str, int] = {}
+        x_unresolved = []
         for r in rows:
             cut = safe_float(r.get("cut_length_mm"), None)
             if cut is not None and cut > cut_limit + 1.0e-9:
@@ -651,6 +685,11 @@ Arquivo completo: `05_mapa_juntas_por_tipo.csv`.
                     bad_thk.append(r)
             model = str(r.get("section_connection_model", r.get("section_layout_effective", "unknown")))
             by_model[model] = by_model.get(model, 0) + 1
+            x_handling = str(r.get("x_bracing_crossing_handling", "") or "")
+            if x_handling:
+                by_x_layer[x_handling] = by_x_layer.get(x_handling, 0) + 1
+            if str(r.get("member_group")) in {"bottom_bracing", "cross_frame_bracing"} and x_handling not in {"alternate_front_back_layer_no_midspan_joint"}:
+                x_unresolved.append(r)
 
         top_over = "\n".join(
             f"| {r.get('stick_id')} | {r.get('member_id')} | {r.get('member_group')} | {safe_float(r.get('cut_length_mm'), None)} | {safe_float(r.get('max_cut_length_mm'), cut_limit)} |"
@@ -660,7 +699,15 @@ Arquivo completo: `05_mapa_juntas_por_tipo.csv`.
             f"| {model} | {count} |"
             for model, count in sorted(by_model.items(), key=lambda kv: (-kv[1], kv[0]))
         ) or "| — | — |"
-        verdict = "OK" if not over_len and not bad_width and not bad_thk else "FALHA"
+        x_rows = "\n".join(
+            f"| {model} | {count} |"
+            for model, count in sorted(by_x_layer.items(), key=lambda kv: (-kv[1], kv[0]))
+        ) or "| — | — |"
+        top_x_bad = "\n".join(
+            f"| {r.get('stick_id')} | {r.get('member_id')} | {r.get('member_group')} | {r.get('x_bracing_crossing_handling')} |"
+            for r in x_unresolved[:25]
+        ) or "| — | — | — |"
+        verdict = "OK" if not over_len and not bad_width and not bad_thk and not x_unresolved else "FALHA"
         text = f"""# Auditoria de conectividade e limites físicos dos palitos
 
 Veredito: **{verdict}**.
@@ -674,11 +721,24 @@ Veredito: **{verdict}**.
 - Cortes acima do limite: **{len(over_len)}**.
 - Prismas/peças com largura visual acima do palito: **{len(bad_width)}**.
 - Prismas/peças com espessura visual acima do palito: **{len(bad_thk)}**.
+- Contraventamentos em X sem solução de cruzamento por camada: **{len(x_unresolved)}**.
 
 ## Modelos de conexão usados
 | modelo de conexão | peças |
 | --- | ---: |
 {model_rows}
+
+## Tratamento de cruzamentos em X
+| tratamento | peças |
+| --- | ---: |
+{x_rows}
+
+O tratamento `alternate_front_back_layer_no_midspan_joint` significa que as duas diagonais do X são contínuas, mas ficam em camadas opostas. Elas **não** são consideradas conectadas no cruzamento central; a transferência de força continua acontecendo pelas extremidades/nós. Essa é a alternativa construtiva preferida quando só há palitos e cola, porque evita cortar uma diagonal e criar uma junta de ponta pequena no meio do vão.
+
+### Cruzamentos em X não resolvidos
+| stick | membro | grupo | tratamento |
+| --- | ---: | --- | --- |
+{top_x_bad}
 
 ## Cortes acima do limite
 | stick | membro | grupo | corte [mm] | limite [mm] |

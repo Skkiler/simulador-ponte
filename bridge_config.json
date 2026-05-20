@@ -474,7 +474,70 @@
     "late_nominal_topoff_min_multi_retention": 0.995,
     "late_nominal_topoff_min_abs_force_N": 40.0,
     "late_nominal_topoff_max_trials": 20,
-    "allow_unmodeled_laced_box": false
+    "allow_unmodeled_laced_box": false,
+    "enable_late_multicase_strength_reinvestment": true,
+    "late_multicase_reinvest_max_iterations": 2,
+    "late_multicase_reinvest_max_critical_trials": 2,
+    "late_multicase_reinvest_max_donor_prefixes": 4,
+    "late_multicase_reinvest_critical_fs_threshold": 1.35,
+    "late_multicase_reinvest_donor_fs_threshold": 5.0,
+    "late_multicase_reinvest_min_abs_force_N": 25.0,
+    "late_multicase_reinvest_min_break_gain_kgf": 0.15,
+    "late_multicase_reinvest_min_fs_gain_ratio": 1.002,
+    "late_multicase_reinvest_max_proxy_mass_ratio": 0.995,
+    "late_multicase_reinvest_proxy_mass_margin_g": 0.0,
+    "late_multicase_reinvest_critical_groups": [
+      "vertical",
+      "top_chord"
+    ],
+    "late_multicase_reinvest_donor_groups": [
+      "bottom_chord",
+      "support_pad",
+      "diagonal",
+      "top_chord"
+    ],
+    "late_multicase_reinvest_cases": [
+      "center",
+      "torsion_60_40",
+      "torsion_70_30"
+    ],
+    "late_multicase_reinvest_full_revalidate": false,
+    "enable_late_basic_7030_target_recovery": true,
+    "late_basic_target_nominal_kgf": 115.0,
+    "late_basic_target_7030_kgf": 80.0,
+    "late_basic_target_case": "center",
+    "late_basic_target_cases": [
+      "center",
+      "torsion_60_40",
+      "torsion_70_30"
+    ],
+    "late_basic_target_max_proxy_mass_ratio": 1.0,
+    "late_basic_nominal_max_iterations": 6,
+    "late_basic_multicase_max_iterations": 6,
+    "late_basic_max_trials": 16,
+    "late_basic_max_donor_prefixes": 10,
+    "late_basic_nominal_groups": [
+      "top_chord",
+      "vertical"
+    ],
+    "late_basic_multicase_critical_groups": [
+      "vertical",
+      "top_chord"
+    ],
+    "late_basic_multicase_donor_groups": [
+      "support_pad",
+      "bottom_chord",
+      "diagonal",
+      "top_chord"
+    ],
+    "late_basic_min_abs_force_N": 25.0,
+    "late_basic_nominal_multi_retention": 0.995,
+    "late_basic_min_multi_gain_kgf": 0.03,
+    "late_basic_min_nominal_gain_kgf": 0.1,
+    "late_basic_donor_fs_threshold": 4.0,
+    "late_basic_critical_fs_threshold": 1.4,
+    "late_basic_target_proxy_mass_margin_g": 0.0,
+    "late_basic_fast_max_critical_adds": 4
   },
   "planner_pipeline": {
     "fast_screening_keep_top_k": 8,

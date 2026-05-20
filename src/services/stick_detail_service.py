@@ -115,6 +115,76 @@ class StickDetailService:
         return local_y, local_z
 
     @staticmethod
+    def _x_bracing_layer_offset(
+        member_group: str,
+        ni: Node,
+        nj: Node,
+        *,
+        stick_thickness_mm: float,
+        detail: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Resolve colisões físicas em contraventamentos em X.
+
+        O modelo estrutural usa barras no eixo dos nós.  Em um X real feito com
+        palitos, duas diagonais que se cruzam não podem ocupar o mesmo plano no
+        ponto médio.  Há duas soluções montáveis: cortar uma diagonal e colar a
+        ponta na face da outra, ou manter ambas contínuas em camadas diferentes
+        (uma "na frente" e outra "atrás").  Para não criar uma conexão de nó
+        central que o solver não calcula, adotamos a segunda opção por padrão:
+        camadas alternadas, sem transferência de força no cruzamento.
+
+        Isso não adiciona material nem resistência; apenas desloca a posição
+        peça-a-peça e deixa explícito que a colagem resistente continua sendo
+        nos nós/extremidades.  A separação é da ordem da espessura do palito.
+        """
+        group = str(member_group or "")
+        layer_groups = set(str(v) for v in (detail.get("x_bracing_layered_groups") or ["bottom_bracing", "cross_frame_bracing"]))
+        if group not in layer_groups:
+            return {
+                "offset": (0.0, 0.0, 0.0),
+                "layer": 0,
+                "plane": "",
+                "handling": "not_x_bracing",
+                "midspan_connected": False,
+            }
+
+        gap = max(0.0, float(detail.get("x_bracing_layer_clearance_mm", 0.30)))
+        sep = max(0.1, float(stick_thickness_mm) + gap)
+        off = 0.5 * sep
+
+        dx = float(nj.x - ni.x)
+        dy = float(nj.y - ni.y)
+        dz = float(nj.z - ni.z)
+
+        if group == "bottom_bracing":
+            # Plano x-y; separar em z.  Sinal alterna entre / e \\.
+            sign = 1.0 if dx * dy >= 0.0 else -1.0
+            return {
+                "offset": (0.0, 0.0, sign * off),
+                "layer": int(sign),
+                "plane": "bottom_xy",
+                "handling": "alternate_front_back_layer_no_midspan_joint",
+                "midspan_connected": False,
+            }
+        if group == "cross_frame_bracing":
+            # Plano y-z; separar em x.  Sinal alterna entre / e \\.
+            sign = 1.0 if dy * dz >= 0.0 else -1.0
+            return {
+                "offset": (sign * off, 0.0, 0.0),
+                "layer": int(sign),
+                "plane": "crossframe_yz",
+                "handling": "alternate_front_back_layer_no_midspan_joint",
+                "midspan_connected": False,
+            }
+        return {
+            "offset": (0.0, 0.0, 0.0),
+            "layer": 0,
+            "plane": "",
+            "handling": "not_layered_by_rule",
+            "midspan_connected": False,
+        }
+
+    @staticmethod
     def _piece_intervals(
         L: float,
         stick_len: float,
@@ -376,6 +446,14 @@ class StickDetailService:
             cy = safe_float(sec.get("centroid_y_mm"), 0.0) or 0.0
             cz = safe_float(sec.get("centroid_z_mm"), 0.0) or 0.0
             local_y_axis, local_z_axis = self._local_section_axes(ux, uy, uz)
+            x_layer = self._x_bracing_layer_offset(
+                m.group,
+                ni,
+                nj,
+                stick_thickness_mm=stick_t,
+                detail=detail,
+            )
+            x_layer_offset = tuple(x_layer.get("offset", (0.0, 0.0, 0.0)))
 
             stick_orientation = str(sec.get("stick_orientation", layout_cfg_detail.get("stick_orientation", "flat"))).strip().lower()
             lane_orientations = list(sec.get("stick_orientations", []) or [])
@@ -488,9 +566,9 @@ class StickDetailService:
                     lane_y = 0.0
                     lane_z = 0.0
                 lane_offset_vec = (
-                    lane_y * local_y_axis[0] + lane_z * local_z_axis[0],
-                    lane_y * local_y_axis[1] + lane_z * local_z_axis[1],
-                    lane_y * local_y_axis[2] + lane_z * local_z_axis[2],
+                    lane_y * local_y_axis[0] + lane_z * local_z_axis[0] + float(x_layer_offset[0]),
+                    lane_y * local_y_axis[1] + lane_z * local_z_axis[1] + float(x_layer_offset[1]),
+                    lane_y * local_y_axis[2] + lane_z * local_z_axis[2] + float(x_layer_offset[2]),
                 )
                 lane_orientation = str(lane_orientations[lane - 1]).strip().lower() if lane - 1 < len(lane_orientations) else stick_orientation
                 lane_visual_width_mm = safe_float(lane_widths[lane - 1], None) if lane - 1 < len(lane_widths) else None
@@ -590,6 +668,10 @@ class StickDetailService:
                             "section_global_offset_x_mm": lane_offset_vec[0],
                             "section_global_offset_y_mm": lane_offset_vec[1],
                             "section_global_offset_z_mm": lane_offset_vec[2],
+                            "x_bracing_layer": x_layer.get("layer"),
+                            "x_bracing_plane": x_layer.get("plane"),
+                            "x_bracing_crossing_handling": x_layer.get("handling"),
+                            "x_bracing_midspan_connected": bool(x_layer.get("midspan_connected", False)),
                             "section_axis_y_x": local_y_axis[0],
                             "section_axis_y_y": local_y_axis[1],
                             "section_axis_y_z": local_y_axis[2],

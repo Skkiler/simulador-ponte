@@ -1,0 +1,325 @@
+diff --git a/bridge_config.json b/bridge_config.json
+index 37112c4..b938d24 100644
+--- a/bridge_config.json
++++ b/bridge_config.json
+@@ -247,7 +247,13 @@
+     "cut_increment_mm": 5.0,
+     "allow_cut_rounding": true,
+     "max_piece_prism_html_pieces": 80,
+-    "generate_group_piece_html": false
++    "generate_group_piece_html": false,
++    "x_bracing_crossing_policy": "single_diagonal_no_crossing",
++    "x_bracing_no_crossing_groups": [
++      "bottom_bracing",
++      "top_bracing",
++      "cross_frame_bracing"
++    ]
+   },
+   "section_layout_by_group": {
+     "bottom_chord": {
+diff --git a/src/services/config_service.py b/src/services/config_service.py
+index d5ddb87..ca9ae56 100644
+--- a/src/services/config_service.py
++++ b/src/services/config_service.py
+@@ -615,6 +615,14 @@ class ConfigService:
+         detail.setdefault("generate_piece_views", True)
+         detail.setdefault("max_piece_prism_html_pieces", 80)
+         detail.setdefault("generate_group_piece_html", False)
++        # Contraventamentos em X no mesmo plano são difíceis de montar sem
++        # interpenetração.  O modo padrão evita cruzamento físico convertendo X
++        # de bracing secundário em diagonais alternadas sem nó no meio do painel.
++        detail.setdefault("x_bracing_crossing_policy", "single_diagonal_no_crossing")
++        detail.setdefault(
++            "x_bracing_no_crossing_groups",
++            ["bottom_bracing", "top_bracing", "cross_frame_bracing"],
++        )
+ 
+         glue_cure = float(detail.get("glue_cure_solids_fraction", 0.50))
+ 
+diff --git a/src/services/geometry_service.py b/src/services/geometry_service.py
+index 4427263..09bc1bc 100644
+--- a/src/services/geometry_service.py
++++ b/src/services/geometry_service.py
+@@ -124,6 +124,31 @@ class GeometryService:
+         return str(raw) if raw is not None else default_mode
+ 
+ 
++
++    @staticmethod
++    def _physical_bracing_mode(cfg: Dict, mode: str, group: str) -> str:
++        """Resolve modos de bracing para geometrias fisicamente montáveis.
++
++        Um X feito por dois palitos contínuos no mesmo plano atravessa a outra
++        diagonal no centro do painel.  Jogar uma diagonal para frente/trás também
++        cria problema nas extremidades, pois a ponta deixa de coincidir com a
++        face de colagem do nó.  Quando a política física está ativa, trocamos X
++        de bracing secundário por diagonais simples alternadas, sem cruzamento.
++        """
++        raw = str(mode or "").strip()
++        norm = GeometryService._normalize_truss_mode(raw)
++        detail = cfg.get("detail_model", {}) or {}
++        policy = str(detail.get("x_bracing_crossing_policy", "single_diagonal_no_crossing")).strip().lower()
++        groups = set(str(v) for v in (detail.get("x_bracing_no_crossing_groups") or []))
++        if norm == "x" and group in groups and policy in {
++            "single_diagonal_no_crossing",
++            "single_diagonal",
++            "convert_to_single_diagonal",
++            "warren_no_crossing",
++        }:
++            return "warren_symmetric"
++        return raw
++
+     def _add_plane_bracing(
+         self,
+         mode: str,
+@@ -351,7 +376,7 @@ class GeometryService:
+                     bottom_chord_truss_type,
+                 )
+                 self._add_plane_bracing(
+-                    bottom_mode_panel,
++                    self._physical_bracing_mode(cfg, bottom_mode_panel, "bottom_bracing"),
+                     idx_panel,
+                     x0,
+                     x1,
+@@ -369,7 +394,7 @@ class GeometryService:
+                     top_chord_truss_type,
+                 )
+                 self._add_plane_bracing(
+-                    top_mode_panel,
++                    self._physical_bracing_mode(cfg, top_mode_panel, "top_bracing"),
+                     idx_panel,
+                     x0,
+                     x1,
+@@ -383,7 +408,14 @@ class GeometryService:
+ 
+         if cfg["bridge"].get("include_cross_frame_bracing", True):
+             for idx_x, x in enumerate(xs):
+-                self._add_cross_frame_bracing(internal_type, idx_x, x, ys, nid, add_member)
++                self._add_cross_frame_bracing(
++                    self._physical_bracing_mode(cfg, internal_type, "cross_frame_bracing"),
++                    idx_x,
++                    x,
++                    ys,
++                    nid,
++                    add_member,
++                )
+ 
+         if cfg["bridge"].get("include_support_pad_members", True):
+             for y in ys:
+diff --git a/src/services/report_bundle_service.py b/src/services/report_bundle_service.py
+index a57b154..8275480 100644
+--- a/src/services/report_bundle_service.py
++++ b/src/services/report_bundle_service.py
+@@ -688,7 +688,8 @@ Arquivo completo: `05_mapa_juntas_por_tipo.csv`.
+             x_handling = str(r.get("x_bracing_crossing_handling", "") or "")
+             if x_handling:
+                 by_x_layer[x_handling] = by_x_layer.get(x_handling, 0) + 1
+-            if str(r.get("member_group")) in {"bottom_bracing", "cross_frame_bracing"} and x_handling not in {"alternate_front_back_layer_no_midspan_joint"}:
++            ok_x_handling = {"alternate_front_back_layer_no_midspan_joint", "single_diagonal_no_crossing", "not_x_bracing"}
++            if str(r.get("member_group")) in {"bottom_bracing", "top_bracing", "cross_frame_bracing"} and x_handling not in ok_x_handling:
+                 x_unresolved.append(r)
+ 
+         top_over = "\n".join(
+@@ -721,7 +722,7 @@ Veredito: **{verdict}**.
+ - Cortes acima do limite: **{len(over_len)}**.
+ - Prismas/peças com largura visual acima do palito: **{len(bad_width)}**.
+ - Prismas/peças com espessura visual acima do palito: **{len(bad_thk)}**.
+-- Contraventamentos em X sem solução de cruzamento por camada: **{len(x_unresolved)}**.
++- Contraventamentos em X ou bracings equivalentes sem solução física de cruzamento: **{len(x_unresolved)}**.
+ 
+ ## Modelos de conexão usados
+ | modelo de conexão | peças |
+@@ -733,7 +734,7 @@ Veredito: **{verdict}**.
+ | --- | ---: |
+ {x_rows}
+ 
+-O tratamento `alternate_front_back_layer_no_midspan_joint` significa que as duas diagonais do X são contínuas, mas ficam em camadas opostas. Elas **não** são consideradas conectadas no cruzamento central; a transferência de força continua acontecendo pelas extremidades/nós. Essa é a alternativa construtiva preferida quando só há palitos e cola, porque evita cortar uma diagonal e criar uma junta de ponta pequena no meio do vão.
++O tratamento `single_diagonal_no_crossing` significa que o X físico foi substituído por diagonais alternadas sem cruzamento no mesmo painel. Essa é a opção mais segura quando não há espaço real para deslocar uma perna do X na extremidade de colagem. O tratamento `alternate_front_back_layer_no_midspan_joint` fica disponível apenas para estudos em que haja assento/face de colagem suficiente nas duas camadas.
+ 
+ ### Cruzamentos em X não resolvidos
+ | stick | membro | grupo | tratamento |
+diff --git a/src/services/stick_detail_service.py b/src/services/stick_detail_service.py
+index a1b06fa..cc199a2 100644
+--- a/src/services/stick_detail_service.py
++++ b/src/services/stick_detail_service.py
+@@ -138,6 +138,22 @@ class StickDetailService:
+         nos nós/extremidades.  A separação é da ordem da espessura do palito.
+         """
+         group = str(member_group or "")
++        policy = str(detail.get("x_bracing_crossing_policy", "single_diagonal_no_crossing")).strip().lower()
++        no_cross_groups = set(str(v) for v in (detail.get("x_bracing_no_crossing_groups") or ["bottom_bracing", "top_bracing", "cross_frame_bracing"]))
++        if group in no_cross_groups and policy in {
++            "single_diagonal_no_crossing",
++            "single_diagonal",
++            "convert_to_single_diagonal",
++            "warren_no_crossing",
++        }:
++            return {
++                "offset": (0.0, 0.0, 0.0),
++                "layer": 0,
++                "plane": "single_diagonal",
++                "handling": "single_diagonal_no_crossing",
++                "midspan_connected": False,
++            }
++
+         layer_groups = set(str(v) for v in (detail.get("x_bracing_layered_groups") or ["bottom_bracing", "cross_frame_bracing"]))
+         if group not in layer_groups:
+             return {
+diff --git a/src/services/visualization_service.py b/src/services/visualization_service.py
+index 53678ac..4730da3 100644
+--- a/src/services/visualization_service.py
++++ b/src/services/visualization_service.py
+@@ -910,6 +910,28 @@ class VisualizationService:
+             "k": [f[2] for f in faces],
+         }
+ 
++    @staticmethod
++    def _prism_edge_polyline(prism: Dict[str, List[float]]) -> tuple[List[float], List[float], List[float]]:
++        """Retorna uma polyline única com as 12 arestas de um prisma."""
++        edges = [
++            (0, 1), (1, 2), (2, 3), (3, 0),
++            (4, 5), (5, 6), (6, 7), (7, 4),
++            (0, 4), (1, 5), (2, 6), (3, 7),
++        ]
++        xs: List[float] = []
++        ys: List[float] = []
++        zs: List[float] = []
++        px = prism.get("x", [])
++        py = prism.get("y", [])
++        pz = prism.get("z", [])
++        if len(px) < 8 or len(py) < 8 or len(pz) < 8:
++            return xs, ys, zs
++        for a, b in edges:
++            xs.extend([px[a], px[b], None])
++            ys.extend([py[a], py[b], None])
++            zs.extend([pz[a], pz[b], None])
++        return xs, ys, zs
++
+     def plotly_stick_pieces(
+         self,
+         stick_pieces,
+@@ -960,6 +982,9 @@ class VisualizationService:
+ 
+         for gi, g in enumerate(groups):
+             color = base_colors[gi % len(base_colors)]
++            edge_x: List[float] = []
++            edge_y: List[float] = []
++            edge_z: List[float] = []
+             # Desenha cada peça como um prisma 3D
+             for r in [rr for rr in rows if str(rr.get("member_group", "sem_grupo")) == g]:
+                 lane = int(safe_float(r.get("lane"), 1) or 1)
+@@ -1062,13 +1087,31 @@ class VisualizationService:
+                             j=prism["j"],
+                             k=prism["k"],
+                             name=g,
+-                            opacity=0.85,
++                            opacity=1.0,
+                             color=color,
++                            flatshading=True,
+                             hovertext=label,
+                             hoverinfo="text",
+                             showscale=False,
+                         )
+                     )
++                    ex, ey, ez = self._prism_edge_polyline(prism)
++                    edge_x.extend(ex)
++                    edge_y.extend(ey)
++                    edge_z.extend(ez)
++            if edge_x:
++                fig.add_trace(
++                    go.Scatter3d(
++                        x=edge_x,
++                        y=edge_y,
++                        z=edge_z,
++                        mode="lines",
++                        line={"width": 2, "color": "black"},
++                        name=f"arestas — {g}",
++                        hoverinfo="skip",
++                        showlegend=False,
++                    )
++                )
+ 
+         # Em seções espaçadas (box real com 4+ palitos), desenha linhas finas
+         # ligando os centros das lanes nos pontos de corte.  Isso não adiciona
+diff --git a/tests/test_x_bracing_layering.py b/tests/test_x_bracing_layering.py
+index 1d70628..ee2d897 100644
+--- a/tests/test_x_bracing_layering.py
++++ b/tests/test_x_bracing_layering.py
+@@ -12,8 +12,9 @@ def test_bottom_x_bracing_diagonals_are_assigned_opposite_z_layers() -> None:
+     n3 = Node(3, 0.0, 50.0, 0.0, "bottom", "R", 0.0)
+     n4 = Node(4, 100.0, -50.0, 0.0, "bottom", "L", 100.0)
+ 
+-    a = StickDetailService._x_bracing_layer_offset("bottom_bracing", n1, n2, stick_thickness_mm=1.5, detail={})
+-    b = StickDetailService._x_bracing_layer_offset("bottom_bracing", n3, n4, stick_thickness_mm=1.5, detail={})
++    detail = {"x_bracing_crossing_policy": "alternate_layers"}
++    a = StickDetailService._x_bracing_layer_offset("bottom_bracing", n1, n2, stick_thickness_mm=1.5, detail=detail)
++    b = StickDetailService._x_bracing_layer_offset("bottom_bracing", n3, n4, stick_thickness_mm=1.5, detail=detail)
+ 
+     assert a["handling"] == "alternate_front_back_layer_no_midspan_joint"
+     assert b["handling"] == "alternate_front_back_layer_no_midspan_joint"
+@@ -29,10 +30,63 @@ def test_cross_frame_x_bracing_diagonals_are_assigned_opposite_x_layers() -> Non
+     n3 = Node(3, 100.0, -50.0, 100.0, "top", "L", 100.0)
+     n4 = Node(4, 100.0, 50.0, 0.0, "bottom", "R", 100.0)
+ 
+-    a = StickDetailService._x_bracing_layer_offset("cross_frame_bracing", n1, n2, stick_thickness_mm=1.5, detail={})
+-    b = StickDetailService._x_bracing_layer_offset("cross_frame_bracing", n3, n4, stick_thickness_mm=1.5, detail={})
++    detail = {"x_bracing_crossing_policy": "alternate_layers"}
++    a = StickDetailService._x_bracing_layer_offset("cross_frame_bracing", n1, n2, stick_thickness_mm=1.5, detail=detail)
++    b = StickDetailService._x_bracing_layer_offset("cross_frame_bracing", n3, n4, stick_thickness_mm=1.5, detail=detail)
+ 
+     assert a["plane"] == "crossframe_yz"
+     assert b["plane"] == "crossframe_yz"
+     assert a["offset"][0] == pytest.approx(-b["offset"][0])
+     assert abs(a["offset"][0] - b["offset"][0]) > 1.5
++
++
++def test_default_x_policy_uses_single_diagonal_without_layer_offset() -> None:
++    n1 = Node(1, 0.0, -50.0, 0.0, "bottom", "L", 0.0)
++    n2 = Node(2, 100.0, 50.0, 0.0, "bottom", "R", 100.0)
++
++    r = StickDetailService._x_bracing_layer_offset("bottom_bracing", n1, n2, stick_thickness_mm=1.5, detail={})
++
++    assert r["handling"] == "single_diagonal_no_crossing"
++    assert r["offset"] == pytest.approx((0.0, 0.0, 0.0))
++    assert r["midspan_connected"] is False
++
++
++def test_geometry_converts_secondary_x_bracing_to_alternating_single_diagonals() -> None:
++    from src.services.config_service import ConfigService
++    from src.services.geometry_service import GeometryService
++
++    cfg = ConfigService().normalize(
++        {
++            "bridge": {
++                "span_mm": 1200.0,
++                "width_mm": 120.0,
++                "height_mm": 250.0,
++                "panel_length_mm": 200.0,
++                "left_support_overhang_mm": 50.0,
++                "right_support_overhang_mm": 50.0,
++                "top_chord_profile": "flat",
++                "end_height_mm": 250.0,
++                "center_height_mm": 250.0,
++                "bottom_chord_truss_type": "X",
++                "top_chord_truss_type": "X",
++                "internal_truss_type": "X",
++                "include_bottom_x_bracing": True,
++                "include_top_x_bracing": True,
++                "include_cross_frame_bracing": True,
++            },
++            "material": {"stick_length_mm": 120.0, "stick_width_mm": 7.0, "stick_thickness_mm": 1.5},
++            "load": {"design_load_kgf": 80.0},
++            "detail_model": {"x_bracing_crossing_policy": "single_diagonal_no_crossing"},
++        }
++    )
++    _, members, _, _ = GeometryService().generate(cfg)
++    by_group = {}
++    for m in members:
++        by_group.setdefault(m.group, 0)
++        by_group[m.group] += 1
++
++    # 7 stations = 6 panels.  X would create 12 members per plane; the physical
++    # no-crossing policy must create one alternating diagonal per panel.
++    assert by_group.get("bottom_bracing") == 14
++    assert by_group.get("top_bracing") == 14
++    assert by_group.get("cross_frame_bracing") == 15

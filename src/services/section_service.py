@@ -73,23 +73,42 @@ class SectionService:
             # Face-to-face cap lamination; no diagonal floating pair.
             return [rec(0.0, -t / 2.0, "flat"), rec(0.0, t / 2.0, "flat")]
         if n == 3:
-            # Mixed compact T/I-like lamination: one web plus two caps.  This is
-            # a connected 3-stick section and usually improves the weak axis
-            # relative to a pure stack without pretending to be a box.
-            return [rec(0.0, 0.0, "edge"), rec(0.0, -t, "flat"), rec(0.0, t, "flat")]
+            # Mixed compact T/I-like lamination.  The caps are placed outside the
+            # central web so the rectangles touch without occupying the same
+            # volume.  Earlier versions overlapped the web/caps by t×t in the
+            # cross-section; that is not buildable with intact sticks.
+            return [rec(0.0, 0.0, "edge"), rec(0.0, -0.5 * b - 0.5 * t, "flat"), rec(0.0, 0.5 * b + 0.5 * t, "flat")]
 
-        d = max(0.0, 0.5 * b - 0.5 * t)
+        # Contact box: caps are between the side webs.  This has real
+        # side/face contact along the member length and no interpenetrating
+        # rectangles.  It is weaker in the z axis than the old overlapping box,
+        # but is physically buildable from full-length sticks and glue.
+        web_y = 0.5 * b + 0.5 * t
+        cap_z = 0.5 * b - 0.5 * t
         sticks: List[Dict[str, float | str]] = [
-            rec(-d, 0.0, "edge"),
-            rec(d, 0.0, "edge"),
-            rec(0.0, -d, "flat"),
-            rec(0.0, d, "flat"),
+            rec(-web_y, 0.0, "edge"),
+            rec(web_y, 0.0, "edge"),
+            rec(0.0, -cap_z, "flat"),
+            rec(0.0, cap_z, "flat"),
         ]
-        # Add balanced extra material at the centroid.  Alternating orientations
-        # keeps I_y and I_z similar and avoids a hidden eccentric section.
+        # Extra material is added only in positions that are buildable without
+        # volume overlap.  First fill the hollow with one/two flat laminations;
+        # then add symmetric outside web laminations.  Odd counts stay balanced.
         extras = n - 4
-        for k in range(extras):
-            sticks.append(rec(0.0, 0.0, "flat" if k % 2 == 0 else "edge"))
+        if extras == 1:
+            sticks.append(rec(0.0, 0.0, "flat"))
+        elif extras == 2:
+            sticks.extend([rec(0.0, -0.5 * t, "flat"), rec(0.0, 0.5 * t, "flat")])
+        elif extras == 3:
+            sticks.extend([rec(0.0, 0.0, "flat"), rec(-web_y - t, 0.0, "edge"), rec(web_y + t, 0.0, "edge")])
+        elif extras >= 4:
+            sticks.extend([rec(0.0, -0.5 * t, "flat"), rec(0.0, 0.5 * t, "flat"), rec(-web_y - t, 0.0, "edge"), rec(web_y + t, 0.0, "edge")])
+            # Additional sticks beyond eight are compact core laminations.  The
+            # planner normally caps these groups before reaching here; this is a
+            # safe fallback that avoids hidden spacing assumptions.
+            for k in range(extras - 4):
+                offset = (k + 1) * t
+                sticks.append(rec(0.0, 0.0 if k == 0 else ((-1) ** k) * min(offset, cap_z - t), "flat"))
         return sticks
 
 

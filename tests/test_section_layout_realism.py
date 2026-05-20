@@ -102,3 +102,38 @@ def test_unmodeled_laced_box_is_demoted_to_contact_box() -> None:
     assert sec["section_connection_model"] == "four_side_contact_box_with_face_side_glue"
     assert max(abs(y) for y, _ in sec["stick_positions_yz"]) < 7.0
     assert max(abs(z) for _, z in sec["stick_positions_yz"]) < 7.0
+
+
+def _rectangles_for_section(sec):
+    rects = []
+    for (y, z), yd, zd in zip(
+        sec["stick_positions_yz"],
+        sec["stick_width_y_mm_by_lane"],
+        sec["stick_height_z_mm_by_lane"],
+    ):
+        rects.append((y - yd / 2, y + yd / 2, z - zd / 2, z + zd / 2))
+    return rects
+
+
+def _overlap_area(a, b):
+    oy = max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
+    oz = max(0.0, min(a[3], b[3]) - max(a[2], b[2]))
+    return oy * oz
+
+
+def test_contact_box_sections_do_not_interpenetrate_stick_volumes() -> None:
+    for n in (3, 4, 5, 6, 7, 8):
+        sec = SectionService.composite_section(
+            n,
+            MAT,
+            {
+                "layout": "box",
+                "stick_orientation": "edge",
+                "spacing_y_mm": 24.0,
+                "spacing_z_mm": 24.0,
+            },
+        )
+        rects = _rectangles_for_section(sec)
+        for i, a in enumerate(rects):
+            for b in rects[i + 1:]:
+                assert _overlap_area(a, b) == pytest.approx(0.0)
