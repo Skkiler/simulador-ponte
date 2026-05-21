@@ -1614,6 +1614,9 @@ with aba_simulacao:
                     st.markdown("**Palitos por membro**")
                     st.dataframe(by_member_df, width="stretch")
 
+        mounted_scale_default = float(detail_cfg.get("piece_view_mounted_connection_offset_scale", 0.0))
+        connection_offset_scale = mounted_scale_default
+
         # Show assembly group overview first if available
         if assembly_groups:
             st.markdown("**Resumo de grupos de montagem**")
@@ -1664,6 +1667,19 @@ with aba_simulacao:
                     "Assim o 3D mostra exatamente a unidade física selecionada, e não um grupo aproximado."
                 ),
             )
+            piece_view_mode = st.radio(
+                "Modo geométrico",
+                ["posição de encaixe", "vista explodida"],
+                index=0,
+                horizontal=True,
+                help=(
+                    "'posição de encaixe' mostra as peças no lugar construtivo; "
+                    "'vista explodida' aplica um afastamento lateral moderado para auditar camadas e X."
+                ),
+            )
+            mounted_scale = float(detail_cfg.get("piece_view_mounted_connection_offset_scale", 0.0))
+            exploded_scale = float(detail_cfg.get("piece_view_exploded_connection_offset_scale", 0.60))
+            connection_offset_scale = mounted_scale if piece_view_mode == "posição de encaixe" else exploded_scale
 
             if filter_mode == "grupo estrutural":
                 structural_groups = sorted({str(r.get("member_group", "sem_grupo")) for r in pieces_all})
@@ -1774,6 +1790,7 @@ with aba_simulacao:
                         max_pieces=2000,
                         render_mode=render_mode,
                         color_by=color_by_mode,
+                        connection_offset_scale=connection_offset_scale,
                     ),
                     width="stretch",
                 )
@@ -1798,6 +1815,7 @@ with aba_simulacao:
                         member_id=int(member_selected) if member_selected is not None else None,
                         max_pieces=2000,
                         render_mode=render_mode,
+                        connection_offset_scale=connection_offset_scale,
                     ),
                     width="stretch",
                 )

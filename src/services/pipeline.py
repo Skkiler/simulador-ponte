@@ -845,6 +845,41 @@ class SimulationPipeline:
                 stage="planner",
             )
 
+        # Garantia de integridade: mesmo quando o funil é consumido em memória
+        # pela UI, o pacote final precisa conter a validação S8 atual.  Runs
+        # anteriores podiam terminar com `optimization/final_validation_summary`
+        # ausente, fazendo o relatório de integridade acusar WARN e deixando
+        # `ruptura design multi-loadcase` como n/d.
+        try:
+            opt_dir = self.output_root / "optimization"
+            opt_dir.mkdir(parents=True, exist_ok=True)
+            fv_path = opt_dir / "final_validation_summary.json"
+            s8_rows = list((optimization or {}).get("s8_final_validation", []) or [])
+            if s8_rows and not fv_path.exists():
+                s8 = dict(s8_rows[0])
+                fv = {
+                    "verdict": s8.get("verdict"),
+                    "failed_restriction": s8.get("failed_restriction"),
+                    "predicted_breaking_load_kgf": s8.get("predicted_breaking_load_kgf"),
+                    "target_breaking_load_kgf": s8.get("target_breaking_load_kgf"),
+                    "competition_mass_g": s8.get("competition_mass_g"),
+                    "min_fs_design": s8.get("min_fs_design"),
+                    "solver_regular": s8.get("solver_regular"),
+                    "equilibrium_ok": s8.get("equilibrium_ok"),
+                    "governing_case": s8.get("governing_case"),
+                    "governing_member_id": s8.get("governing_member_id"),
+                    "governing_member_group": s8.get("governing_member_group"),
+                    "case_metrics": s8.get("case_metrics") or [],
+                    "source": "pipeline_s8_memory_sync",
+                }
+                fv_path.write_text(json.dumps(fv, indent=2, ensure_ascii=False), encoding="utf-8")
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            emit_warning(
+                "WARN_FINAL_VALIDATION_SYNC_FAILED",
+                f"Falha ao sincronizar final_validation_summary a partir do S8: {exc!r}",
+                stage="planner",
+            )
+
         emit_progress(0.62, "Gerando geometria estrutural")
         nodes, members, supports, loads = self.geometry.generate(cfg)
         self.geometry.export_csvs(cfg, model_dir)
@@ -1504,24 +1539,44 @@ class SimulationPipeline:
                 if pieces:
                     prism_html = plot_dir / "02_geometria_3d_prismas_reais_completo.html"
                     legacy_prism_html = plot_dir / "17_modelo_peca_a_peca_prismas_reais.html"
+                    exploded_prism_html = plot_dir / "18_modelo_peca_a_peca_explodido.html"
                     emit_progress(0.882, f"Pré-calculando malhas 3D peça-a-peça ({min(len(pieces), max_piece_html)}/{len(pieces)} peças)")
                     color_by = str(detail_cfg.get("piece_view_color_by", "assembly_unit"))
+                    mounted_scale = float(detail_cfg.get("piece_view_mounted_connection_offset_scale", 0.0))
+                    exploded_scale = float(detail_cfg.get("piece_view_exploded_connection_offset_scale", 0.60))
                     prism_batches = self.viz.prepare_stick_piece_mesh_batches(
                         pieces,
                         max_pieces=max_piece_html,
                         color_by=color_by,
+                        connection_offset_scale=mounted_scale,
                     )
-                    emit_progress(0.886, "Renderizando HTML 3D peça-a-peça a partir das malhas pré-calculadas")
+                    emit_progress(0.886, "Renderizando HTML 3D peça-a-peça em posição de encaixe")
                     fig_prisms = self.viz.plotly_stick_pieces(
                         pieces,
                         max_pieces=max_piece_html,
                         render_mode="prismas reais",
                         precomputed_mesh_batches=prism_batches,
                         color_by=color_by,
+                        connection_offset_scale=mounted_scale,
                     )
                     fig_prisms.write_html(prism_html)
                     # Alias de compatibilidade para relatórios antigos.
                     fig_prisms.write_html(legacy_prism_html)
+                    emit_progress(0.888, "Renderizando HTML 3D peça-a-peça em vista explodida")
+                    exploded_batches = self.viz.prepare_stick_piece_mesh_batches(
+                        pieces,
+                        max_pieces=max_piece_html,
+                        color_by=color_by,
+                        connection_offset_scale=exploded_scale,
+                    )
+                    self.viz.plotly_stick_pieces(
+                        pieces,
+                        max_pieces=max_piece_html,
+                        render_mode="prismas reais",
+                        precomputed_mesh_batches=exploded_batches,
+                        color_by=color_by,
+                        connection_offset_scale=exploded_scale,
+                    ).write_html(exploded_prism_html)
                     group_files = []
                     if generate_group_html:
                         group_dir = plot_dir / "subconjuntos_html"
@@ -1549,6 +1604,7 @@ class SimulationPipeline:
                                 subset,
                                 max_pieces=subset_max,
                                 color_by=color_by,
+                                connection_offset_scale=mounted_scale,
                             )
                             self.viz.plotly_stick_pieces(
                                 subset,
@@ -1556,11 +1612,13 @@ class SimulationPipeline:
                                 render_mode="prismas reais",
                                 precomputed_mesh_batches=subset_batches,
                                 color_by=color_by,
+                                connection_offset_scale=mounted_scale,
                             ).write_html(path)
                             group_files.append(str(path))
                     detailed["piece_view_files"] = {
                         "real_prisms_all_html": str(prism_html),
                         "legacy_real_prisms_all_html": str(legacy_prism_html),
+                        "exploded_real_prisms_all_html": str(exploded_prism_html),
                         "group_html": group_files,
                         "orthographic_overview_png": str(plot_dir / "16_vistas_cad_peca_a_peca.png"),
                         "piece_html_sampled_count": min(len(pieces), max_piece_html),
@@ -1998,6 +2056,7 @@ class SimulationPipeline:
             "final_report/04_subconjuntos_montagem.md",
             "final_report/05_mapa_juntas_por_tipo.md",
             "final_report/06_sequencia_montagem.md",
+            "final_report/07_avaliacao_contato_carga.md",
             "final_report/08_auditoria_secao_e_realismo.md",
             "final_report/09_auditoria_conectividade_e_cortes.md",
             "final_report/10_debug_calculos_criticos.md",
@@ -2008,6 +2067,16 @@ class SimulationPipeline:
             "final_report/executive_summary.json",
             "optimization/final_validation_summary.json",
             "optimization/pipeline_trace.json",
+            "details/cutting_list.csv",
+            "details/stick_pieces.csv",
+            "details/glue_joints.csv",
+            "details/assembly_tutorial.md",
+            "details/assembly_steps.csv",
+            "final_report/04_plano_pecas_por_medida.csv",
+            "final_report/04_subconjuntos_montagem.csv",
+            "final_report/05_mapa_juntas_por_tipo.csv",
+            "final_report/06_sequencia_montagem.csv",
+            "final_report/load_contact_assessment.csv",
             "plots/01_geometria_3d_fs_uso.html",
             "plots/geometria_3d_interativa.html",
             "plots/02_geometria_3d_prismas_reais_completo.html",

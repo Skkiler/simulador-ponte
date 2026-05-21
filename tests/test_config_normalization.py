@@ -47,3 +47,46 @@ def test_no_crossing_policy_removes_x_from_secondary_planner_domains(base_cfg: d
         "consider_bottom_chord_trusses",
     ):
         assert "X" not in normalized["planner"][key]
+
+
+def test_config_normalize_closes_8020_and_even_primary_boxes(base_cfg: dict) -> None:
+    cfg = base_cfg
+    cfg.setdefault("multi_loadcase_screening", {})["strength_governing_cases"] = ["center", "torsion_70_30"]
+    cfg.setdefault("member_sticks_by_group", {})["top_chord"] = 7
+    cfg.setdefault("planner", {}).setdefault("local_sizing", {}).setdefault("min_sticks_primary_member_by_group", {})["top_chord"] = 7
+    cfg.setdefault("analysis", {}).setdefault("planner_min_sticks_per_group_by_group", {})["top_chord"] = 7
+
+    normalized = ConfigService().normalize(cfg)
+
+    assert "torsion_80_20" in normalized["multi_loadcase_screening"]["strength_governing_cases"]
+    assert normalized["member_sticks_by_group"]["top_chord"] == 8
+    assert normalized["planner"]["local_sizing"]["min_sticks_primary_member_by_group"]["top_chord"] == 8
+    assert normalized["analysis"]["planner_min_sticks_per_group_by_group"]["top_chord"] == 8
+    assert normalized["analysis"]["use_quarter_model"] is False
+
+
+def test_top_profile_domain_is_strict_when_user_selects_flat_only(base_cfg: dict) -> None:
+    cfg = base_cfg
+    cfg["bridge"]["top_profile"] = "parker_plateau"
+    cfg["bridge"]["center_height_mm"] = 300.0
+    cfg["bridge"]["end_height_mm"] = 100.0
+    cfg["planner"]["consider_top_profiles"] = ["flat"]
+
+    normalized = ConfigService().normalize(cfg)
+
+    assert normalized["planner"]["consider_top_profiles"] == ["flat"]
+    assert normalized["bridge"]["top_profile"] == "flat"
+    assert normalized["bridge"]["end_height_mm"] == normalized["bridge"]["center_height_mm"]
+
+
+def test_safe_default_detailing_avoids_unverified_miter_and_visual_offsets(base_cfg: dict) -> None:
+    cfg = base_cfg
+    cfg.get("detail_model", {}).pop("angled_end_cuts_enabled", None)
+    cfg.get("detail_model", {}).pop("visual_beveled_end_cuts", None)
+    cfg.get("detail_model", {}).pop("piece_view_mounted_connection_offset_scale", None)
+
+    normalized = ConfigService().normalize(cfg)
+
+    assert normalized["detail_model"]["angled_end_cuts_enabled"] is False
+    assert normalized["detail_model"]["visual_beveled_end_cuts"] is False
+    assert normalized["detail_model"]["piece_view_mounted_connection_offset_scale"] == 0.0

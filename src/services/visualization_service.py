@@ -808,6 +808,10 @@ class VisualizationService:
         thickness_axis: tuple[float, float, float] | None = None,
         start_miter_angle_deg: float | None = None,
         end_miter_angle_deg: float | None = None,
+        start_miter_skew_sign: float | None = None,
+        end_miter_skew_sign: float | None = None,
+        start_miter_trim_axis: str | None = None,
+        end_miter_trim_axis: str | None = None,
     ) -> Dict[str, List[float]]:
         """Gera vértices/faces de um prisma orientado entre p0 e p1.
 
@@ -902,21 +906,50 @@ class VisualizationService:
             if a >= 89.5:
                 return 0.0
             a = max(15.0, min(89.0, a))
-            return min(0.35 * L, max(0.0, float(thickness_mm) / math.tan(math.radians(a))))
+            # Desenho deliberadamente simples: uma única face inclinada curta
+            # na ponta do palito.  O visual não tenta representar entalhes
+            # palito-a-palito nem cortes em zigue-zague, porque isso foi lido
+            # como corte aleatório e não corresponde ao plano de montagem.
+            cut_depth = min(abs(float(width_mm)), abs(float(thickness_mm)))
+            return min(0.10 * L, max(0.0, cut_depth / math.tan(math.radians(a))))
 
         start_shift = _miter_shift(start_miter_angle_deg)
         end_shift = _miter_shift(end_miter_angle_deg)
+
+        def _sign(value: float | None, default: float = 1.0) -> float:
+            try:
+                v = float(value)
+            except (TypeError, ValueError):
+                return float(default)
+            return 1.0 if v >= 0.0 else -1.0
+
+        start_skew = _sign(start_miter_skew_sign, 1.0)
+        end_skew = _sign(end_miter_skew_sign, 1.0)
+
+        def _axis_side(idx: int, axis_name: str | None) -> float:
+            axis = str(axis_name or "z").strip().lower()
+            if axis in {"y", "width", "face_y"}:
+                return 1.0 if idx in {1, 2} else -1.0
+            # default: trim across local z/thickness face
+            return 1.0 if idx in {2, 3} else -1.0
+
         verts = []
         for idx, off in enumerate(offsets):
-            # Os dois vértices de uma face recebem deslocamento axial diferente,
-            # criando uma face terminal inclinada. Usamos o sinal no eixo local v
-            # para definir qual borda avança; é uma aproximação fabricável e
-            # estável para CAD, não uma nova propriedade resistente.
-            v_side = 1.0 if idx in {2, 3} else -1.0
-            verts.append(p0v + off + (start_shift if v_side > 0 else 0.0) * d_unit)
+            # The signed skew indicates which local side must be shortened to
+            # match the host face.  Without this sign the bevel may be mirrored.
+            side = _axis_side(idx, start_miter_trim_axis)
+            should_trim = start_shift > 0.0 and (
+                (start_skew >= 0.0 and side > 0.0)
+                or (start_skew < 0.0 and side < 0.0)
+            )
+            verts.append(p0v + off + (start_shift if should_trim else 0.0) * d_unit)
         for idx, off in enumerate(offsets):
-            v_side = 1.0 if idx in {2, 3} else -1.0
-            verts.append(p1v + off - (end_shift if v_side > 0 else 0.0) * d_unit)
+            side = _axis_side(idx, end_miter_trim_axis)
+            should_trim = end_shift > 0.0 and (
+                (end_skew >= 0.0 and side < 0.0)
+                or (end_skew < 0.0 and side > 0.0)
+            )
+            verts.append(p1v + off - (end_shift if should_trim else 0.0) * d_unit)
         xs = [float(pt[0]) for pt in verts]
         ys = [float(pt[1]) for pt in verts]
         zs = [float(pt[2]) for pt in verts]
@@ -975,6 +1008,7 @@ class VisualizationService:
         max_pieces: int = 1500,
         lane_offset_mm: float = 5.0,
         color_by: str = "assembly_unit",
+        connection_offset_scale: float = 0.0,
     ) -> Dict[str, Any]:
         """Pré-calcula prismas reais antes de montar o Plotly.
 
@@ -1052,12 +1086,19 @@ class VisualizationService:
             else:
                 off_y = (lane - 1) * lane_offset_mm
                 off_z = (0.35 * lane_offset_mm) * ((pidx % 2) - 0.5)
-            x0 = safe_float(r.get("x0_mm"), 0.0) or 0.0
-            y0 = (safe_float(r.get("y0_mm"), 0.0) or 0.0) + off_y
-            z0 = (safe_float(r.get("z0_mm"), 0.0) or 0.0) + off_z
-            x1 = safe_float(r.get("x1_mm"), 0.0) or 0.0
-            y1 = (safe_float(r.get("y1_mm"), 0.0) or 0.0) + off_y
-            z1 = (safe_float(r.get("z1_mm"), 0.0) or 0.0) + off_z
+            try:
+                offset_scale = float(connection_offset_scale)
+            except (TypeError, ValueError):
+                offset_scale = 0.0
+            vx = offset_scale * (safe_float(r.get("visual_connection_offset_x_mm"), 0.0) or 0.0)
+            vy = offset_scale * (safe_float(r.get("visual_connection_offset_y_mm"), 0.0) or 0.0)
+            vz = offset_scale * (safe_float(r.get("visual_connection_offset_z_mm"), 0.0) or 0.0)
+            x0 = (safe_float(r.get("x0_mm"), 0.0) or 0.0) + vx
+            y0 = (safe_float(r.get("y0_mm"), 0.0) or 0.0) + off_y + vy
+            z0 = (safe_float(r.get("z0_mm"), 0.0) or 0.0) + off_z + vz
+            x1 = (safe_float(r.get("x1_mm"), 0.0) or 0.0) + vx
+            y1 = (safe_float(r.get("y1_mm"), 0.0) or 0.0) + off_y + vy
+            z1 = (safe_float(r.get("z1_mm"), 0.0) or 0.0) + off_z + vz
             try:
                 nominal_wmm = float(r.get("width_mm"))
                 nominal_tmm = float(r.get("thickness_mm"))
@@ -1099,6 +1140,10 @@ class VisualizationService:
                 thickness_axis=axis_z,
                 start_miter_angle_deg=safe_float(r.get("miter_cut_start_angle_deg"), 90.0) if use_bevel else 90.0,
                 end_miter_angle_deg=safe_float(r.get("miter_cut_end_angle_deg"), 90.0) if use_bevel else 90.0,
+                start_miter_skew_sign=safe_float(r.get("miter_cut_start_skew_sign"), 1.0),
+                end_miter_skew_sign=safe_float(r.get("miter_cut_end_skew_sign"), 1.0),
+                start_miter_trim_axis=str(r.get("miter_cut_start_trim_axis", "z") or "z"),
+                end_miter_trim_axis=str(r.get("miter_cut_end_trim_axis", "z") or "z"),
             )
             assembly_key = str(r.get("assembly_unit_key") or r.get("stick_id") or f"M{r.get('member_id')}-L{lane}-P{pidx}")
             color_key = _row_color_key(r)
@@ -1110,6 +1155,7 @@ class VisualizationService:
                 f"Unidade: {assembly_key}",
                 f"Corte {safe_float(r.get('cut_length_mm'), 0.0) or 0.0:.1f} mm",
                 f"Comprimento instalado {safe_float(r.get('installed_length_mm'), 0.0) or 0.0:.1f} mm",
+                f"Perda por corte em grau {safe_float(r.get('miter_cut_material_loss_length_mm'), 0.0) or 0.0:.2f} mm",
                 f"N peça {safe_float(r.get('N_piece_N'), 0.0) or 0.0:.2f} N",
                 f"Blank nominal {nominal_wmm:.1f}×{nominal_tmm:.1f} mm",
                 f"Render/orientação {wmm:.1f}×{tmm:.1f} mm — {stick_orientation}",
@@ -1118,8 +1164,14 @@ class VisualizationService:
             ]
             if bool(r.get("miter_cut_required", False)):
                 label_parts.append(
-                    f"Corte em grau: {safe_float(r.get('miter_cut_start_angle_deg'), 90.0) or 90.0:.0f}°/{safe_float(r.get('miter_cut_end_angle_deg'), 90.0) or 90.0:.0f}°"
+                    f"Corte em grau: {safe_float(r.get('miter_cut_start_angle_deg'), 90.0) or 90.0:.0f}°/{safe_float(r.get('miter_cut_end_angle_deg'), 90.0) or 90.0:.0f}° "
+                    f"(skew {safe_float(r.get('miter_cut_start_skew_sign'), 1.0) or 1.0:.0f}/{safe_float(r.get('miter_cut_end_skew_sign'), 1.0) or 1.0:.0f}; "
+                    f"eixo {r.get('miter_cut_start_trim_axis', '') or '-'}/{r.get('miter_cut_end_trim_axis', '') or '-'})"
                 )
+                if r.get("miter_cut_start_host_group") or r.get("miter_cut_end_host_group"):
+                    label_parts.append(
+                        f"Host corte: {r.get('miter_cut_start_host_group', '') or '-'} / {r.get('miter_cut_end_host_group', '') or '-'}"
+                    )
             sy = safe_float(r.get("section_local_y_mm"), None)
             sz = safe_float(r.get("section_local_z_mm"), None)
             if sy is not None and sz is not None:
@@ -1173,6 +1225,7 @@ class VisualizationService:
         render_mode: str = "prismas reais",
         precomputed_mesh_batches: Dict[str, Any] | None = None,
         color_by: str = "assembly_unit",
+        connection_offset_scale: float = 0.0,
     ):
         data = precomputed_mesh_batches or self.prepare_stick_piece_mesh_batches(
             stick_pieces,
@@ -1180,6 +1233,7 @@ class VisualizationService:
             max_pieces=max_pieces,
             lane_offset_mm=lane_offset_mm,
             color_by=color_by,
+            connection_offset_scale=connection_offset_scale,
         )
         rows = list(data.get("rows", []) or [])
         fig = go.Figure()
@@ -1256,7 +1310,11 @@ class VisualizationService:
         y_span = max(max(ys_all) - min(ys_all), 1.0)
         z_span = max(max(zs_all) - min(zs_all), 1.0)
         fig.update_layout(
-            title="Modelo peça‑a‑peça (prismas reais; cores por peça/unidade de montagem)",
+            title=(
+                "Modelo peça‑a‑peça — posição de encaixe"
+                if abs(float(connection_offset_scale or 0.0)) < 1.0e-9
+                else "Modelo peça‑a‑peça — vista explodida/auditável"
+            ),
             scene={
                 "xaxis": {"title": "x [mm]"},
                 "yaxis": {"title": "y [mm]"},

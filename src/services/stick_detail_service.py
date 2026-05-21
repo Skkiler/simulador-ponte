@@ -142,7 +142,8 @@ class StickDetailService:
         ni: Node,
         nj: Node,
         *,
-        stick_thickness_mm: float,
+        stick_width_mm: float = 7.0,
+        stick_thickness_mm: float = 1.5,
         detail: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Resolve colisões físicas em contraventamentos em X.
@@ -218,7 +219,12 @@ class StickDetailService:
             }
 
         gap = max(0.0, float(detail.get("x_bracing_layer_clearance_mm", 0.30)))
-        sep = max(0.1, float(stick_thickness_mm) + gap)
+        # A separação precisa considerar a maior dimensão transversal real do
+        # palito.  A versão anterior usava apenas a espessura (1,5 mm); em
+        # diagonais flat a largura de 7 mm continuava se interpenetrando no
+        # cruzamento em X.
+        physical_depth = max(float(stick_width_mm or 0.0), float(stick_thickness_mm or 0.0))
+        sep = max(0.1, physical_depth + gap)
         off = 0.5 * sep
 
         dx = float(nj.x - ni.x)
@@ -458,7 +464,21 @@ class StickDetailService:
         def end_setback(node_id: int) -> float:
             others = [env for mid, env in node_member_envelopes.get(int(node_id), []) if int(mid) != int(member.id)]
             other_env = max(others) if others else max(float(stick_w), float(stick_t))
-            raw = max(min_setback, 0.5 * float(other_env) + clearance)
+            # Para a vista de encaixe e a fabricação, o recuo terminal deve
+            # aproximar a peça da face de contato do host, não da metade da
+            # caixa composta inteira. Usar o envelope máximo do banzo superior
+            # gerava lacunas visuais grandes e fazia montantes parecerem
+            # flutuar. O modo padrão usa a maior face de um palito como
+            # profundidade de contato; o envelope integral fica disponível para
+            # diagnósticos conservadores.
+            mode = str(detail.get("joint_face_contact_depth_mode", "stick_face")).strip().lower()
+            if mode in {"stick_face", "single_stick_face", "min_stick_face"}:
+                contact_depth = min(float(other_env), max(float(stick_w), float(stick_t)))
+            elif mode in {"stick_thickness", "thin_face"}:
+                contact_depth = min(float(other_env), min(float(stick_w), float(stick_t)))
+            else:
+                contact_depth = float(other_env)
+            raw = max(min_setback, 0.5 * float(contact_depth) + clearance)
             return max(0.0, min(per_end_cap, raw))
 
         start = end_setback(member.i)
@@ -497,14 +517,18 @@ class StickDetailService:
     def _node_host_groups(detail: Dict[str, Any]) -> set[str]:
         raw = detail.get(
             "node_lap_host_groups",
-            [
-                "bottom_chord",
-                "top_chord",
-                "support_pad",
-                "vertical",
-                "bottom_transverse",
-                "top_transverse",
-            ],
+            detail.get(
+                "miter_cut_host_groups",
+                [
+                    "bottom_chord",
+                    "top_chord",
+                    "support_pad",
+                    "vertical",
+                    "diagonal",
+                    "bottom_transverse",
+                    "top_transverse",
+                ],
+            ),
         )
         return {str(v) for v in (raw or [])}
 
@@ -559,7 +583,7 @@ class StickDetailService:
         return max(15.0, min(90.0, cls._round_to_increment(cut_angle, inc)))
 
     @classmethod
-    def _terminal_end_cut_angle_deg(
+    def _terminal_end_cut_spec(
         cls,
         *,
         member: Member,
@@ -570,17 +594,27 @@ class StickDetailService:
         member_group_by_id: Dict[int, str],
         detail: Dict[str, Any],
         fallback_axis: Tuple[float, float, float],
-    ) -> float:
-        """Return the bevel angle only for a real terminal host contact.
+        local_bevel_axis: Tuple[float, float, float] | None = None,
+        local_width_axis: Tuple[float, float, float] | None = None,
+    ) -> Dict[str, Any]:
+        """Return the terminal miter geometry for a real host contact.
 
-        A miter cut is a property of the *end* of a stick that is glued against
-        an inclined host face, not a property of all internal stock pieces along
-        the member.  We therefore inspect the members sharing the terminal node,
-        choose a host chord/transverse/pad when one exists, and use only the
-        host slope to decide whether that particular end needs a bevel.
+        A miter cut is a property of the *end* of a stick glued against an
+        inclined host face. It is not a property of every internal splice. The
+        returned ``skew_sign`` tells the visualizer which local side of the
+        rectangular section must be shortened; without this sign the numeric
+        angle can be correct while the drawn cut appears inverted.
         """
+        base: Dict[str, Any] = {
+            "angle_deg": 90.0,
+            "skew_sign": 1.0,
+            "host_member_id": None,
+            "host_group": "",
+            "host_relation": "none",
+            "trim_axis": "z",
+        }
         if not bool(detail.get("angled_end_cuts_enabled", True)):
-            return 90.0
+            return base
 
         allowed_groups = {
             str(v)
@@ -590,7 +624,7 @@ class StickDetailService:
             )
         }
         if str(member.group) not in allowed_groups:
-            return 90.0
+            return base
 
         host_groups = cls._node_host_groups(detail)
         host_candidates: List[Tuple[float, Member]] = []
@@ -604,27 +638,127 @@ class StickDetailService:
                 host_candidates.append((float(env), other))
 
         if not host_candidates:
-            return cls._end_cut_angle_deg(*fallback_axis, detail=detail)
+            base["angle_deg"] = cls._end_cut_angle_deg(*fallback_axis, detail=detail)
+            base["host_relation"] = "fallback_axis"
+            return base
 
-        # Prefer the largest physical host at the node: usually top/bottom chord
-        # or support pad.  Thin braces meeting the same node should not drive the
-        # cut angle of a vertical/diagonal primary piece.
-        host = sorted(host_candidates, key=lambda item: item[0], reverse=True)[0][1]
+        priority = [
+            str(v)
+            for v in detail.get(
+                "miter_cut_primary_host_priority",
+                ["top_chord", "bottom_chord", "support_pad", "vertical", "diagonal", "top_transverse", "bottom_transverse"],
+            )
+        ]
+        prio = {g: i for i, g in enumerate(priority)}
+        host = sorted(
+            host_candidates,
+            key=lambda item: (prio.get(str(member_group_by_id.get(int(item[1].id), "")), 999), -float(item[0])),
+        )[0][1]
         hn0 = nodes_by_id.get(int(host.i))
         hn1 = nodes_by_id.get(int(host.j))
-        if hn0 is None or hn1 is None:
-            return 90.0
+        mn0 = nodes_by_id.get(int(member.i))
+        mn1 = nodes_by_id.get(int(member.j))
+        if hn0 is None or hn1 is None or mn0 is None or mn1 is None:
+            return base
         hux, huy, huz, hL = cls._unit_vector(hn0, hn1)
-        if hL <= 1.0e-9:
-            return 90.0
+        mux, muy, muz, mL = cls._unit_vector(mn0, mn1)
+        if hL <= 1.0e-9 or mL <= 1.0e-9:
+            return base
 
-        host_slope = math.degrees(math.atan2(abs(float(huz)), max(1.0e-9, math.hypot(float(hux), float(huy)))))
         threshold = max(0.0, float(detail.get("miter_cut_min_host_slope_deg", 7.5)))
-        if host_slope < threshold:
-            return 90.0
         inc = max(1.0, float(detail.get("end_cut_angle_increment_deg", 5.0)))
-        cut_angle = 90.0 - host_slope
-        return max(25.0, min(90.0, cls._round_to_increment(cut_angle, inc)))
+
+        dot = abs(float(mux) * float(hux) + float(muy) * float(huy) + float(muz) * float(huz))
+        dot = max(0.0, min(1.0, dot))
+        rel_angle = math.degrees(math.acos(dot))
+        host_group = str(member_group_by_id.get(int(host.id), host.group))
+        member_group = str(member.group)
+        if member_group == host_group and member_group in {"top_chord", "bottom_chord"} and threshold <= rel_angle <= 84.0:
+            # Dois segmentos de banzo que se encontram em quina devem usar
+            # meia-esquadria simples. Aplicar o ângulo relativo inteiro gerava
+            # cortes extremamente agudos e visualmente anômalos.
+            angle = max(45.0, min(90.0, cls._round_to_increment(90.0 - 0.5 * rel_angle, inc)))
+            relation = "same_chord_half_miter"
+        elif threshold <= rel_angle <= 84.0:
+            angle = max(35.0, min(90.0, cls._round_to_increment(rel_angle, inc)))
+            relation = "relative_axis"
+        else:
+            host_slope = math.degrees(math.atan2(abs(float(huz)), max(1.0e-9, math.hypot(float(hux), float(huy)))))
+            if host_slope < threshold:
+                angle = 90.0
+                relation = "square_contact"
+            else:
+                angle = max(35.0, min(90.0, cls._round_to_increment(90.0 - host_slope, inc)))
+                relation = "host_slope"
+
+        # Determine which local side of the stick should be shortened.  The host
+        # line has no inherent orientation, so h and -h must produce the same
+        # result; using the product of the projections preserves that invariance.
+        # A single hard-coded bevel axis was the source of the wrong cuts: some
+        # joints need a cut across the face (section z), others across the edge
+        # (section y).  Pick the local axis most aligned with the host slope.
+        axis_z = local_bevel_axis or (0.0, 0.0, 0.0)
+        zx, zy, zz = cls._normalize((float(axis_z[0]), float(axis_z[1]), float(axis_z[2])))
+        axis_y = local_width_axis or (0.0, 0.0, 0.0)
+        yx, yy, yz = cls._normalize((float(axis_y[0]), float(axis_y[1]), float(axis_y[2])))
+        if (zx, zy, zz) == (0.0, 0.0, 0.0):
+            zx, zy, zz = 1.0, 0.0, 0.0
+        hz_proj = hux * zx + huy * zy + huz * zz
+        hy_proj = hux * yx + huy * yy + huz * yz if (yx, yy, yz) != (0.0, 0.0, 0.0) else 0.0
+        if abs(hy_proj) > 1.20 * abs(hz_proj):
+            bx, by, bz = yx, yy, yz
+            hb = hy_proj
+            trim_axis = "y"
+        else:
+            bx, by, bz = zx, zy, zz
+            hb = hz_proj
+            trim_axis = "z"
+        if (bx, by, bz) == (0.0, 0.0, 0.0):
+            bx, by, bz = 1.0, 0.0, 0.0
+            hb = hux
+            trim_axis = "z"
+        hd = hux * mux + huy * muy + huz * muz
+        skew_sign = 1.0
+        if abs(hd) > 1.0e-9 and abs(hb) > 1.0e-9:
+            skew_sign = 1.0 if (hd * hb) >= 0.0 else -1.0
+        if bool(detail.get("miter_cut_visual_flip_sign", False)):
+            skew_sign *= -1.0
+
+        return {
+            "angle_deg": angle,
+            "skew_sign": skew_sign,
+            "trim_axis": trim_axis,
+            "host_member_id": int(host.id),
+            "host_group": host_group,
+            "host_relation": relation,
+        }
+
+    @classmethod
+    def _terminal_end_cut_angle_deg(
+        cls,
+        *,
+        member: Member,
+        node_id: int,
+        nodes_by_id: Dict[int, Node],
+        members_by_id: Dict[int, Member],
+        node_member_envelopes: Dict[int, List[Tuple[int, float]]],
+        member_group_by_id: Dict[int, str],
+        detail: Dict[str, Any],
+        fallback_axis: Tuple[float, float, float],
+    ) -> float:
+        """Compatibility wrapper returning only the terminal miter angle."""
+        spec = cls._terminal_end_cut_spec(
+            member=member,
+            node_id=node_id,
+            nodes_by_id=nodes_by_id,
+            members_by_id=members_by_id,
+            node_member_envelopes=node_member_envelopes,
+            member_group_by_id=member_group_by_id,
+            detail=detail,
+            fallback_axis=fallback_axis,
+            local_bevel_axis=None,
+        )
+        return float(spec.get("angle_deg", 90.0) or 90.0)
 
     @staticmethod
     def _node_lap_visual_side_offset(
@@ -658,6 +792,39 @@ class StickDetailService:
             return (0.0, 0.0, 0.0)
         offset = max(0.0, float(detail.get("node_lap_visual_side_offset_mm", 14.0)))
         return (0.0, math.copysign(offset, y_mid), 0.0)
+
+    @staticmethod
+    def _miter_material_loss_length_mm(
+        angle_deg: float | None,
+        *,
+        material_depth_mm: float,
+        piece_length_mm: float,
+        detail: Dict[str, Any],
+    ) -> float:
+        """Equivalent stick length removed by a single terminal miter cut.
+
+        The shop cut length remains rounded to the configured 5 mm increment;
+        this estimate only subtracts the small triangular wedge that is no
+        longer part of the bridge after the bevel.  It prevents the mass model
+        from counting material that the visual model explicitly removed.
+        """
+        if not bool(detail.get("miter_cut_mass_reduction_enabled", True)):
+            return 0.0
+        try:
+            a = float(angle_deg)
+        except (TypeError, ValueError):
+            return 0.0
+        if a >= 89.5:
+            return 0.0
+        a = max(15.0, min(89.0, a))
+        depth = max(0.0, float(material_depth_mm or 0.0))
+        if depth <= 1.0e-9:
+            return 0.0
+        raw_shift = depth / max(1.0e-9, math.tan(math.radians(a)))
+        max_fraction = max(0.0, min(0.30, float(detail.get("miter_cut_max_visual_shift_fraction", 0.10))))
+        shift = min(max_fraction * max(0.0, float(piece_length_mm)), raw_shift)
+        loss_factor = max(0.0, min(1.0, float(detail.get("miter_cut_material_loss_factor", 0.50))))
+        return loss_factor * shift
 
     @staticmethod
     def _terminal_lap_overlap_mm(detail: Dict[str, Any], stick_len: float) -> float:
@@ -948,6 +1115,7 @@ class StickDetailService:
                 m.group,
                 ni,
                 nj,
+                stick_width_mm=stick_w,
                 stick_thickness_mm=stick_t,
                 detail=detail,
             )
@@ -992,7 +1160,7 @@ class StickDetailService:
                 member_group_by_id=member_group_by_id,
             )
             terminal_lap_overlap_mm = self._terminal_lap_overlap_mm(detail, stick_len)
-            miter_cut_start_angle_deg = self._terminal_end_cut_angle_deg(
+            miter_cut_start_spec = self._terminal_end_cut_spec(
                 member=m,
                 node_id=m.i,
                 nodes_by_id=node_by_id,
@@ -1001,8 +1169,9 @@ class StickDetailService:
                 member_group_by_id=member_group_by_id,
                 detail=detail,
                 fallback_axis=(ux, uy, uz),
+                local_bevel_axis=local_z_axis,
             )
-            miter_cut_end_angle_deg = self._terminal_end_cut_angle_deg(
+            miter_cut_end_spec = self._terminal_end_cut_spec(
                 member=m,
                 node_id=m.j,
                 nodes_by_id=node_by_id,
@@ -1011,7 +1180,14 @@ class StickDetailService:
                 member_group_by_id=member_group_by_id,
                 detail=detail,
                 fallback_axis=(ux, uy, uz),
+                local_bevel_axis=local_z_axis,
             )
+            miter_cut_start_angle_deg = float(miter_cut_start_spec.get("angle_deg", 90.0) or 90.0)
+            miter_cut_end_angle_deg = float(miter_cut_end_spec.get("angle_deg", 90.0) or 90.0)
+            miter_cut_start_skew_sign = float(miter_cut_start_spec.get("skew_sign", 1.0) or 1.0)
+            miter_cut_end_skew_sign = float(miter_cut_end_spec.get("skew_sign", 1.0) or 1.0)
+            miter_cut_start_trim_axis = str(miter_cut_start_spec.get("trim_axis", "z") or "z")
+            miter_cut_end_trim_axis = str(miter_cut_end_spec.get("trim_axis", "z") or "z")
             visual_connection_offset = self._node_lap_visual_side_offset(
                 member=m,
                 ni=ni,
@@ -1154,9 +1330,9 @@ class StickDetailService:
                     lane_y = 0.0
                     lane_z = 0.0
                 lane_offset_vec = (
-                    lane_y * local_y_axis[0] + lane_z * local_z_axis[0] + float(x_layer_offset[0]) + float(visual_connection_offset[0]),
-                    lane_y * local_y_axis[1] + lane_z * local_z_axis[1] + float(x_layer_offset[1]) + float(visual_connection_offset[1]),
-                    lane_y * local_y_axis[2] + lane_z * local_z_axis[2] + float(x_layer_offset[2]) + float(visual_connection_offset[2]),
+                    lane_y * local_y_axis[0] + lane_z * local_z_axis[0] + float(x_layer_offset[0]),
+                    lane_y * local_y_axis[1] + lane_z * local_z_axis[1] + float(x_layer_offset[1]),
+                    lane_y * local_y_axis[2] + lane_z * local_z_axis[2] + float(x_layer_offset[2]),
                 )
                 lane_orientation = str(lane_orientations[lane - 1]).strip().lower() if lane - 1 < len(lane_orientations) else stick_orientation
                 lane_visual_width_mm = safe_float(lane_widths[lane - 1], None) if lane - 1 < len(lane_widths) else None
@@ -1226,18 +1402,51 @@ class StickDetailService:
 
                     is_first_piece = piece_index == 1
                     is_last_piece = piece_index == len(lane_intervals)
+                    start_miter_relation = str(miter_cut_start_spec.get("host_relation", "") or "")
+                    end_miter_relation = str(miter_cut_end_spec.get("host_relation", "") or "")
+                    # Corte em grau é uma condição de encaixe terminal.  Para
+                    # montantes/diagonais ele costuma coincidir com face-lap;
+                    # para banzos, porém, a junta entre dois segmentos do próprio
+                    # banzo pode estar em axis_centroid e ainda exigir meia
+                    # esquadria para não criar quina/interpenetração.
+                    start_can_miter = (
+                        connection_start_mode == "face_lap_to_host"
+                        or start_miter_relation in {"same_chord_half_miter", "relative_axis", "host_slope"}
+                    )
+                    end_can_miter = (
+                        connection_end_mode == "face_lap_to_host"
+                        or end_miter_relation in {"same_chord_half_miter", "relative_axis", "host_slope"}
+                    )
                     start_miter_required = bool(
                         is_first_piece
-                        and connection_start_mode == "face_lap_to_host"
+                        and start_can_miter
                         and miter_cut_start_angle_deg < 89.0
                     )
                     end_miter_required = bool(
                         is_last_piece
-                        and connection_end_mode == "face_lap_to_host"
+                        and end_can_miter
                         and miter_cut_end_angle_deg < 89.0
                     )
                     piece_miter_start_angle = miter_cut_start_angle_deg if start_miter_required else 90.0
                     piece_miter_end_angle = miter_cut_end_angle_deg if end_miter_required else 90.0
+
+                    material_cut_depth_mm = max(0.0, float(visual_thickness_mm))
+                    miter_loss_start_mm = self._miter_material_loss_length_mm(
+                        piece_miter_start_angle,
+                        material_depth_mm=material_cut_depth_mm,
+                        piece_length_mm=geom_len,
+                        detail=detail,
+                    ) if start_miter_required else 0.0
+                    miter_loss_end_mm = self._miter_material_loss_length_mm(
+                        piece_miter_end_angle,
+                        material_depth_mm=material_cut_depth_mm,
+                        piece_length_mm=geom_len,
+                        detail=detail,
+                    ) if end_miter_required else 0.0
+                    miter_material_loss_length_mm = min(0.45 * max(0.0, geom_len), miter_loss_start_mm + miter_loss_end_mm)
+                    net_installed_length_mm = max(0.0, geom_len - miter_material_loss_length_mm)
+                    gross_piece_mass_g = stick_mass * geom_len / stick_len
+                    net_piece_mass_g = stick_mass * net_installed_length_mm / stick_len
 
                     stick_rows.append(
                         {
@@ -1249,7 +1458,9 @@ class StickDetailService:
                             "s0_mm": s0,
                             "s1_mm": s1,
                             "geometric_piece_length_mm": geom_len,
-                            "installed_length_mm": geom_len,
+                            "installed_length_mm": net_installed_length_mm,
+                            "gross_installed_length_mm": geom_len,
+                            "miter_cut_material_loss_length_mm": miter_material_loss_length_mm,
                             "member_axis_length_mm": L,
                             "fabrication_axis_length_mm": fabrication_L,
                             "joint_start_setback_mm": joint_start_setback,
@@ -1316,15 +1527,28 @@ class StickDetailService:
                             ),
                             "miter_cut_start_angle_deg": piece_miter_start_angle,
                             "miter_cut_end_angle_deg": piece_miter_end_angle,
+                            "miter_cut_start_skew_sign": miter_cut_start_skew_sign if start_miter_required else 1.0,
+                            "miter_cut_end_skew_sign": miter_cut_end_skew_sign if end_miter_required else 1.0,
+                            "miter_cut_start_trim_axis": miter_cut_start_trim_axis if start_miter_required else "",
+                            "miter_cut_end_trim_axis": miter_cut_end_trim_axis if end_miter_required else "",
+                            "miter_cut_start_host_member_id": miter_cut_start_spec.get("host_member_id") if start_miter_required else None,
+                            "miter_cut_end_host_member_id": miter_cut_end_spec.get("host_member_id") if end_miter_required else None,
+                            "miter_cut_start_host_group": miter_cut_start_spec.get("host_group") if start_miter_required else "",
+                            "miter_cut_end_host_group": miter_cut_end_spec.get("host_group") if end_miter_required else "",
+                            "miter_cut_start_relation": miter_cut_start_spec.get("host_relation") if start_miter_required else "",
+                            "miter_cut_end_relation": miter_cut_end_spec.get("host_relation") if end_miter_required else "",
                             "miter_cut_start_required": start_miter_required,
                             "miter_cut_end_required": end_miter_required,
                             "miter_cut_required": bool(start_miter_required or end_miter_required),
+                            "miter_cut_start_position": "ponta inicial" if start_miter_required else "",
+                            "miter_cut_end_position": "ponta final" if end_miter_required else "",
                             "assembly_unit_key": f"{m.group}|M{m.id:03d}|L{lane:02d}|P{piece_index:02d}",
                             # Massa competitiva da peça instalada: se o blank foi
                             # cortado em múltiplos de 5 mm e ajustado/lixado, a
                             # massa que fica na ponte é proporcional ao comprimento
                             # geométrico instalado, não ao palito bruto inteiro.
-                            "mass_g": stick_mass * geom_len / stick_len,
+                            "gross_mass_g": gross_piece_mass_g,
+                            "mass_g": net_piece_mass_g,
                         }
                     )
 

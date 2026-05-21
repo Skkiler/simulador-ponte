@@ -11,7 +11,7 @@
     "right_support_overhang_mm": 100.0,
     "panel_mm": 100.0,
     "width_mm": 100.0,
-    "end_height_mm": 100.0,
+    "end_height_mm": 300.0,
     "center_height_mm": 300.0,
     "plateau_start_mm": 400.0,
     "plateau_end_mm": 800.0,
@@ -38,11 +38,11 @@
     "include_cross_frame_bracing": true,
     "include_support_pad_members": true,
     "unilateral_supports": true,
-    "truss_type": "Parker",
-    "top_profile": "parker_plateau",
-    "internal_truss_type": "X",
-    "top_chord_truss_type": "X",
-    "bottom_chord_truss_type": "X",
+    "truss_type": "Pratt_symmetric",
+    "top_profile": "flat",
+    "internal_truss_type": "Pratt_symmetric",
+    "top_chord_truss_type": "Warren_symmetric",
+    "bottom_chord_truss_type": "Warren_symmetric",
     "load_distribution_model": "plate_surface_uniform",
     "load_footprint_length_mm": 400.0,
     "load_footprint_width_mm": 160.0,
@@ -50,7 +50,8 @@
     "load_footprint_interpretation": "centroid",
     "load_footprint_center_x_mm": 600.0,
     "load_crown_contact_z_tolerance_mm": 1.0,
-    "load_spreader_side_equalization": 0.88
+    "load_spreader_side_equalization": 0.88,
+    "side_truss_type": "Pratt_symmetric"
   },
   "material": {
     "name": "Palito de picolé equivalente",
@@ -82,7 +83,7 @@
   },
   "member_sticks_by_group": {
     "bottom_chord": 1,
-    "top_chord": 7,
+    "top_chord": 8,
     "vertical": 4,
     "diagonal": 2,
     "top_transverse": 1,
@@ -163,7 +164,7 @@
       "max_local_iterations": 6,
       "require_topology_validation_after_removal": true,
       "min_sticks_primary_member_by_group": {
-        "top_chord": 7,
+        "top_chord": 8,
         "bottom_chord": 1,
         "vertical": 4,
         "diagonal": 2,
@@ -174,27 +175,22 @@
     },
     "use_stretch_breaking_load_as_acceptance": false,
     "consider_internal_trusses": [
-      "X",
       "Pratt_symmetric",
       "Warren_symmetric",
       "Howe_inverted"
     ],
     "consider_top_chord_trusses": [
-      "X",
       "Pratt_symmetric",
       "Warren_symmetric",
       "Howe_inverted"
     ],
     "consider_bottom_chord_trusses": [
-      "X",
       "Warren_symmetric",
       "Pratt_symmetric",
       "Howe_inverted"
     ],
     "consider_top_profiles": [
-      "parker_plateau",
-      "flat",
-      "triangular_peak"
+      "flat"
     ],
     "mass_limit_g": 1000.0
   },
@@ -248,14 +244,16 @@
       "S8": true
     },
     "planner_min_sticks_per_group_by_group": {
-      "top_chord": 7,
+      "top_chord": 8,
       "bottom_chord": 1,
       "vertical": 4,
       "diagonal": 2,
       "support_pad": 3,
       "top_transverse": 2,
       "bottom_transverse": 2
-    }
+    },
+    "use_quarter_model": false,
+    "quarter_model_available_for_debug": true
   },
   "detail_model": {
     "enabled": true,
@@ -302,17 +300,22 @@
     "min_node_lap_overlap_mm": 25.0,
     "terminal_joint_area_factor": 1.35,
     "terminal_joint_secondary_bending_factor": 1.05,
-    "angled_end_cuts_enabled": true,
+    "angled_end_cuts_enabled": false,
     "end_cut_angle_increment_deg": 5.0,
-    "miter_cut_min_host_slope_deg": 7.5,
+    "miter_cut_min_host_slope_deg": 4.0,
     "miter_cut_terminal_groups": [
+      "top_chord",
+      "bottom_chord",
       "vertical",
       "diagonal",
       "top_transverse",
-      "bottom_transverse"
+      "bottom_transverse",
+      "top_bracing",
+      "bottom_bracing",
+      "cross_frame_bracing"
     ],
     "node_lap_visual_side_offset_enabled": true,
-    "node_lap_visual_side_offset_mm": 14.0,
+    "node_lap_visual_side_offset_mm": 3.5,
     "node_lap_visual_side_offset_groups": [
       "vertical",
       "diagonal"
@@ -327,13 +330,18 @@
       "cross_frame_bracing",
       "chord_lacing"
     ],
-    "x_bracing_crossing_policy": "layered_x_no_interpenetration",
-    "x_bracing_no_crossing_groups": [],
+    "x_bracing_crossing_policy": "single_diagonal_no_crossing",
+    "x_bracing_no_crossing_groups": [
+      "diagonal",
+      "top_bracing",
+      "bottom_bracing",
+      "cross_frame_bracing"
+    ],
     "min_constructive_piece_length_mm": 40.0,
     "joint_face_setback_enabled": true,
-    "joint_face_clearance_mm": 0.1,
-    "joint_min_setback_mm": 1.0,
-    "joint_max_setback_mm": 14.0,
+    "joint_face_clearance_mm": 0.0,
+    "joint_min_setback_mm": 0.0,
+    "joint_max_setback_mm": 4.0,
     "joint_max_setback_fraction": 0.12,
     "joint_setback_groups": [
       "diagonal",
@@ -351,9 +359,46 @@
       "bottom_bracing",
       "cross_frame_bracing"
     ],
-    "x_bracing_layer_clearance_mm": 0.6,
-    "visual_beveled_end_cuts": true,
-    "show_section_tie_lines_in_piece_view": false
+    "x_bracing_layer_clearance_mm": 5.0,
+    "visual_beveled_end_cuts": false,
+    "show_section_tie_lines_in_piece_view": false,
+    "miter_cut_max_visual_shift_fraction": 0.1,
+    "miter_cut_host_groups": [
+      "top_chord",
+      "bottom_chord",
+      "vertical",
+      "diagonal",
+      "top_transverse",
+      "bottom_transverse",
+      "support_pad",
+      "cross_frame_bracing",
+      "top_bracing",
+      "bottom_bracing"
+    ],
+    "miter_cut_primary_host_priority": [
+      "top_chord",
+      "bottom_chord",
+      "support_pad",
+      "vertical",
+      "diagonal",
+      "top_transverse",
+      "bottom_transverse",
+      "cross_frame_bracing"
+    ],
+    "x_bracing_layered_solution_documented": true,
+    "x_bracing_midspan_joint_required": false,
+    "simple_even_box_section_groups": [
+      "top_chord",
+      "vertical"
+    ],
+    "miter_cut_visual_flip_sign": false,
+    "piece_view_mounted_connection_offset_scale": 0.0,
+    "piece_view_exploded_connection_offset_scale": 0.75,
+    "miter_cut_mass_reduction_enabled": true,
+    "miter_cut_material_loss_factor": 0.5,
+    "joint_face_contact_depth_mode": "stick_thickness",
+    "x_midpoint_gusset_overlap_mm": 20.0,
+    "x_midpoint_gusset_note": "Se X for usado manualmente, dividir no centro e colar com tala curta; padrão automático evita X contínuo."
   },
   "section_layout_by_group": {
     "bottom_chord": {
@@ -421,6 +466,7 @@
       "right_offset",
       "torsion_60_40",
       "torsion_70_30",
+      "torsion_80_20",
       "lateral_imperfection"
     ],
     "include_load_contact_audit_cases": true,
@@ -452,28 +498,18 @@
     "plane_bracing_efficiency_min_mass_saving_g": 8.0,
     "plane_bracing_efficiency_trials": [
       {
-        "top": "X",
-        "bottom": "X",
-        "cross_frame": true
-      },
-      {
-        "top": "X",
-        "bottom": "Warren_symmetric",
-        "cross_frame": true
-      },
-      {
         "top": "Pratt_symmetric",
-        "bottom": "X",
+        "bottom": "Warren_symmetric",
         "cross_frame": true
       },
       {
         "top": "Warren_symmetric",
-        "bottom": "X",
+        "bottom": "Warren_symmetric",
         "cross_frame": true
       },
       {
         "top": "Pratt_symmetric",
-        "bottom": "Warren_symmetric",
+        "bottom": "Pratt_symmetric",
         "cross_frame": true
       }
     ],

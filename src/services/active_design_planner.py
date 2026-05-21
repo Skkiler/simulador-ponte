@@ -219,7 +219,7 @@ class ActiveDesignPlanner:
                 "chord_lacing": 1,
             },
             "compression_box_light": {
-                "top_chord": 7,
+                "top_chord": 8,
                 "bottom_chord": 1,
                 "diagonal": 2,
                 "vertical": 4,
@@ -245,7 +245,7 @@ class ActiveDesignPlanner:
                 "cross_frame_bracing": 1,
             },
             "strong_top": {
-                "top_chord": 7,
+                "top_chord": 8,
                 "bottom_chord": 1,
                 "diagonal": 2,
                 "vertical": 4,
@@ -255,7 +255,7 @@ class ActiveDesignPlanner:
                 "chord_lacing": 1,
             },
             "strong": {
-                "top_chord": 7,
+                "top_chord": 8,
                 "bottom_chord": 1,
                 "diagonal": 2,
                 "vertical": 4,
@@ -314,7 +314,7 @@ class ActiveDesignPlanner:
                 sticks.update(
                     {
                         # Membros globais principais.
-                        "top_chord": 7,
+                        "top_chord": 8,
                         "bottom_chord": 1,
                         "diagonal": 2,
                         "vertical": 4,
@@ -1296,7 +1296,14 @@ class ActiveDesignPlanner:
                     bridge["truss_type"] = "Pratt"
                     changed = True
                     actions.append("topologia lateral: -> Pratt")
-                if str(bridge.get("top_profile", "")).lower() in {"flat", "reto", "reta"}:
+                allowed_profiles = {
+                    str(v).strip().lower()
+                    for v in (c.get("planner", {}) or {}).get("consider_top_profiles", [])
+                }
+                if (
+                    str(bridge.get("top_profile", "")).lower() in {"flat", "reto", "reta"}
+                    and (not allowed_profiles or "triangular_peak" in allowed_profiles)
+                ):
                     bridge["top_profile"] = "triangular_peak"
                     changed = True
                     actions.append("perfil topo: reto -> triangular")
@@ -2732,7 +2739,30 @@ class ActiveDesignPlanner:
                 ],
             )
         )
-        top_vals = list(planner.get("consider_top_profiles", ["parker_plateau", "triangular_peak", "shallow_arch", "flat"]))
+        top_alias = {
+            "parker_plateau": "parker_plateau",
+            "plateau": "parker_plateau",
+            "platô": "parker_plateau",
+            "plato": "parker_plateau",
+            "triangular_peak": "triangular_peak",
+            "triangular": "triangular_peak",
+            "pontiagudo/triangular": "triangular_peak",
+            "shallow_arch": "shallow_arch",
+            "arch": "shallow_arch",
+            "arco": "shallow_arch",
+            "flat": "flat",
+            "reto": "flat",
+            "reta": "flat",
+        }
+        top_vals = []
+        for raw in list(planner.get("consider_top_profiles", ["flat"])):
+            canon = top_alias.get(str(raw).strip().lower(), str(raw).strip())
+            if canon and canon not in top_vals:
+                top_vals.append(canon)
+        top_vals = top_vals or ["flat"]
+        # Se o usuário deixou apenas "reto" habilitado, nenhum estágio da
+        # geração pode reintroduzir platô/arco/pico por fallback ou mutação.
+        planner["consider_top_profiles"] = list(top_vals)
         internal_vals = list(
             planner.get(
                 "consider_internal_trusses",

@@ -174,14 +174,14 @@ class ReportBundleService:
                 case = str(c.get("case") or "")
                 if case in {"center", "single_plate_center", "crown_contact", "torsion_60_40", "torsion_70_30", "torsion_80_20", "left_offset", "right_offset"}:
                     interp = {
-                        "center": "modelo configurado de carga distribuída",
-                        "single_plate_center": "uma única placa/prato físico centrado no vão",
-                        "crown_contact": "peso solto sobre banzo arqueado; contato inicial no ponto mais alto",
+                        "center": "carga distribuída pela plataforma/placa prevista no modelo",
+                        "single_plate_center": "placa rígida centrada tocando múltiplas estações",
+                        "crown_contact": "contato local no ponto mais alto; usar se não houver plataforma rígida",
                         "left_offset": "placa deslocada longitudinalmente para a esquerda",
                         "right_offset": "placa deslocada longitudinalmente para a direita",
                     }.get(case)
                     if interp is None and case.startswith("torsion_"):
-                        interp = f"placa distribuída com assimetria lateral {case.replace('torsion_', '').replace('_', '/')}"
+                        interp = f"placa com assimetria lateral {case.replace('torsion_', '').replace('_', '/')}"
                     rows.append(
                         {
                             "case": case,
@@ -189,6 +189,10 @@ class ReportBundleService:
                             "min_fs_design": c.get("min_fs_design"),
                             "max_displacement_mm": c.get("max_displacement_proxy_mm"),
                             "load_path_score": c.get("load_path_score"),
+                            "governing_member_id": c.get("governing_member_id"),
+                            "governing_member_group": c.get("governing_member_group"),
+                            "governing_mode": c.get("governing_mode"),
+                            "support_reactions": c.get("support_reactions"),
                             "interpretation": interp or "caso auxiliar",
                         }
                     )
@@ -787,11 +791,12 @@ O tratamento `single_diagonal_no_crossing` substitui X por diagonais alternadas 
         acceptance_break = float(cfg.get("analysis", {}).get("acceptance_min_design_breaking_load_kgf", 80.0))
         pred_break = safe_float(metrics.get("predicted_breaking_load_kgf"), 0.0) or 0.0
         s8_rows_for_report = list((optimization or {}).get("s8_final_validation", []) or [])
+        s8_for_report = s8_rows_for_report[0] if s8_rows_for_report else {}
         design_break = safe_float(
-            (s8_rows_for_report[0] if s8_rows_for_report else {}).get("predicted_breaking_load_kgf"),
+            s8_for_report.get("predicted_breaking_load_kgf"),
             None,
         )
-        design_verdict = (s8_rows_for_report[0] if s8_rows_for_report else {}).get("verdict")
+        design_verdict = s8_for_report.get("verdict")
         competition_mass = safe_float(metrics.get("competition_mass_g"), safe_float(metrics.get("estimated_total_mass_g"), 0.0)) or 0.0
         mass_limit = safe_float(metrics.get("mass_limit_effective_g"), 1000.0) or 1000.0
         mass_margin = mass_limit - competition_mass
@@ -803,6 +808,10 @@ O tratamento `single_diagonal_no_crossing` substitui X por diagonais alternadas 
             "predicted_breaking_load_nominal_kgf": pred_break,
             "predicted_breaking_load_design_multicase_kgf": design_break,
             "design_multicase_verdict": design_verdict,
+            "design_multicase_governing_case": s8_for_report.get("governing_case"),
+            "design_multicase_governing_member_id": s8_for_report.get("governing_member_id"),
+            "design_multicase_governing_member_group": s8_for_report.get("governing_member_group"),
+            "design_multicase_governing_mode": s8_for_report.get("governing_mode"),
             "predicted_breaking_load_kgf": pred_break,
             "target_breaking_load_kgf": acceptance_break,
             "competition_mass_g": competition_mass,
@@ -853,22 +862,39 @@ O tratamento `single_diagonal_no_crossing` substitui X por diagonais alternadas 
                 "para vários nós. Sem essa sela, o caso `crown_contact` é mais representativo.\n"
             )
         load_contact_md_rows = "\n".join(
-            f"| {r.get('case')} | {safe_float(r.get('predicted_breaking_load_kgf'), None) if r.get('predicted_breaking_load_kgf') is not None else '—'} | {safe_float(r.get('min_fs_design'), None) if r.get('min_fs_design') is not None else '—'} | {r.get('interpretation')} |"
+            f"| {r.get('case')} | {safe_float(r.get('predicted_breaking_load_kgf'), None) if r.get('predicted_breaking_load_kgf') is not None else '—'} | "
+            f"{safe_float(r.get('min_fs_design'), None) if r.get('min_fs_design') is not None else '—'} | "
+            f"{r.get('governing_member_id') or '—'} / {r.get('governing_member_group') or '—'} | "
+            f"{r.get('interpretation')} |"
             for r in load_contact_rows
-        ) or "| — | — | — | — |"
+        ) or "| — | — | — | — | — |"
+        governing_load_contact = min(
+            load_contact_rows,
+            key=lambda r: safe_float(r.get('predicted_breaking_load_kgf'), 1.0e99) or 1.0e99,
+            default={},
+        )
         (out / "07_avaliacao_contato_carga.md").write_text(
             f"""# Avaliação do contato da carga
 
 O modelo principal aceita carga distribuída por superfície, mas isso é uma hipótese construtiva: a ponte precisa ter uma região de apoio da carga que realmente transfira o peso para os nós previstos. Em banzo superior arqueado, uma anilha ou prato solto tende a encostar primeiro no ponto mais alto, concentrando força no montante/região central.
 {arch_warning}
 ## Casos auditados
-| caso | ruptura estimada (kgf) | FS design | interpretação |
-| --- | ---: | ---: | --- |
+| caso | ruptura estimada (kgf) | FS design | membro governante | interpretação |
+| --- | ---: | ---: | --- | --- |
 {load_contact_md_rows}
 
+## Caso governante de contato
+- Caso: **{governing_load_contact.get('case', '—')}**.
+- Ruptura estimada: **{safe_float(governing_load_contact.get('predicted_breaking_load_kgf'), None) if governing_load_contact else '—'} kgf**.
+- Membro governante: **{governing_load_contact.get('governing_member_id', '—')} / {governing_load_contact.get('governing_member_group', '—')}**.
+- Modo governante: **{governing_load_contact.get('governing_mode', '—')}**.
+
+## Reações de apoio
+As reações completas por nó são gravadas em `load_contact_assessment.csv` na coluna `support_reactions`. No memorial textual, usar a tabela acima como envelope de projeto e conferir se nenhuma reação de apoio excede o FS mínimo configurado.
+
 ## Requisito construtivo recomendado
-- Se mantiver banzo superior arqueado, fabricar uma sela/plataforma de carga com palitos e cola, alinhada, nivelada e travada lateralmente.
-- A sela deve encostar em pelo menos três estações longitudinais simétricas e nos dois planos laterais da ponte.
+- Usar uma plataforma/sela rígida colada ao topo, com contato em múltiplos nós e nos dois lados da ponte.
+- A plataforma deve encostar em pelo menos três estações longitudinais simétricas e nos dois planos laterais da ponte.
 - Se a carga real for aplicada por gancho/anilha pequena sem plataforma, usar `crown_contact` como caso governante, não o caso distribuído.
 """,
             encoding="utf-8",

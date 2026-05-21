@@ -179,7 +179,10 @@ class ConfigService:
         analysis.setdefault("enforce_symmetry", True)
 
         if "use_quarter_model" not in analysis:
-            analysis["use_quarter_model"] = bool(analysis.get("enforce_symmetry", True))
+            # O modelo de 1/4 é útil para diagnóstico, mas fica singular quando
+            # há bracings tension-only e X em camadas. A validação final usa o
+            # modelo completo por padrão para evitar warnings não representativos.
+            analysis["use_quarter_model"] = False
 
         analysis.setdefault("quarter_model_mode", "strict")
         analysis.setdefault("quarter_model_debug", False)
@@ -188,7 +191,7 @@ class ConfigService:
         # ---------------------------------------------------------------------
         # Bridge: top profile aliases
         # ---------------------------------------------------------------------
-        top_profile_legacy = str(bridge.get("top_profile", "parker_plateau")).strip().lower()
+        top_profile_legacy = str(bridge.get("top_profile", "flat")).strip().lower()
 
         top_profile_aliases = {
             "parker_plateau": "parker_plateau",
@@ -208,7 +211,7 @@ class ConfigService:
 
         bridge["top_profile"] = top_profile_aliases.get(
             top_profile_legacy,
-            "parker_plateau",
+            "flat",
         )
 
         # ---------------------------------------------------------------------
@@ -606,8 +609,8 @@ class ConfigService:
         detail.setdefault("min_constructive_piece_length_mm", 40.0)
         detail.setdefault("joint_face_setback_enabled", True)
         detail.setdefault("joint_face_clearance_mm", 0.10)
-        detail.setdefault("joint_min_setback_mm", 1.00)
-        detail.setdefault("joint_max_setback_mm", 8.0)
+        detail.setdefault("joint_min_setback_mm", 0.0)
+        detail.setdefault("joint_max_setback_mm", 4.0)
         detail.setdefault("joint_max_setback_fraction", 0.12)
         detail.setdefault(
             "joint_setback_groups",
@@ -645,17 +648,32 @@ class ConfigService:
         detail.setdefault("generate_piece_views", True)
         detail.setdefault("max_piece_prism_html_pieces", 10000)
         detail.setdefault("generate_group_piece_html", False)
-        detail.setdefault("visual_beveled_end_cuts", True)
+        detail.setdefault("visual_beveled_end_cuts", False)
         detail.setdefault("show_section_tie_lines_in_piece_view", False)
-        detail.setdefault("miter_cut_min_host_slope_deg", 7.5)
-        detail.setdefault("miter_cut_terminal_groups", ["vertical", "diagonal", "top_transverse", "bottom_transverse"])
+        detail.setdefault("angled_end_cuts_enabled", False)
+        detail.setdefault("end_cut_angle_increment_deg", 5.0)
+        detail.setdefault("miter_cut_min_host_slope_deg", 4.0)
+        detail.setdefault("miter_cut_max_visual_shift_fraction", 0.10)
+        detail.setdefault("miter_cut_visual_flip_sign", False)
+        detail.setdefault("miter_cut_mass_reduction_enabled", True)
+        detail.setdefault("miter_cut_material_loss_factor", 0.50)
+        detail.setdefault("joint_face_contact_depth_mode", "stick_thickness")
+        detail.setdefault("joint_face_clearance_mm", 0.0)
+        detail.setdefault("joint_max_setback_mm", 4.0)
+        detail.setdefault("piece_view_mounted_connection_offset_scale", 0.0)
+        detail.setdefault("piece_view_exploded_connection_offset_scale", 0.75)
+        detail.setdefault("miter_cut_terminal_groups", ["top_chord", "bottom_chord", "vertical", "diagonal", "top_transverse", "bottom_transverse", "top_bracing", "bottom_bracing", "cross_frame_bracing"])
+        detail.setdefault("miter_cut_host_groups", ["top_chord", "bottom_chord", "vertical", "diagonal", "top_transverse", "bottom_transverse", "support_pad", "cross_frame_bracing", "top_bracing", "bottom_bracing"])
+        detail.setdefault("miter_cut_primary_host_priority", ["top_chord", "bottom_chord", "support_pad", "vertical", "diagonal", "top_transverse", "bottom_transverse", "cross_frame_bracing"])
         detail.setdefault("node_lap_visual_side_offset_enabled", True)
-        detail.setdefault("node_lap_visual_side_offset_mm", 14.0)
+        detail.setdefault("node_lap_visual_side_offset_mm", 4.0)
         detail.setdefault("node_lap_visual_side_offset_groups", ["vertical", "diagonal"])
+        detail.setdefault("x_midpoint_gusset_overlap_mm", 20.0)
+        detail.setdefault("x_midpoint_gusset_note", "Se X for usado manualmente, dividir no centro e colar com tala curta; padrão automático evita X contínuo.")
         # Contraventamentos em X podem existir, mas não no mesmo volume. O
         # padrão físico alterna camadas reais de palito e não cria nó estrutural
         # fictício no cruzamento.
-        detail.setdefault("x_bracing_crossing_policy", "layered_x_no_interpenetration")
+        detail.setdefault("x_bracing_crossing_policy", "single_diagonal_no_crossing")
         _x_policy_default = str(detail.get("x_bracing_crossing_policy", "layered_x_no_interpenetration")).strip().lower()
         _secondary_x_groups = ["diagonal", "bottom_bracing", "top_bracing", "cross_frame_bracing"]
         if "x_bracing_no_crossing_groups" not in detail:
@@ -677,7 +695,9 @@ class ConfigService:
             "x_bracing_layered_groups",
             _secondary_x_groups,
         )
-        detail.setdefault("x_bracing_layer_clearance_mm", 0.60)
+        detail.setdefault("x_bracing_layer_clearance_mm", 5.0)
+        detail.setdefault("x_bracing_layered_solution_documented", True)
+        detail.setdefault("x_bracing_midspan_joint_required", False)
 
         if _x_policy_default in {"layered_x_no_interpenetration", "layered_x", "layered"}:
             # Se o cruzamento é resolvido por camadas, esses membros são
@@ -783,6 +803,23 @@ class ConfigService:
         # ---------------------------------------------------------------------
         cfg.setdefault("member_sticks_by_group", {})
         cfg["member_sticks_by_group"].setdefault("chord_lacing", 1)
+        detail.setdefault("simple_even_box_section_groups", ["top_chord", "vertical"])
+        for _grp in [str(v) for v in (detail.get("simple_even_box_section_groups") or [])]:
+            _layout = str((cfg.get("section_layout_by_group", {}) or {}).get(_grp, {}).get("layout", "")).strip().lower()
+            _n_raw = safe_float(cfg["member_sticks_by_group"].get(_grp), None)
+            if _layout == "box" and _n_raw is not None and int(_n_raw) >= 5 and int(_n_raw) % 2 == 1:
+                cfg["member_sticks_by_group"][_grp] = int(_n_raw) + 1
+            _n_norm = safe_float(cfg["member_sticks_by_group"].get(_grp), None)
+            if _layout == "box" and _n_norm is not None:
+                _min_target = int(_n_norm)
+                cfg.setdefault("planner", {}).setdefault("local_sizing", {}).setdefault("min_sticks_primary_member_by_group", {})[_grp] = max(
+                    int(safe_float(cfg.get("planner", {}).get("local_sizing", {}).get("min_sticks_primary_member_by_group", {}).get(_grp), _min_target) or _min_target),
+                    _min_target,
+                )
+                cfg.setdefault("analysis", {}).setdefault("planner_min_sticks_per_group_by_group", {})[_grp] = max(
+                    int(safe_float(cfg.get("analysis", {}).get("planner_min_sticks_per_group_by_group", {}).get(_grp), _min_target) or _min_target),
+                    _min_target,
+                )
 
         cfg.setdefault("effective_length_factor_by_group", {})
         cfg["effective_length_factor_by_group"].setdefault(
@@ -824,6 +861,9 @@ class ConfigService:
                 "bottom_chord": {"Ky": 0.85, "Kz": 0.85},
             },
         )
+
+        analysis["use_quarter_model"] = False
+        analysis.setdefault("quarter_model_available_for_debug", True)
 
         if bool(analysis.get("auto_braced_effective_lengths", True)):
             k_by_group = cfg.setdefault("effective_length_factor_by_group", {})
@@ -944,7 +984,7 @@ class ConfigService:
                 # deixe o banzo comprimido e os montantes abaixo de uma seção
                 # fisicamente razoável.  O banzo superior governa a flambagem;
                 # diagonais/montantes precisam de área de cola suficiente nos nós.
-                "top_chord": 7,
+                "top_chord": 8,
                 "bottom_chord": 1,
                 "vertical": 4,
                 "diagonal": 2,
@@ -1075,6 +1115,7 @@ class ConfigService:
                 "center",
                 "torsion_60_40",
                 "torsion_70_30",
+                "torsion_80_20",
                 "lateral_imperfection",
             ],
         )
@@ -1106,6 +1147,18 @@ class ConfigService:
                 "self_weight",
             ],
         )
+        # O caso 80/20 deixa de ser apenas robustez informativa: ele entra no
+        # envelope de projeto para o relatório final retornar uma ruptura
+        # design multi-loadcase numérica.
+        strength_cases = [str(v) for v in (multi_loadcase.get("strength_governing_cases") or [])]
+        if "torsion_80_20" not in strength_cases:
+            strength_cases.append("torsion_80_20")
+        multi_loadcase["strength_governing_cases"] = strength_cases
+        load_case_list = [str(v) for v in (multi_loadcase.get("load_cases") or [])]
+        for required_case in ("center", "torsion_60_40", "torsion_70_30", "torsion_80_20", "lateral_imperfection", "self_weight"):
+            if required_case not in load_case_list:
+                load_case_list.append(required_case)
+        multi_loadcase["load_cases"] = load_case_list
         multi_loadcase.setdefault("compute_preliminary_buckling", True)
         multi_loadcase.setdefault("compute_preliminary_tension_only", True)
         multi_loadcase.setdefault("compute_zero_force_diagnostics", True)
@@ -1526,7 +1579,7 @@ class ConfigService:
                 # Guardas de forma: banzos, montantes e diagonais não podem
                 # ser "emagrecidos" até quebrar a continuidade visual/estrutural.
                 # O dimensionamento pode reforçar acima disso, mas não reduzir abaixo.
-                "top_chord": 7,
+                "top_chord": 8,
                 "bottom_chord": 1,
                 "vertical": 4,
                 "diagonal": 2,
@@ -1556,14 +1609,36 @@ class ConfigService:
         # ---------------------------------------------------------------------
         # Legacy planner search spaces
         # ---------------------------------------------------------------------
-        planner.setdefault(
-            "consider_top_profiles",
-            [
-                "parker_plateau",
-                "flat",
-                "triangular_peak",
-            ],
-        )
+        planner.setdefault("consider_top_profiles", ["flat"])
+
+        # Respeita estritamente o domínio escolhido pelo usuário.  Antes, a UI
+        # podia gravar ``consider_top_profiles = ['flat']`` e manter
+        # ``bridge.top_profile = parker_plateau``; etapas posteriores partiam
+        # dessa geometria antiga e a ponte saía em platô mesmo com platô e pico
+        # desabilitados.  Aqui normalizamos os aliases do domínio e forçamos o
+        # perfil corrente para a primeira opção permitida quando houver conflito.
+        raw_allowed_top_profiles = list(planner.get("consider_top_profiles") or ["flat"])
+        allowed_top_profiles: List[str] = []
+        for raw in raw_allowed_top_profiles:
+            canonical = top_profile_aliases.get(str(raw).strip().lower(), str(raw).strip())
+            if canonical and canonical not in allowed_top_profiles:
+                allowed_top_profiles.append(canonical)
+        if not allowed_top_profiles:
+            allowed_top_profiles = ["flat"]
+        planner["consider_top_profiles"] = allowed_top_profiles
+        if bridge.get("top_profile") not in allowed_top_profiles:
+            add_compat_warning(
+                "bridge.top_profile estava fora de planner.consider_top_profiles; "
+                f"ajustado para {allowed_top_profiles[0]!r}."
+            )
+            bridge["top_profile"] = allowed_top_profiles[0]
+        if bridge.get("top_profile") == "flat":
+            # Ponte reta/caixa: as duas alturas devem coincidir.  Mantemos os
+            # campos de plateau por compatibilidade, mas eles não têm efeito.
+            try:
+                bridge["end_height_mm"] = float(bridge.get("center_height_mm", bridge.get("end_height_mm", 0.0)))
+            except (TypeError, ValueError):
+                pass
         planner.setdefault(
             "consider_side_trusses",
             [
@@ -1732,8 +1807,8 @@ class ConfigService:
         center_height_mm: float,
         panel_mm: float,
         truss_type: str = "Parker",
-        top_profile: str = "parker_plateau",
-        internal_truss_type: str = "X",
+        top_profile: str = "flat",
+        internal_truss_type: str = "Pratt_symmetric",
         chord_truss_type: str = "none",
         E_MPa: float = 6000.0,
         stick_length_mm: float = 115.0,
@@ -1858,7 +1933,7 @@ class ConfigService:
                 "panel_mm": panel_mid,
                 "left_support_overhang_mm": 100.0,
                 "right_support_overhang_mm": 100.0,
-                "end_height_mm": max(50.0, height_mid / 3.0),
+                "end_height_mm": height_mid,
                 "plateau_start_mm": span_mid / 3.0,
                 "plateau_end_mm": 2.0 * span_mid / 3.0,
                 "load_distribution_x_mm": [],
@@ -1868,14 +1943,14 @@ class ConfigService:
                 "support_contact_y_mm": [-width_mid / 2.0, width_mid / 2.0],
                 "support_contact_x_left_mm": [-100.0, 0.0],
                 "support_contact_x_right_mm": [span_mid, span_mid + 100.0],
-                "truss_type": "Parker",
-                "side_truss_type": "Parker",
-                "internal_truss_type": "X",
-                "cross_frame_truss_type": "X",
+                "truss_type": "Pratt_symmetric",
+                "side_truss_type": "Pratt_symmetric",
+                "internal_truss_type": "Pratt_symmetric",
+                "cross_frame_truss_type": "Pratt_symmetric",
                 "chord_truss_type": "none",
                 "top_chord_truss_type": str(top_chord_truss_type),
                 "bottom_chord_truss_type": str(bottom_chord_truss_type),
-                "top_profile": "parker_plateau",
+                "top_profile": "flat",
             }
         )
 

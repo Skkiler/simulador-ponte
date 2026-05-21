@@ -145,8 +145,9 @@ class GeometryService:
             "split_midpoint",
             "midpoint_lap",
             "x_midpoint_lap",
+            "x_midpoint_lap_joint",
         }:
-            return raw
+            return "x_midpoint_lap"
         if norm == "x" and group in groups and policy in {
             "single_diagonal_no_crossing",
             "single_diagonal",
@@ -512,6 +513,24 @@ class GeometryService:
             layout_cfg = dict(
                 cfg.get("section_layout_by_group", {}).get(group, {"layout": "stacked"})
             )
+            # Projeto fabricável: seções box ímpares com 5+ palitos geram
+            # arranjos difíceis de reproduzir e alteram inércia conforme a
+            # montagem. Para os grupos críticos definidos no detalhamento,
+            # arredonda para a seção box par imediatamente superior.
+            simple_even_groups = {
+                str(v)
+                for v in (cfg.get("detail_model", {}) or {}).get(
+                    "simple_even_box_section_groups",
+                    ["top_chord", "vertical"],
+                )
+            }
+            if (
+                str(group) in simple_even_groups
+                and str(layout_cfg.get("layout", "")).strip().lower() == "box"
+                and int(n_sticks) >= 5
+                and int(n_sticks) % 2 == 1
+            ):
+                n_sticks += 1
             layout_cfg.setdefault(
                 "composite_action",
                 cfg.get("detail_model", {}).get("composite_action", {}),
@@ -648,6 +667,9 @@ class GeometryService:
             "howe invertida": "howe_inverted",
             "k_symmetric": "x",
             "k simétrica": "x",
+            "split_midpoint_lap_joint": "x_midpoint_lap",
+            "x_midpoint_lap_joint": "x_midpoint_lap",
+            "midpoint_lap": "x_midpoint_lap",
             "sem": "none",
             "nenhuma": "none",
         }

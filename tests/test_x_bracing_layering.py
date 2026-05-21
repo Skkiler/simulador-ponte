@@ -129,9 +129,11 @@ def test_split_midpoint_policy_keeps_x_geometry_and_marks_midspan_joint() -> Non
     # X remains structurally active: two diagonals per panel/station, not a
     # single Warren-style diagonal.  The crossing is solved in fabrication by
     # splitting/cutting at midspan, not by deleting one leg of the X.
-    assert by_group.get("bottom_bracing") == 28
-    assert by_group.get("top_bracing") == 28
-    assert by_group.get("cross_frame_bracing") == 30
+    # Cada perna do X é dividida em dois semielementos que chegam ao nó/tala
+    # central; portanto a contagem física dobra em relação ao X contínuo.
+    assert by_group.get("bottom_bracing") == 56
+    assert by_group.get("top_bracing") == 56
+    assert by_group.get("cross_frame_bracing") == 60
 
     n1 = Node(1, 0.0, -50.0, 0.0, "bottom", "L", 0.0)
     n2 = Node(2, 100.0, 50.0, 0.0, "bottom", "R", 100.0)
