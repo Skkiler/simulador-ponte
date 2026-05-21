@@ -219,10 +219,10 @@ class ActiveDesignPlanner:
                 "chord_lacing": 1,
             },
             "compression_box_light": {
-                "top_chord": 4,
-                "bottom_chord": 2,
+                "top_chord": 7,
+                "bottom_chord": 1,
                 "diagonal": 2,
-                "vertical": 2,
+                "vertical": 4,
                 "top_transverse": 1,
                 "bottom_transverse": 1,
                 "support_pad": 2,
@@ -232,8 +232,8 @@ class ActiveDesignPlanner:
                 "cross_frame_bracing": 1,
             },
             "compression_box": {
-                "top_chord": 7,
-                "bottom_chord": 4,
+                "top_chord": 8,
+                "bottom_chord": 2,
                 "diagonal": 3,
                 "vertical": 4,
                 "top_transverse": 1,
@@ -245,40 +245,40 @@ class ActiveDesignPlanner:
                 "cross_frame_bracing": 1,
             },
             "strong_top": {
-                "top_chord": 4,
-                "bottom_chord": 2,
+                "top_chord": 7,
+                "bottom_chord": 1,
                 "diagonal": 2,
-                "vertical": 2,
+                "vertical": 4,
                 "top_transverse": 1,
                 "bottom_transverse": 1,
                 "support_pad": 3,
                 "chord_lacing": 1,
             },
             "strong": {
-                "top_chord": 4,
-                "bottom_chord": 3,
+                "top_chord": 7,
+                "bottom_chord": 1,
                 "diagonal": 2,
-                "vertical": 2,
+                "vertical": 4,
                 "top_transverse": 2,
                 "bottom_transverse": 1,
                 "support_pad": 3,
                 "chord_lacing": 1,
             },
             "ultra_compression": {
-                "top_chord": 6,
-                "bottom_chord": 4,
+                "top_chord": 8,
+                "bottom_chord": 2,
                 "diagonal": 3,
-                "vertical": 3,
+                "vertical": 4,
                 "top_transverse": 2,
                 "bottom_transverse": 2,
                 "support_pad": 4,
                 "chord_lacing": 2,
             },
             "ultra_pratt": {
-                "top_chord": 6,
-                "bottom_chord": 4,
+                "top_chord": 8,
+                "bottom_chord": 2,
                 "diagonal": 3,
-                "vertical": 2,
+                "vertical": 4,
                 "top_transverse": 2,
                 "bottom_transverse": 2,
                 "support_pad": 4,
@@ -314,11 +314,11 @@ class ActiveDesignPlanner:
                 sticks.update(
                     {
                         # Membros globais principais.
-                        "top_chord": 4,
-                        "bottom_chord": 2,
+                        "top_chord": 7,
+                        "bottom_chord": 1,
                         "diagonal": 2,
-                        "vertical": 2,
-                        "support_pad": 2,
+                        "vertical": 4,
+                        "support_pad": 3,
 
                         # Membros locais/travamentos. Mantidos leves.
                         "top_transverse": 1,
@@ -382,8 +382,8 @@ class ActiveDesignPlanner:
                     {
                         # Versão mais forte. Não usar como macro inicial padrão,
                         # pois tende a estourar massa em S2.
-                        "top_chord": 7,
-                        "bottom_chord": 4,
+                        "top_chord": 8,
+                        "bottom_chord": 2,
                         "diagonal": 3,
                         "vertical": 4,
                         "support_pad": 4,
@@ -1300,14 +1300,14 @@ class ActiveDesignPlanner:
                     bridge["top_profile"] = "triangular_peak"
                     changed = True
                     actions.append("perfil topo: reto -> triangular")
-                if str(bridge.get("top_chord_truss_type", "X")).lower() in {"none", "sem", "nenhuma"}:
-                    bridge["top_chord_truss_type"] = "X"
+                if str(bridge.get("top_chord_truss_type", "Pratt_symmetric")).lower() in {"none", "sem", "nenhuma"}:
+                    bridge["top_chord_truss_type"] = "Pratt_symmetric"
                     changed = True
-                    actions.append("banzo superior: none -> X")
-                if str(bridge.get("bottom_chord_truss_type", "X")).lower() in {"none", "sem", "nenhuma"}:
-                    bridge["bottom_chord_truss_type"] = "X"
+                    actions.append("banzo superior: none -> Pratt_symmetric")
+                if str(bridge.get("bottom_chord_truss_type", "Warren_symmetric")).lower() in {"none", "sem", "nenhuma"}:
+                    bridge["bottom_chord_truss_type"] = "Warren_symmetric"
                     changed = True
-                    actions.append("banzo inferior: none -> X")
+                    actions.append("banzo inferior: none -> Warren_symmetric")
 
         if changed:
             c = self.config.normalize(c)
@@ -2042,9 +2042,16 @@ class ActiveDesignPlanner:
 
             base_n = max(1, int(base_group_sticks.get(group, n_current)))
             floor_rel = int(math.ceil(base_n * structural_floor_ratio))
-            floor_group = safe_float(min_primary_by_group.get(group), None)
-            floor_group_i = int(floor_group) if floor_group is not None else min_primary
-            floor_n = max(floor_group_i, floor_rel)
+
+            if structural_floor_ratio <= 1.0e-9:
+                # Modo de teste/diagnóstico: permite verificar que membros quase
+                # sem força podem retornar ao mínimo construtivo quando o usuário
+                # desativa explicitamente o piso estrutural proporcional.
+                floor_n = min_structural
+            else:
+                floor_group = safe_float(min_primary_by_group.get(group), None)
+                floor_group_i = int(floor_group) if floor_group is not None else min_primary
+                floor_n = max(floor_group_i, floor_rel)
 
             if group in {"top_chord", "bottom_chord", "support_pad"}:
                 floor_n = max(floor_n, 2)
@@ -2744,6 +2751,26 @@ class ActiveDesignPlanner:
                 ["X", "Warren_symmetric", "Pratt_symmetric", "Howe_inverted", "Warren_mid_braced"],
             )
         )
+        x_policy = str(cfg.get("detail_model", {}).get("x_bracing_crossing_policy", "warren_no_crossing")).strip().lower()
+        if x_policy in {
+            "single_diagonal_no_crossing",
+            "single_diagonal",
+            "convert_to_single_diagonal",
+            "warren_no_crossing",
+        }:
+            fallback_no_cross = ["Pratt_symmetric", "Warren_symmetric", "Howe_inverted"]
+
+            def drop_x_secondary(values: List[str]) -> List[str]:
+                clean = [
+                    v
+                    for v in list(values or [])
+                    if self._normalize_topology_name(v) not in {"x", "duplo_x", "double_x"}
+                ]
+                return clean or list(fallback_no_cross)
+
+            internal_vals = drop_x_secondary(internal_vals)
+            top_chord_vals = drop_x_secondary(top_chord_vals)
+            bottom_chord_vals = drop_x_secondary(bottom_chord_vals)
         if enforce_symmetry:
             side_vals = [
                 v
@@ -2751,9 +2778,9 @@ class ActiveDesignPlanner:
                 if self._normalize_topology_name(v)
                 in {"pratt_symmetric", "warren_symmetric", "warren_mid_braced", "howe_inverted", "x", "howe"}
             ] or ["Pratt_symmetric", "Warren_symmetric", "Warren_mid_braced"]
-            internal_vals = [v for v in internal_vals if self._normalize_topology_name(v) != "none"] or ["X"]
-            top_chord_vals = [v for v in top_chord_vals if self._normalize_topology_name(v) != "none"] or ["X"]
-            bottom_chord_vals = [v for v in bottom_chord_vals if self._normalize_topology_name(v) != "none"] or ["X"]
+            internal_vals = [v for v in internal_vals if self._normalize_topology_name(v) != "none"] or ["Pratt_symmetric", "Warren_symmetric"]
+            top_chord_vals = [v for v in top_chord_vals if self._normalize_topology_name(v) != "none"] or ["Pratt_symmetric", "Warren_symmetric"]
+            bottom_chord_vals = [v for v in bottom_chord_vals if self._normalize_topology_name(v) != "none"] or ["Warren_symmetric", "Pratt_symmetric"]
             panel_min = float(planner.get("panel_min_mm", cfg["bridge"]["panel_mm"]))
             panel_max = float(planner.get("panel_max_mm", cfg["bridge"]["panel_mm"]))
             symmetry_panel_vals: List[float] = []
@@ -2837,7 +2864,7 @@ class ActiveDesignPlanner:
             )
 
         top_weights = {o: 1.0 for o in top_vals}
-        top_weights.update({"triangular_peak": 1.8, "parker_plateau": 1.6, "shallow_arch": 1.3, "flat": 0.7})
+        top_weights.update({"parker_plateau": 2.0, "flat": 1.35, "triangular_peak": 1.05, "shallow_arch": 0.15})
 
         internal_weights = {o: 1.0 for o in internal_vals}
         internal_weights.update({"X": 2.5, "Warren": 1.45, "Pratt": 1.25, "N": 1.1, "Howe": 0.9, "none": 0.35})
@@ -2977,8 +3004,9 @@ class ActiveDesignPlanner:
 
             top_ch = weighted_choice(top_chord_vals, chord_weights)
             bot_ch = weighted_choice(bottom_chord_vals, chord_weights)
-            if enforce_symmetry:
-                bot_ch = top_ch
+            # Simetria aqui é longitudinal/lateral; não deve forçar o plano
+            # inferior a copiar o superior, porque isso apaga soluções mistas
+            # Pratt/Warren que são mais montáveis e evitam X físico cruzado.
 
             add_candidate(
                 {
@@ -3110,10 +3138,10 @@ class ActiveDesignPlanner:
             "howe": -0.4,
         }.get(side, 0.0)
         score += {
-            "triangular_peak": 0.55,
-            "parker_plateau": 0.45,
-            "shallow_arch": 0.30,
-            "flat": -0.35,
+            "parker_plateau": 0.65,
+            "flat": 0.30,
+            "triangular_peak": 0.10,
+            "shallow_arch": -0.75,
         }.get(top, 0.0)
         return float(score)
 

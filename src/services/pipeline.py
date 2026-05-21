@@ -1504,11 +1504,20 @@ class SimulationPipeline:
                 if pieces:
                     prism_html = plot_dir / "02_geometria_3d_prismas_reais_completo.html"
                     legacy_prism_html = plot_dir / "17_modelo_peca_a_peca_prismas_reais.html"
-                    emit_progress(0.882, f"Gerando 3D peça-a-peça amostrado ({min(len(pieces), max_piece_html)}/{len(pieces)} peças)")
+                    emit_progress(0.882, f"Pré-calculando malhas 3D peça-a-peça ({min(len(pieces), max_piece_html)}/{len(pieces)} peças)")
+                    color_by = str(detail_cfg.get("piece_view_color_by", "assembly_unit"))
+                    prism_batches = self.viz.prepare_stick_piece_mesh_batches(
+                        pieces,
+                        max_pieces=max_piece_html,
+                        color_by=color_by,
+                    )
+                    emit_progress(0.886, "Renderizando HTML 3D peça-a-peça a partir das malhas pré-calculadas")
                     fig_prisms = self.viz.plotly_stick_pieces(
                         pieces,
                         max_pieces=max_piece_html,
                         render_mode="prismas reais",
+                        precomputed_mesh_batches=prism_batches,
+                        color_by=color_by,
                     )
                     fig_prisms.write_html(prism_html)
                     # Alias de compatibilidade para relatórios antigos.
@@ -1535,10 +1544,18 @@ class SimulationPipeline:
                                 continue
                             safe_name = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in group_name)
                             path = group_dir / f"{safe_name}_peca_a_peca.html"
+                            subset_max = min(max_piece_html, 600)
+                            subset_batches = self.viz.prepare_stick_piece_mesh_batches(
+                                subset,
+                                max_pieces=subset_max,
+                                color_by=color_by,
+                            )
                             self.viz.plotly_stick_pieces(
                                 subset,
-                                max_pieces=min(max_piece_html, 600),
+                                max_pieces=subset_max,
                                 render_mode="prismas reais",
+                                precomputed_mesh_batches=subset_batches,
+                                color_by=color_by,
                             ).write_html(path)
                             group_files.append(str(path))
                     detailed["piece_view_files"] = {

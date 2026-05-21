@@ -184,6 +184,37 @@ class LoadDistributionService:
         right = float(side_bias.get("right", 0.5))
         return left if float(y) < 0.0 else right
 
+    @staticmethod
+    def _load_spreader_side_bias(
+        cfg: Dict[str, Any],
+        side_bias: Dict[str, float] | None,
+    ) -> Dict[str, float] | None:
+        if not side_bias:
+            return None
+        bridge = cfg.get("bridge", {}) or {}
+        model = str(bridge.get("load_distribution_model", "point_stations")).strip().lower()
+        if model not in {"plate_surface_uniform", "plate", "surface", "area"}:
+            return side_bias
+
+        eta = float(bridge.get("load_spreader_side_equalization", 0.0) or 0.0)
+        eta = max(0.0, min(0.95, eta))
+        if eta <= 1.0e-12:
+            return side_bias
+
+        left = float(side_bias.get("left", 0.5))
+        right = float(side_bias.get("right", 0.5))
+        total = max(1.0e-12, left + right)
+        left /= total
+        right /= total
+
+        # Uma placa/anilha rígida sobre travessas não equivale a aplicar 80% da
+        # carga diretamente em uma longarina axial isolada. Como o solver de
+        # treliça não tem flexão de travessas/deck, aproximamos a redistribuição
+        # transversal misturando a excentricidade imposta com a divisão 50/50.
+        left_eff = 0.5 + (left - 0.5) * (1.0 - eta)
+        right_eff = 0.5 + (right - 0.5) * (1.0 - eta)
+        return {"left": left_eff, "right": right_eff}
+
     @classmethod
     def nodal_weights(
         cls,
@@ -212,12 +243,14 @@ class LoadDistributionService:
         for n in load_nodes:
             by_x[round(float(n.x), 6)].append(n)
 
+        effective_side_bias = cls._load_spreader_side_bias(cfg, side_bias)
+
         raw_node_weights: Dict[int, float] = defaultdict(float)
         for x_station, wx in x_weights.items():
             station_nodes = by_x.get(round(float(x_station), 6), [])
             if not station_nodes:
                 continue
-            side_factors = [max(0.0, cls._side_factor(float(n.y), side_bias)) for n in station_nodes]
+            side_factors = [max(0.0, cls._side_factor(float(n.y), effective_side_bias)) for n in station_nodes]
             side_total = sum(side_factors)
             if side_total <= 1.0e-12:
                 side_factors = [1.0 for _ in station_nodes]

@@ -39,6 +39,28 @@ class StickDetailService:
         return max(float(min_value_mm), math.floor(v / inc) * inc)
 
     @staticmethod
+    def ceil_to_cut_increment(
+        value_mm: float,
+        increment_mm: float = 5.0,
+        min_value_mm: float = 5.0,
+        max_value_mm: float | None = None,
+    ) -> float:
+        """Comprimento fabricado em escala de oficina, nunca menor que a geometria.
+
+        Versões anteriores arredondavam para baixo. Isso fazia o relatório
+        dizer que uma peça geométrica de, por exemplo, 108,7 mm seria cortada
+        com 105 mm, economizando massa e palito no papel, mas criando uma peça
+        fisicamente curta. Para fabricação, o blank deve ser arredondado para
+        cima em múltiplos de 5 mm e depois aparado/lixado se necessário.
+        """
+        inc = max(1.0e-9, float(increment_mm))
+        v = max(float(min_value_mm), float(value_mm))
+        rounded = math.ceil((v - 1.0e-9) / inc) * inc
+        if max_value_mm is not None:
+            rounded = min(float(max_value_mm), rounded)
+        return max(float(min_value_mm), rounded)
+
+    @staticmethod
     def _unit_vector(ni: Node, nj: Node) -> Tuple[float, float, float, float]:
         dx = nj.x - ni.x
         dy = nj.y - ni.y
@@ -138,7 +160,54 @@ class StickDetailService:
         nos nós/extremidades.  A separação é da ordem da espessura do palito.
         """
         group = str(member_group or "")
-        layer_groups = set(str(v) for v in (detail.get("x_bracing_layered_groups") or ["bottom_bracing", "cross_frame_bracing"]))
+        policy = str(detail.get("x_bracing_crossing_policy", "layered_x_no_interpenetration")).strip().lower()
+        secondary_x_groups = ["diagonal", "bottom_bracing", "top_bracing", "cross_frame_bracing"]
+        if "x_bracing_no_crossing_groups" in detail:
+            no_cross_source = detail.get("x_bracing_no_crossing_groups") or []
+        else:
+            no_cross_source = (
+                secondary_x_groups
+                if policy in {
+                    "single_diagonal_no_crossing",
+                    "single_diagonal",
+                    "convert_to_single_diagonal",
+                    "warren_no_crossing",
+                    "split_midpoint_lap_joint",
+                    "split_midpoint",
+                    "midpoint_lap",
+                    "x_midpoint_lap",
+                }
+                else []
+            )
+        no_cross_groups = set(str(v) for v in no_cross_source)
+        if group in no_cross_groups and policy in {
+            "split_midpoint_lap_joint",
+            "split_midpoint",
+            "midpoint_lap",
+            "x_midpoint_lap",
+        }:
+            return {
+                "offset": (0.0, 0.0, 0.0),
+                "layer": 0,
+                "plane": "midpoint_lap",
+                "handling": "split_midpoint_lap_joint",
+                "midspan_connected": True,
+            }
+        if group in no_cross_groups and policy in {
+            "single_diagonal_no_crossing",
+            "single_diagonal",
+            "convert_to_single_diagonal",
+            "warren_no_crossing",
+        }:
+            return {
+                "offset": (0.0, 0.0, 0.0),
+                "layer": 0,
+                "plane": "single_diagonal",
+                "handling": "single_diagonal_no_crossing",
+                "midspan_connected": False,
+            }
+
+        layer_groups = set(str(v) for v in (detail.get("x_bracing_layered_groups") or ["diagonal", "bottom_bracing", "top_bracing", "cross_frame_bracing"]))
         if group not in layer_groups:
             return {
                 "offset": (0.0, 0.0, 0.0),
@@ -156,6 +225,20 @@ class StickDetailService:
         dy = float(nj.y - ni.y)
         dz = float(nj.z - ni.z)
 
+        if group == "diagonal":
+            # Treliças laterais em X ficam no plano x-z de cada face.  Separar
+            # as diagonais por camadas em y evita que dois palitos ocupem o
+            # mesmo volume no cruzamento do painel sem inventar um nó central
+            # que o solver estrutural não calcula.
+            sign = 1.0 if dx * dz >= 0.0 else -1.0
+            side = -1.0 if ((float(ni.y) + float(nj.y)) * 0.5) < 0.0 else 1.0
+            return {
+                "offset": (0.0, side * sign * off, 0.0),
+                "layer": int(sign),
+                "plane": "side_xz",
+                "handling": "alternate_front_back_layer_no_midspan_joint",
+                "midspan_connected": False,
+            }
         if group == "bottom_bracing":
             # Plano x-y; separar em z.  Sinal alterna entre / e \\.
             sign = 1.0 if dx * dy >= 0.0 else -1.0
@@ -163,6 +246,18 @@ class StickDetailService:
                 "offset": (0.0, 0.0, sign * off),
                 "layer": int(sign),
                 "plane": "bottom_xy",
+                "handling": "alternate_front_back_layer_no_midspan_joint",
+                "midspan_connected": False,
+            }
+        if group == "top_bracing":
+            # Plano x-y no banzo superior; separar também em z, mas com sinal
+            # invertido em relação ao fundo para não empilhar todas as camadas
+            # no mesmo lado visual da estrutura.
+            sign = -1.0 if dx * dy >= 0.0 else 1.0
+            return {
+                "offset": (0.0, 0.0, sign * off),
+                "layer": int(sign),
+                "plane": "top_xy",
                 "handling": "alternate_front_back_layer_no_midspan_joint",
                 "midspan_connected": False,
             }
@@ -189,6 +284,7 @@ class StickDetailService:
         L: float,
         stick_len: float,
         overlap: float,
+        min_constructive_piece_length_mm: float = 0.0,
     ) -> List[Tuple[float, float, float]]:
         """
         Divide um membro de comprimento L em peças de palito.
@@ -222,8 +318,376 @@ class StickDetailService:
 
             s0 += step
 
-        return out
+        return StickDetailService._enforce_min_constructive_piece_length(
+            out,
+            min_constructive_piece_length_mm=min_constructive_piece_length_mm,
+            domain_start_mm=0.0,
+            domain_end_mm=L,
+            stock_limit_mm=stick_len,
+        )
 
+    @staticmethod
+    def _enforce_min_constructive_piece_length(
+        intervals: List[Tuple[float, float, float]],
+        *,
+        min_constructive_piece_length_mm: float,
+        domain_start_mm: float,
+        domain_end_mm: float,
+        stock_limit_mm: float,
+    ) -> List[Tuple[float, float, float]]:
+        """Avoid terminal stick fragments that are too short to fabricate reliably.
+
+        The geometry can generate a final remainder of only a few millimetres
+        when a member is just longer than one stock stick.  Instead of adding a
+        fragile sliver, grow the short terminal piece back into the previous
+        piece, increasing the overlap.  The structural member axis is unchanged;
+        only the fabrication intervals are made constructible.
+        """
+        if not intervals:
+            return []
+
+        min_len = max(0.0, float(min_constructive_piece_length_mm or 0.0))
+        stock_limit = max(1.0, float(stock_limit_mm))
+        if min_len <= 1.0e-9 or len(intervals) <= 1:
+            return [(float(a), float(b), max(0.0, float(b) - float(a))) for a, b, _ in intervals]
+
+        min_len = min(min_len, stock_limit)
+        lo = float(domain_start_mm)
+        hi = float(domain_end_mm)
+        out = [(float(a), float(b), max(0.0, float(b) - float(a))) for a, b, _ in intervals]
+
+        def resize_first(row: Tuple[float, float, float]) -> Tuple[float, float, float]:
+            a, b, _ = row
+            if b - a >= min_len - 1.0e-9:
+                return row
+            b2 = min(hi, a + min_len)
+            if b2 - a > stock_limit + 1.0e-9:
+                b2 = a + stock_limit
+            return (a, b2, max(0.0, b2 - a))
+
+        def resize_last(row: Tuple[float, float, float]) -> Tuple[float, float, float]:
+            a, b, _ = row
+            if b - a >= min_len - 1.0e-9:
+                return row
+            a2 = max(lo, b - min_len)
+            if b - a2 > stock_limit + 1.0e-9:
+                a2 = b - stock_limit
+            return (a2, b, max(0.0, b - a2))
+
+        out[0] = resize_first(out[0])
+        out[-1] = resize_last(out[-1])
+
+        # Rare intermediate fragments can appear after midpoint splitting. Grow
+        # them symmetrically within the allowed domain.
+        fixed: List[Tuple[float, float, float]] = []
+        for idx, (a, b, _c) in enumerate(out):
+            length = b - a
+            if 0 < idx < len(out) - 1 and length < min_len - 1.0e-9:
+                need = min_len - length
+                a = max(lo, a - 0.5 * need)
+                b = min(hi, b + 0.5 * need)
+                if b - a < min_len - 1.0e-9:
+                    if a <= lo + 1.0e-9:
+                        b = min(hi, a + min_len)
+                    elif b >= hi - 1.0e-9:
+                        a = max(lo, b - min_len)
+                if b - a > stock_limit + 1.0e-9:
+                    b = a + stock_limit
+            fixed.append((a, b, max(0.0, b - a)))
+
+        return fixed
+
+    @staticmethod
+    def _joint_setback_groups(detail: Dict[str, Any]) -> set[str]:
+        raw = detail.get(
+            "joint_setback_groups",
+            [
+                "diagonal",
+                "vertical",
+                "top_transverse",
+                "bottom_transverse",
+                "top_bracing",
+                "bottom_bracing",
+                "cross_frame_bracing",
+                "chord_lacing",
+            ],
+        )
+        return {str(v) for v in (raw or [])}
+
+    @staticmethod
+    def _section_envelope_mm(sec: Dict[str, Any], stick_w: float, stick_t: float) -> float:
+        width = safe_float(sec.get("width_mm"), None)
+        thickness = safe_float(sec.get("thickness_mm"), None)
+        return max(
+            float(stick_w),
+            float(stick_t),
+            float(width) if width is not None else 0.0,
+            float(thickness) if thickness is not None else 0.0,
+        )
+
+    @staticmethod
+    def _joint_face_setbacks(
+        member: Member,
+        member_length_mm: float,
+        *,
+        node_member_envelopes: Dict[int, List[Tuple[int, float]]],
+        detail: Dict[str, Any],
+        stick_w: float,
+        stick_t: float,
+        min_constructive_piece_length_mm: float,
+    ) -> Tuple[float, float]:
+        """Return start/end trims so pieces stop at the joint contact face.
+
+        The solver keeps the member centreline from node to node, which is the
+        correct truss idealisation.  The fabrication view, however, must not draw
+        the physical prism all the way through the node centroid.  For non-chord
+        members we trim the rendered/fabricated interval by the half-envelope of
+        the other members meeting that node.
+        """
+        if not bool(detail.get("joint_face_setback_enabled", True)):
+            return 0.0, 0.0
+        if str(member.group) not in StickDetailService._joint_setback_groups(detail):
+            return 0.0, 0.0
+
+        clearance = max(0.0, float(detail.get("joint_face_clearance_mm", 0.50)))
+        min_setback = max(0.0, float(detail.get("joint_min_setback_mm", 0.50 * max(stick_w, stick_t))))
+        max_setback_mm = max(0.0, float(detail.get("joint_max_setback_mm", 18.0)))
+        max_setback_fraction = max(0.0, min(0.45, float(detail.get("joint_max_setback_fraction", 0.18))))
+        per_end_cap = min(max_setback_mm, max_setback_fraction * max(0.0, float(member_length_mm)))
+
+        def end_setback(node_id: int) -> float:
+            others = [env for mid, env in node_member_envelopes.get(int(node_id), []) if int(mid) != int(member.id)]
+            other_env = max(others) if others else max(float(stick_w), float(stick_t))
+            raw = max(min_setback, 0.5 * float(other_env) + clearance)
+            return max(0.0, min(per_end_cap, raw))
+
+        start = end_setback(member.i)
+        end = end_setback(member.j)
+
+        L = max(0.0, float(member_length_mm))
+        # Always leave a useful clear stick span.  For very short members, scale
+        # both end setbacks rather than erasing the piece.
+        min_clear = min(max(1.0, float(min_constructive_piece_length_mm or 0.0)), max(1.0, 0.60 * L))
+        max_total_setback = max(0.0, L - min_clear)
+        if start + end > max_total_setback + 1.0e-9 and start + end > 1.0e-9:
+            scale = max_total_setback / (start + end)
+            start *= scale
+            end *= scale
+        return start, end
+
+
+    @staticmethod
+    def _node_lap_groups(detail: Dict[str, Any]) -> set[str]:
+        raw = detail.get(
+            "node_lap_groups",
+            [
+                "diagonal",
+                "vertical",
+                "top_transverse",
+                "bottom_transverse",
+                "top_bracing",
+                "bottom_bracing",
+                "cross_frame_bracing",
+                "chord_lacing",
+            ],
+        )
+        return {str(v) for v in (raw or [])}
+
+    @staticmethod
+    def _node_host_groups(detail: Dict[str, Any]) -> set[str]:
+        raw = detail.get(
+            "node_lap_host_groups",
+            [
+                "bottom_chord",
+                "top_chord",
+                "support_pad",
+                "vertical",
+                "bottom_transverse",
+                "top_transverse",
+            ],
+        )
+        return {str(v) for v in (raw or [])}
+
+    @staticmethod
+    def _member_group_by_id(members: List[Member]) -> Dict[int, str]:
+        return {int(m.id): str(m.group) for m in (members or [])}
+
+    @staticmethod
+    def _has_node_host(
+        node_id: int,
+        member_id: int,
+        *,
+        node_member_envelopes: Dict[int, List[Tuple[int, float]]],
+        member_group_by_id: Dict[int, str],
+        host_groups: set[str],
+    ) -> bool:
+        for other_id, _env in node_member_envelopes.get(int(node_id), []) or []:
+            if int(other_id) == int(member_id):
+                continue
+            if str(member_group_by_id.get(int(other_id), "")) in host_groups:
+                return True
+        return False
+
+    @staticmethod
+    def _round_to_increment(value: float, increment: float) -> float:
+        inc = max(1.0e-9, float(increment or 1.0))
+        return round(float(value) / inc) * inc
+
+    @classmethod
+    def _end_cut_angle_deg(
+        cls,
+        ux: float,
+        uy: float,
+        uz: float,
+        *,
+        detail: Dict[str, Any],
+    ) -> float:
+        """Legacy fallback for a terminal bevel angle.
+
+        This method is intentionally conservative and is now used only when no
+        host member can be identified at the node.  Earlier revisions applied
+        its result to every segment of a multi-piece member; that made internal
+        splice edges look like random diagonal cuts.  Terminal mitering is now
+        decided per end by :meth:`_terminal_end_cut_angle_deg`.
+        """
+        if not bool(detail.get("angled_end_cuts_enabled", True)):
+            return 90.0
+        horiz = math.hypot(float(ux), float(uy))
+        angle = math.degrees(math.atan2(abs(float(uz)), max(1.0e-9, horiz)))
+        cut_angle = max(15.0, min(90.0, 90.0 - angle))
+        inc = max(1.0, float(detail.get("end_cut_angle_increment_deg", 5.0)))
+        return max(15.0, min(90.0, cls._round_to_increment(cut_angle, inc)))
+
+    @classmethod
+    def _terminal_end_cut_angle_deg(
+        cls,
+        *,
+        member: Member,
+        node_id: int,
+        nodes_by_id: Dict[int, Node],
+        members_by_id: Dict[int, Member],
+        node_member_envelopes: Dict[int, List[Tuple[int, float]]],
+        member_group_by_id: Dict[int, str],
+        detail: Dict[str, Any],
+        fallback_axis: Tuple[float, float, float],
+    ) -> float:
+        """Return the bevel angle only for a real terminal host contact.
+
+        A miter cut is a property of the *end* of a stick that is glued against
+        an inclined host face, not a property of all internal stock pieces along
+        the member.  We therefore inspect the members sharing the terminal node,
+        choose a host chord/transverse/pad when one exists, and use only the
+        host slope to decide whether that particular end needs a bevel.
+        """
+        if not bool(detail.get("angled_end_cuts_enabled", True)):
+            return 90.0
+
+        allowed_groups = {
+            str(v)
+            for v in detail.get(
+                "miter_cut_terminal_groups",
+                ["vertical", "diagonal", "top_transverse", "bottom_transverse"],
+            )
+        }
+        if str(member.group) not in allowed_groups:
+            return 90.0
+
+        host_groups = cls._node_host_groups(detail)
+        host_candidates: List[Tuple[float, Member]] = []
+        for other_id, env in node_member_envelopes.get(int(node_id), []) or []:
+            if int(other_id) == int(member.id):
+                continue
+            if str(member_group_by_id.get(int(other_id), "")) not in host_groups:
+                continue
+            other = members_by_id.get(int(other_id))
+            if other is not None:
+                host_candidates.append((float(env), other))
+
+        if not host_candidates:
+            return cls._end_cut_angle_deg(*fallback_axis, detail=detail)
+
+        # Prefer the largest physical host at the node: usually top/bottom chord
+        # or support pad.  Thin braces meeting the same node should not drive the
+        # cut angle of a vertical/diagonal primary piece.
+        host = sorted(host_candidates, key=lambda item: item[0], reverse=True)[0][1]
+        hn0 = nodes_by_id.get(int(host.i))
+        hn1 = nodes_by_id.get(int(host.j))
+        if hn0 is None or hn1 is None:
+            return 90.0
+        hux, huy, huz, hL = cls._unit_vector(hn0, hn1)
+        if hL <= 1.0e-9:
+            return 90.0
+
+        host_slope = math.degrees(math.atan2(abs(float(huz)), max(1.0e-9, math.hypot(float(hux), float(huy)))))
+        threshold = max(0.0, float(detail.get("miter_cut_min_host_slope_deg", 7.5)))
+        if host_slope < threshold:
+            return 90.0
+        inc = max(1.0, float(detail.get("end_cut_angle_increment_deg", 5.0)))
+        cut_angle = 90.0 - host_slope
+        return max(25.0, min(90.0, cls._round_to_increment(cut_angle, inc)))
+
+    @staticmethod
+    def _node_lap_visual_side_offset(
+        *,
+        member: Member,
+        ni: Node,
+        nj: Node,
+        detail: Dict[str, Any],
+    ) -> Tuple[float, float, float]:
+        """Move side-web lap members to the outside face in the fabrication view.
+
+        The solver axis remains node-to-node.  The physical palito, however,
+        should be glued on the outside face of the chord/montant rather than
+        occupying the same centroidal volume.  This deterministic side offset
+        removes most chord/web interpenetration in the 3D view and makes the
+        lap-joint assumption visually explicit.
+        """
+        if not bool(detail.get("node_lap_visual_side_offset_enabled", True)):
+            return (0.0, 0.0, 0.0)
+        groups = {
+            str(v)
+            for v in detail.get(
+                "node_lap_visual_side_offset_groups",
+                ["vertical", "diagonal"],
+            )
+        }
+        if str(member.group) not in groups:
+            return (0.0, 0.0, 0.0)
+        y_mid = 0.5 * (float(ni.y) + float(nj.y))
+        if abs(y_mid) <= 1.0e-6:
+            return (0.0, 0.0, 0.0)
+        offset = max(0.0, float(detail.get("node_lap_visual_side_offset_mm", 14.0)))
+        return (0.0, math.copysign(offset, y_mid), 0.0)
+
+    @staticmethod
+    def _terminal_lap_overlap_mm(detail: Dict[str, Any], stick_len: float) -> float:
+        requested = float(detail.get("node_lap_overlap_mm", detail.get("overlap_length_mm", 30.0)))
+        minimum = float(detail.get("min_node_lap_overlap_mm", 0.18 * float(stick_len)))
+        return max(8.0, min(0.85 * float(stick_len), max(minimum, requested)))
+
+    @classmethod
+    def _terminal_connection_mode(
+        cls,
+        *,
+        member: Member,
+        node_id: int,
+        detail: Dict[str, Any],
+        node_member_envelopes: Dict[int, List[Tuple[int, float]]],
+        member_group_by_id: Dict[int, str],
+    ) -> str:
+        if not bool(detail.get("node_face_lap_enabled", True)):
+            return "axis_centroid"
+        if str(member.group) not in cls._node_lap_groups(detail):
+            return "axis_centroid"
+        if cls._has_node_host(
+            int(node_id),
+            int(member.id),
+            node_member_envelopes=node_member_envelopes,
+            member_group_by_id=member_group_by_id,
+            host_groups=cls._node_host_groups(detail),
+        ):
+            return "face_lap_to_host"
+        return "tip_to_node_no_host"
 
     @staticmethod
     def _split_interval_to_stock_limit(
@@ -233,6 +697,7 @@ class StickDetailService:
         max_cut_mm: float,
         overlap_mm: float,
         cut_increment_mm: float,
+        min_constructive_piece_length_mm: float = 0.0,
     ) -> List[Tuple[float, float, float]]:
         """Reparte um intervalo físico para nenhum corte exceder o palito real."""
         a = float(s0)
@@ -254,7 +719,13 @@ class StickDetailService:
             if nxt >= b - 1.0e-9:
                 break
             cur = max(cur + 1.0, nxt - overlap)
-        return out
+        return StickDetailService._enforce_min_constructive_piece_length(
+            out,
+            min_constructive_piece_length_mm=min_constructive_piece_length_mm,
+            domain_start_mm=a,
+            domain_end_mm=b,
+            stock_limit_mm=max_cut,
+        )
 
     @classmethod
     def _enforce_stock_limit_on_intervals(
@@ -264,6 +735,7 @@ class StickDetailService:
         max_cut_mm: float,
         overlap_mm: float,
         cut_increment_mm: float,
+        min_constructive_piece_length_mm: float = 0.0,
     ) -> tuple[List[Tuple[float, float, float]], int]:
         fixed: List[Tuple[float, float, float]] = []
         splits = 0
@@ -274,6 +746,7 @@ class StickDetailService:
                 max_cut_mm=max_cut_mm,
                 overlap_mm=overlap_mm,
                 cut_increment_mm=cut_increment_mm,
+                min_constructive_piece_length_mm=min_constructive_piece_length_mm,
             )
             if len(parts) > 1:
                 splits += 1
@@ -351,6 +824,10 @@ class StickDetailService:
         cut_increment_mm = max(0.5, float(detail.get("cut_increment_mm", 5.0)))
         allow_cut_rounding = bool(detail.get("allow_cut_rounding", True))
         min_cut_length_mm = max(1.0, float(detail.get("min_cut_length_mm", 5.0)))
+        min_constructive_piece_length_mm = max(
+            min_cut_length_mm,
+            float(detail.get("min_constructive_piece_length_mm", 40.0)),
+        )
         max_cut_length_mm = min(
             stick_len,
             max(1.0, float(detail.get("max_cut_length_mm", stick_len))),
@@ -373,6 +850,8 @@ class StickDetailService:
         reinforce_if = float(detail.get("reinforce_if_fs_lt", 2.0))
         remove_if = float(detail.get("allow_recommend_removal_if_fs_gt", 8.0))
         tension_only = bool(detail.get("tension_only_stabilizers", True))
+        terminal_joint_area_factor = max(0.1, float(detail.get("terminal_joint_area_factor", 1.35)))
+        terminal_joint_secondary_bending_factor = max(0.5, float(detail.get("terminal_joint_secondary_bending_factor", 1.05)))
 
         node_by_id = {n.id: n for n in nodes}
         res_by = {int(r["member_id"]): r for r in member_results}
@@ -380,6 +859,25 @@ class StickDetailService:
         sizing_map = cfg.get("member_sizing_plan_by_id", {}) or {}
 
         stabilizers = set(cfg.get("analysis", {}).get("stabilizer_groups", []))
+
+        node_member_envelopes: Dict[int, List[Tuple[int, float]]] = {}
+        member_group_by_id = self._member_group_by_id(members)
+        members_by_id = {int(mm.id): mm for mm in members}
+        for mm in members:
+            mm_layout_cfg = dict(
+                cfg.get("section_layout_by_group", {}).get(
+                    mm.group,
+                    {"layout": "stacked"},
+                )
+            )
+            mm_layout_cfg.setdefault(
+                "composite_action",
+                detail.get("composite_action", {}),
+            )
+            mm_sec = self.sections.composite_section(max(1, int(mm.n_sticks)), mat, mm_layout_cfg)
+            env = self._section_envelope_mm(mm_sec, stick_w, stick_t)
+            node_member_envelopes.setdefault(int(mm.i), []).append((int(mm.id), env))
+            node_member_envelopes.setdefault(int(mm.j), []).append((int(mm.id), env))
 
         stick_rows: List[Dict] = []
         joint_rows: List[Dict] = []
@@ -477,9 +975,81 @@ class StickDetailService:
             # seja um modelo de quarto, alternamos a orientação das
             # emendas em quadrantes ímpares para evitar alinhamento
             # perfeito de juntas nas quatro porções da ponte.  Para
-            # quadrantes ímpares, invertimos a ordem de segmentação (os
+            # quadrantes ímpares, invertimos a orientação das emendas (os
             # cortes passam a ser contados a partir da extremidade oposta).
-            intervals = self._piece_intervals(L, stick_len, member_overlap)
+            connection_start_mode = self._terminal_connection_mode(
+                member=m,
+                node_id=m.i,
+                detail=detail,
+                node_member_envelopes=node_member_envelopes,
+                member_group_by_id=member_group_by_id,
+            )
+            connection_end_mode = self._terminal_connection_mode(
+                member=m,
+                node_id=m.j,
+                detail=detail,
+                node_member_envelopes=node_member_envelopes,
+                member_group_by_id=member_group_by_id,
+            )
+            terminal_lap_overlap_mm = self._terminal_lap_overlap_mm(detail, stick_len)
+            miter_cut_start_angle_deg = self._terminal_end_cut_angle_deg(
+                member=m,
+                node_id=m.i,
+                nodes_by_id=node_by_id,
+                members_by_id=members_by_id,
+                node_member_envelopes=node_member_envelopes,
+                member_group_by_id=member_group_by_id,
+                detail=detail,
+                fallback_axis=(ux, uy, uz),
+            )
+            miter_cut_end_angle_deg = self._terminal_end_cut_angle_deg(
+                member=m,
+                node_id=m.j,
+                nodes_by_id=node_by_id,
+                members_by_id=members_by_id,
+                node_member_envelopes=node_member_envelopes,
+                member_group_by_id=member_group_by_id,
+                detail=detail,
+                fallback_axis=(ux, uy, uz),
+            )
+            visual_connection_offset = self._node_lap_visual_side_offset(
+                member=m,
+                ni=ni,
+                nj=nj,
+                detail=detail,
+            )
+
+            joint_start_setback, joint_end_setback = self._joint_face_setbacks(
+                m,
+                L,
+                node_member_envelopes=node_member_envelopes,
+                detail=detail,
+                stick_w=stick_w,
+                stick_t=stick_t,
+                min_constructive_piece_length_mm=min_constructive_piece_length_mm,
+            )
+            # A junta face-a-face é representada por recuo até a face do membro
+            # hospedeiro, não por avanço até o centroide do nó.  A versão anterior
+            # anulava o setback em face_lap_to_host para evitar lacunas visuais;
+            # isso fazia o prisma entrar dentro do banzo/montante.  Agora o eixo
+            # estrutural continua nó-a-nó, mas a peça física para na face e o CSV
+            # contabiliza a sobreposição de cola no host.
+            fabrication_L = max(0.0, L - joint_start_setback - joint_end_setback)
+            intervals = self._piece_intervals(
+                fabrication_L,
+                stick_len,
+                member_overlap,
+                min_constructive_piece_length_mm=min_constructive_piece_length_mm,
+            )
+            if joint_start_setback > 0.0 or joint_end_setback > 0.0:
+                intervals = [
+                    (
+                        s0 + joint_start_setback,
+                        s1 + joint_start_setback,
+                        max(0.0, s1 - s0),
+                    )
+                    for s0, s1, _cl in intervals
+                ]
             quadrant_id = 0
             if use_quarter_model and quarter_count > 0:
                 # Determinar qual quadrante este membro pertence com base
@@ -498,6 +1068,24 @@ class StickDetailService:
                         # Para inverter, subtrai os limites do comprimento total
                         rev.append((L - s1, L - s0, cl))
                     intervals = rev
+
+
+            if str(x_layer.get("handling", "")) == "split_midpoint_lap_joint" and L > 2.0:
+                # O solver mantém o X como duas barras axiais contínuas entre
+                # nós de extremidade. Para a fabricação, porém, uma diagonal que
+                # cruza outra no mesmo plano precisa ser cortada no cruzamento:
+                # os segmentos terminam em uma junta colada palito-palito, sem
+                # um prisma atravessando o outro. Isso altera só o detalhamento;
+                # a rigidez global não ganha nó central artificial.
+                mid_s = 0.5 * L
+                split: List[Tuple[float, float, float]] = []
+                for s0, s1, _cl in intervals:
+                    if s0 + 1.0e-9 < mid_s < s1 - 1.0e-9:
+                        split.append((s0, mid_s, max(0.0, mid_s - s0)))
+                        split.append((mid_s, s1, max(0.0, s1 - mid_s)))
+                    else:
+                        split.append((s0, s1, max(0.0, s1 - s0)))
+                intervals = [(a, b, min(stick_len, max(0.0, c))) for a, b, c in split if b - a > 1.0e-6]
 
             base_intervals = intervals
 
@@ -566,9 +1154,9 @@ class StickDetailService:
                     lane_y = 0.0
                     lane_z = 0.0
                 lane_offset_vec = (
-                    lane_y * local_y_axis[0] + lane_z * local_z_axis[0] + float(x_layer_offset[0]),
-                    lane_y * local_y_axis[1] + lane_z * local_z_axis[1] + float(x_layer_offset[1]),
-                    lane_y * local_y_axis[2] + lane_z * local_z_axis[2] + float(x_layer_offset[2]),
+                    lane_y * local_y_axis[0] + lane_z * local_z_axis[0] + float(x_layer_offset[0]) + float(visual_connection_offset[0]),
+                    lane_y * local_y_axis[1] + lane_z * local_z_axis[1] + float(x_layer_offset[1]) + float(visual_connection_offset[1]),
+                    lane_y * local_y_axis[2] + lane_z * local_z_axis[2] + float(x_layer_offset[2]) + float(visual_connection_offset[2]),
                 )
                 lane_orientation = str(lane_orientations[lane - 1]).strip().lower() if lane - 1 < len(lane_orientations) else stick_orientation
                 lane_visual_width_mm = safe_float(lane_widths[lane - 1], None) if lane - 1 < len(lane_widths) else None
@@ -591,8 +1179,16 @@ class StickDetailService:
                         max_cut_mm=max_cut_length_mm,
                         overlap_mm=overlap,
                         cut_increment_mm=cut_increment_mm,
+                        min_constructive_piece_length_mm=min_constructive_piece_length_mm,
                     )
                     stock_limit_splits += split_count
+                lane_intervals = self._enforce_min_constructive_piece_length(
+                    lane_intervals,
+                    min_constructive_piece_length_mm=min_constructive_piece_length_mm,
+                    domain_start_mm=joint_start_setback,
+                    domain_end_mm=max(joint_start_setback, L - joint_end_setback),
+                    stock_limit_mm=max_cut_length_mm,
+                )
                 prev_id = None
                 prev_end = None
 
@@ -603,17 +1199,15 @@ class StickDetailService:
                         geom_len = max_cut_length_mm
                         s1 = min(L, s0 + geom_len)
                     if allow_cut_rounding and geom_len <= max_cut_length_mm + 1.0e-9:
-                        cut_len_rounded = self.floor_to_cut_increment(
+                        cut_len_rounded = self.ceil_to_cut_increment(
                             geom_len,
                             increment_mm=cut_increment_mm,
                             min_value_mm=min_cut_length_mm,
+                            max_value_mm=max_cut_length_mm,
                         )
-                        # Não reduzir abaixo do necessário perto de extremidades críticas.
-                        if s0 <= min_end_margin or (L - s1) <= min_end_margin:
-                            cut_len_rounded = geom_len
                     else:
                         cut_len_rounded = geom_len
-                    cut_rounding_delta = geom_len - cut_len_rounded
+                    cut_rounding_delta = cut_len_rounded - geom_len
                     sid = f"M{m.id:03d}-L{lane:02d}-P{piece_index:02d}"
 
                     x0 = ni.x + ux * s0 + lane_offset_vec[0]
@@ -630,6 +1224,21 @@ class StickDetailService:
                     cut_lengths.append(cut_len_rounded)
                     cut_counter[round(cut_len_rounded, 1)] += 1
 
+                    is_first_piece = piece_index == 1
+                    is_last_piece = piece_index == len(lane_intervals)
+                    start_miter_required = bool(
+                        is_first_piece
+                        and connection_start_mode == "face_lap_to_host"
+                        and miter_cut_start_angle_deg < 89.0
+                    )
+                    end_miter_required = bool(
+                        is_last_piece
+                        and connection_end_mode == "face_lap_to_host"
+                        and miter_cut_end_angle_deg < 89.0
+                    )
+                    piece_miter_start_angle = miter_cut_start_angle_deg if start_miter_required else 90.0
+                    piece_miter_end_angle = miter_cut_end_angle_deg if end_miter_required else 90.0
+
                     stick_rows.append(
                         {
                             "stick_id": sid,
@@ -640,8 +1249,20 @@ class StickDetailService:
                             "s0_mm": s0,
                             "s1_mm": s1,
                             "geometric_piece_length_mm": geom_len,
+                            "installed_length_mm": geom_len,
+                            "member_axis_length_mm": L,
+                            "fabrication_axis_length_mm": fabrication_L,
+                            "joint_start_setback_mm": joint_start_setback,
+                            "joint_end_setback_mm": joint_end_setback,
+                            "terminal_joint_trim_applied": bool(joint_start_setback > 1.0e-9 or joint_end_setback > 1.0e-9),
                             "cut_length_mm": cut_len_rounded,
+                            "shop_cut_length_mm": cut_len_rounded,
                             "cut_rounding_delta_mm": cut_rounding_delta,
+                            "min_constructive_piece_length_mm": min_constructive_piece_length_mm,
+                            "constructive_piece_length_ok": bool(
+                                geom_len >= min_constructive_piece_length_mm - 1.0e-9
+                                or fabrication_L <= min_constructive_piece_length_mm + 1.0e-9
+                            ),
                             "max_cut_length_mm": max_cut_length_mm,
                             "dimension_ok_length": bool(cut_len_rounded <= max_cut_length_mm + 1.0e-9),
                             "x0_mm": x0,
@@ -668,6 +1289,9 @@ class StickDetailService:
                             "section_global_offset_x_mm": lane_offset_vec[0],
                             "section_global_offset_y_mm": lane_offset_vec[1],
                             "section_global_offset_z_mm": lane_offset_vec[2],
+                            "visual_connection_offset_x_mm": visual_connection_offset[0],
+                            "visual_connection_offset_y_mm": visual_connection_offset[1],
+                            "visual_connection_offset_z_mm": visual_connection_offset[2],
                             "x_bracing_layer": x_layer.get("layer"),
                             "x_bracing_plane": x_layer.get("plane"),
                             "x_bracing_crossing_handling": x_layer.get("handling"),
@@ -683,9 +1307,94 @@ class StickDetailService:
                             "n_sticks": n_lanes,
                             "layout": sec.get("layout"),
                             "quadrant_id": quadrant_id,
-                            "mass_g": stick_mass * cut_len_rounded / stick_len,
+                            "connection_start_mode": connection_start_mode,
+                            "connection_end_mode": connection_end_mode,
+                            "terminal_lap_overlap_mm": terminal_lap_overlap_mm,
+                            "node_connection_ok": bool(
+                                connection_start_mode in {"face_lap_to_host", "axis_centroid"}
+                                and connection_end_mode in {"face_lap_to_host", "axis_centroid"}
+                            ),
+                            "miter_cut_start_angle_deg": piece_miter_start_angle,
+                            "miter_cut_end_angle_deg": piece_miter_end_angle,
+                            "miter_cut_start_required": start_miter_required,
+                            "miter_cut_end_required": end_miter_required,
+                            "miter_cut_required": bool(start_miter_required or end_miter_required),
+                            "assembly_unit_key": f"{m.group}|M{m.id:03d}|L{lane:02d}|P{piece_index:02d}",
+                            # Massa competitiva da peça instalada: se o blank foi
+                            # cortado em múltiplos de 5 mm e ajustado/lixado, a
+                            # massa que fica na ponte é proporcional ao comprimento
+                            # geométrico instalado, não ao palito bruto inteiro.
+                            "mass_g": stick_mass * geom_len / stick_len,
                         }
                     )
+
+                    terminal_specs = []
+                    if piece_index == 1 and connection_start_mode == "face_lap_to_host":
+                        terminal_specs.append((
+                            "start",
+                            m.i,
+                            None,
+                            sid,
+                            s0,
+                            connection_start_mode,
+                            miter_cut_start_angle_deg,
+                        ))
+                    if piece_index == len(lane_intervals) and connection_end_mode == "face_lap_to_host":
+                        terminal_specs.append((
+                            "end",
+                            m.j,
+                            sid,
+                            None,
+                            s1,
+                            connection_end_mode,
+                            miter_cut_end_angle_deg,
+                        ))
+                    for terminal_side, terminal_node_id, piece_a, piece_b, terminal_s, terminal_mode, terminal_angle in terminal_specs:
+                        terminal_overlap = min(terminal_lap_overlap_mm, max(0.0, geom_len))
+                        terminal_glue_area = terminal_overlap * stick_w * terminal_joint_area_factor
+                        if terminal_glue_area > 0:
+                            terminal_glue_shear = (abs(per_lane) / terminal_glue_area) * terminal_joint_secondary_bending_factor
+                        else:
+                            terminal_glue_shear = None
+                        terminal_allow = glue_tau / glue_sf if glue_sf > 0 else None
+                        if terminal_glue_shear is None or terminal_glue_shear <= 0 or terminal_allow is None:
+                            terminal_fs = None
+                        else:
+                            terminal_fs = terminal_allow / terminal_glue_shear
+                        terminal_fs_clean = safe_float(terminal_fs, None)
+                        if terminal_fs_clean is not None:
+                            joint_fs_values.append(terminal_fs_clean)
+                        member_glue += terminal_glue_area
+                        total_glue_area += terminal_glue_area
+                        joint_rows.append(
+                            {
+                                "joint_id": f"J-M{m.id:03d}-L{lane:02d}-{terminal_side.upper()}-NODE{int(terminal_node_id):03d}",
+                                "member_id": m.id,
+                                "member_group": m.group,
+                                "lane": lane,
+                                "piece_a": piece_a or f"NODE{int(terminal_node_id):03d}_HOST_FACE",
+                                "piece_b": piece_b or f"NODE{int(terminal_node_id):03d}_HOST_FACE",
+                                "joint_type": "terminal_face_lap",
+                                "joint_model": "face_lap_to_host",
+                                "connection_mode": terminal_mode,
+                                "terminal_side": terminal_side,
+                                "terminal_node_id": int(terminal_node_id),
+                                "overlap_length_mm": terminal_overlap,
+                                "splice_center_mm": terminal_s,
+                                "quadrant_id": quadrant_id,
+                                "joint_area_factor": terminal_joint_area_factor,
+                                "joint_secondary_bending_factor": terminal_joint_secondary_bending_factor,
+                                "glue_area_mm2": terminal_glue_area,
+                                "force_transfer_N": abs(per_lane),
+                                "glue_shear_MPa": terminal_glue_shear,
+                                "glue_allow_design_MPa": terminal_allow,
+                                "FS_glue_shear": terminal_fs_clean,
+                                "FS_glue_shear_label": safety_label(terminal_fs_clean),
+                                "risk_flag": risk_from_fs(terminal_fs_clean),
+                                "miter_cut_angle_deg": terminal_angle,
+                                "note": "junta terminal sobreposta em face; evita ligação ponta-a-ponta simples",
+                            }
+                        )
 
                     if prev_id is not None and prev_end is not None:
                         overlap_actual = max(0.0, prev_end - s0)
@@ -814,6 +1523,9 @@ class StickDetailService:
                     "pieces_per_lane": len(base_intervals),
                     "total_piece_count": len(base_intervals) * n_lanes,
                     "member_length_mm": L,
+                    "fabrication_axis_length_mm": fabrication_L,
+                    "joint_start_setback_mm": joint_start_setback,
+                    "joint_end_setback_mm": joint_end_setback,
                     "layout": sec.get("layout"),
                     "section_A_mm2": sec["A"],
                     "section_Iy_mm4": sec["Iy"],
@@ -957,6 +1669,24 @@ class StickDetailService:
             "allow_cut_rounding": allow_cut_rounding,
             "max_cut_length_mm": max_cut_length_mm,
             "strict_cut_length": strict_cut_length,
+            "min_constructive_piece_length_mm": min_constructive_piece_length_mm,
+            "short_constructive_piece_count": int(
+                sum(1 for r in stick_rows if not bool(r.get("constructive_piece_length_ok", True)))
+            ),
+            "joint_face_setback_enabled": bool(detail.get("joint_face_setback_enabled", True)),
+            "joint_setback_piece_count": int(
+                sum(1 for r in stick_rows if bool(r.get("terminal_joint_trim_applied", False)))
+            ),
+            "node_face_lap_enabled": bool(detail.get("node_face_lap_enabled", True)),
+            "terminal_face_lap_joint_count": int(
+                sum(1 for r in joint_rows if str(r.get("joint_type")) == "terminal_face_lap")
+            ),
+            "node_connection_gap_count": int(
+                sum(1 for r in stick_rows if not bool(r.get("node_connection_ok", True)))
+            ),
+            "miter_cut_piece_count": int(
+                sum(1 for r in stick_rows if bool(r.get("miter_cut_required", False)))
+            ),
             "stock_limit_splits": stock_limit_splits,
             "oversize_piece_count": int(sum(1 for r in stick_rows if (safe_float(r.get("cut_length_mm"), 0.0) or 0.0) > max_cut_length_mm + 1.0e-9)),
         }

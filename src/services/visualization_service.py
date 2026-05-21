@@ -806,6 +806,8 @@ class VisualizationService:
         offset: tuple[float, float, float] | None = None,
         width_axis: tuple[float, float, float] | None = None,
         thickness_axis: tuple[float, float, float] | None = None,
+        start_miter_angle_deg: float | None = None,
+        end_miter_angle_deg: float | None = None,
     ) -> Dict[str, List[float]]:
         """Gera vértices/faces de um prisma orientado entre p0 e p1.
 
@@ -886,10 +888,35 @@ class VisualizationService:
             half_w * u + half_t * v,
             -half_w * u + half_t * v,
         ]
+
+        def _miter_shift(angle_deg: float | None) -> float:
+            if angle_deg is None:
+                return 0.0
+            try:
+                a = float(angle_deg)
+            except (TypeError, ValueError):
+                return 0.0
+            # 90° = corte quadrado. Ângulos menores desenham a face inclinada
+            # sobre a espessura do palito. O comprimento de corte continua vindo
+            # do CSV em múltiplos de 5 mm; isto muda apenas a malha visual.
+            if a >= 89.5:
+                return 0.0
+            a = max(15.0, min(89.0, a))
+            return min(0.35 * L, max(0.0, float(thickness_mm) / math.tan(math.radians(a))))
+
+        start_shift = _miter_shift(start_miter_angle_deg)
+        end_shift = _miter_shift(end_miter_angle_deg)
         verts = []
-        for end in [p0v, p1v]:
-            for off in offsets:
-                verts.append(end + off)
+        for idx, off in enumerate(offsets):
+            # Os dois vértices de uma face recebem deslocamento axial diferente,
+            # criando uma face terminal inclinada. Usamos o sinal no eixo local v
+            # para definir qual borda avança; é uma aproximação fabricável e
+            # estável para CAD, não uma nova propriedade resistente.
+            v_side = 1.0 if idx in {2, 3} else -1.0
+            verts.append(p0v + off + (start_shift if v_side > 0 else 0.0) * d_unit)
+        for idx, off in enumerate(offsets):
+            v_side = 1.0 if idx in {2, 3} else -1.0
+            verts.append(p1v + off - (end_shift if v_side > 0 else 0.0) * d_unit)
         xs = [float(pt[0]) for pt in verts]
         ys = [float(pt[1]) for pt in verts]
         zs = [float(pt[2]) for pt in verts]
@@ -910,6 +937,233 @@ class VisualizationService:
             "k": [f[2] for f in faces],
         }
 
+    @staticmethod
+    def _prism_edge_polyline(prism: Dict[str, List[float]]) -> tuple[List[float], List[float], List[float]]:
+        """Retorna uma polyline única com as 12 arestas de um prisma."""
+        edges = [
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            (4, 5), (5, 6), (6, 7), (7, 4),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        ]
+        xs: List[float] = []
+        ys: List[float] = []
+        zs: List[float] = []
+        px = prism.get("x", [])
+        py = prism.get("y", [])
+        pz = prism.get("z", [])
+        if len(px) < 8 or len(py) < 8 or len(pz) < 8:
+            return xs, ys, zs
+        for a, b in edges:
+            xs.extend([px[a], px[b], None])
+            ys.extend([py[a], py[b], None])
+            zs.extend([pz[a], pz[b], None])
+        return xs, ys, zs
+
+    @staticmethod
+    def _stable_color_index(key: str, modulo: int) -> int:
+        if modulo <= 0:
+            return 0
+        total = 0
+        for i, ch in enumerate(str(key)):
+            total += (i + 1) * ord(ch)
+        return total % modulo
+
+    def prepare_stick_piece_mesh_batches(
+        self,
+        stick_pieces,
+        member_id: int | None = None,
+        max_pieces: int = 1500,
+        lane_offset_mm: float = 5.0,
+        color_by: str = "assembly_unit",
+    ) -> Dict[str, Any]:
+        """Pré-calcula prismas reais antes de montar o Plotly.
+
+        O gargalo anterior era criar milhares de traces, um por palito.  Aqui
+        os prismas são convertidos para vértices/faces uma única vez e agrupados
+        em poucos Mesh3d por grupo estrutural, mantendo cor e hover por peça por
+        meio de facecolor/text.  Isso reduz o tempo de renderização sem voltar a
+        representar a ponte como grupos sólidos.
+        """
+        rows = list(stick_pieces or [])
+        if member_id is not None:
+            rows = [r for r in rows if int(safe_float(r.get("member_id"), -1) or -1) == int(member_id)]
+        rows = rows[:max(1, int(max_pieces))]
+
+        structural_colors = {
+            "bottom_chord": "#1f77b4",
+            "top_chord": "#d62728",
+            "vertical": "#2ca02c",
+            "diagonal": "#ff7f0e",
+            "top_bracing": "#9467bd",
+            "bottom_bracing": "#17becf",
+            "cross_frame_bracing": "#bcbd22",
+            "top_transverse": "#8c564b",
+            "bottom_transverse": "#e377c2",
+            "support_pad": "#7f7f7f",
+            "chord_lacing": "#aec7e8",
+        }
+        # Paleta longa e alternada por matiz/luminância.  A versão anterior
+        # usava hash sobre apenas 20 cores, causando colisões visuais: grupos
+        # diferentes saíam com o mesmo laranja/roxo no HTML.
+        base_colors = [
+            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b",
+            "#e377c2", "#7f7f7f", "#bcbd22", "#17becf", "#393b79", "#637939",
+            "#8c6d31", "#843c39", "#7b4173", "#3182bd", "#31a354", "#756bb1",
+            "#636363", "#e6550d", "#6baed6", "#fd8d3c", "#74c476", "#fb6a4a",
+            "#9e9ac8", "#a55194", "#969696", "#bdb76b", "#00a6a6", "#b15928",
+            "#a6cee3", "#fdbf6f", "#b2df8a", "#fb9a99", "#cab2d6", "#ffff99",
+            "#33a02c", "#e31a1c", "#1f78b4", "#ff9896", "#98df8a", "#c5b0d5",
+            "#c49c94", "#f7b6d2", "#c7c7c7", "#dbdb8d", "#9edae5", "#ffbb78",
+        ]
+        has_real_section_offsets = any(
+            safe_float(r.get("section_global_offset_y_mm"), None) is not None
+            or safe_float(r.get("section_global_offset_z_mm"), None) is not None
+            for r in rows
+        )
+        color_by_norm = str(color_by or "assembly_unit").strip().lower()
+
+        def _row_color_key(row: Dict[str, Any]) -> str:
+            group_name = str(row.get("member_group", "sem_grupo"))
+            lane_i = int(safe_float(row.get("lane"), 1) or 1)
+            pidx_i = int(safe_float(row.get("piece_index"), 1) or 1)
+            assembly_key_i = str(row.get("assembly_unit_key") or row.get("stick_id") or f"M{row.get('member_id')}-L{lane_i}-P{pidx_i}")
+            if color_by_norm in {"piece", "stick", "assembly_unit", "assembly"}:
+                return assembly_key_i
+            if color_by_norm == "member":
+                return f"M{row.get('member_id')}"
+            return group_name
+
+        sorted_color_keys = sorted({_row_color_key(r) for r in rows})
+        color_map = {key: base_colors[i % len(base_colors)] for i, key in enumerate(sorted_color_keys)}
+        for group_name, color in structural_colors.items():
+            if color_by_norm in {"group", "member_group", "structural_group"}:
+                color_map[group_name] = color
+
+        batches: Dict[str, Dict[str, Any]] = {}
+        bounds = {"x": [], "y": [], "z": []}
+
+        for r in rows:
+            group = str(r.get("member_group", "sem_grupo"))
+            lane = int(safe_float(r.get("lane"), 1) or 1)
+            pidx = int(safe_float(r.get("piece_index"), 1) or 1)
+            if has_real_section_offsets:
+                off_y = 0.0
+                off_z = 0.0
+            else:
+                off_y = (lane - 1) * lane_offset_mm
+                off_z = (0.35 * lane_offset_mm) * ((pidx % 2) - 0.5)
+            x0 = safe_float(r.get("x0_mm"), 0.0) or 0.0
+            y0 = (safe_float(r.get("y0_mm"), 0.0) or 0.0) + off_y
+            z0 = (safe_float(r.get("z0_mm"), 0.0) or 0.0) + off_z
+            x1 = safe_float(r.get("x1_mm"), 0.0) or 0.0
+            y1 = (safe_float(r.get("y1_mm"), 0.0) or 0.0) + off_y
+            z1 = (safe_float(r.get("z1_mm"), 0.0) or 0.0) + off_z
+            try:
+                nominal_wmm = float(r.get("width_mm"))
+                nominal_tmm = float(r.get("thickness_mm"))
+            except (TypeError, ValueError):
+                nominal_wmm = 7.0
+                nominal_tmm = 1.5
+            stick_orientation = str(r.get("stick_orientation", "flat") or "flat").strip().lower()
+            try:
+                wmm = float(r.get("visual_width_mm"))
+                tmm = float(r.get("visual_thickness_mm"))
+            except (TypeError, ValueError):
+                if stick_orientation == "edge":
+                    wmm = nominal_tmm
+                    tmm = nominal_wmm
+                else:
+                    wmm = nominal_wmm
+                    tmm = nominal_tmm
+
+            axis_y = (
+                safe_float(r.get("section_axis_y_x"), None),
+                safe_float(r.get("section_axis_y_y"), None),
+                safe_float(r.get("section_axis_y_z"), None),
+            )
+            axis_z = (
+                safe_float(r.get("section_axis_z_x"), None),
+                safe_float(r.get("section_axis_z_y"), None),
+                safe_float(r.get("section_axis_z_z"), None),
+            )
+            if any(v is None for v in axis_y) or any(v is None for v in axis_z):
+                axis_y = None
+                axis_z = None
+            use_bevel = bool(r.get("miter_cut_required", False))
+            prism = self.make_oriented_stick_prism(
+                (x0, y0, z0),
+                (x1, y1, z1),
+                width_mm=wmm,
+                thickness_mm=tmm,
+                width_axis=axis_y,
+                thickness_axis=axis_z,
+                start_miter_angle_deg=safe_float(r.get("miter_cut_start_angle_deg"), 90.0) if use_bevel else 90.0,
+                end_miter_angle_deg=safe_float(r.get("miter_cut_end_angle_deg"), 90.0) if use_bevel else 90.0,
+            )
+            assembly_key = str(r.get("assembly_unit_key") or r.get("stick_id") or f"M{r.get('member_id')}-L{lane}-P{pidx}")
+            color_key = _row_color_key(r)
+            color = color_map.get(color_key, base_colors[self._stable_color_index(color_key, len(base_colors))])
+            label_parts = [
+                f"{r.get('stick_id', '')}",
+                f"Membro {r.get('member_id', '?')} — {group}",
+                f"Linha {lane}, peça {pidx}",
+                f"Unidade: {assembly_key}",
+                f"Corte {safe_float(r.get('cut_length_mm'), 0.0) or 0.0:.1f} mm",
+                f"Comprimento instalado {safe_float(r.get('installed_length_mm'), 0.0) or 0.0:.1f} mm",
+                f"N peça {safe_float(r.get('N_piece_N'), 0.0) or 0.0:.2f} N",
+                f"Blank nominal {nominal_wmm:.1f}×{nominal_tmm:.1f} mm",
+                f"Render/orientação {wmm:.1f}×{tmm:.1f} mm — {stick_orientation}",
+                f"Junta início: {r.get('connection_start_mode', 'axis_centroid')}",
+                f"Junta fim: {r.get('connection_end_mode', 'axis_centroid')}",
+            ]
+            if bool(r.get("miter_cut_required", False)):
+                label_parts.append(
+                    f"Corte em grau: {safe_float(r.get('miter_cut_start_angle_deg'), 90.0) or 90.0:.0f}°/{safe_float(r.get('miter_cut_end_angle_deg'), 90.0) or 90.0:.0f}°"
+                )
+            sy = safe_float(r.get("section_local_y_mm"), None)
+            sz = safe_float(r.get("section_local_z_mm"), None)
+            if sy is not None and sz is not None:
+                label_parts.append(f"Posição seção local y/z = {sy:.1f}/{sz:.1f} mm")
+            label = "<br>".join(label_parts)
+
+            batch = batches.setdefault(group, {
+                "x": [], "y": [], "z": [], "i": [], "j": [], "k": [],
+                "text": [], "facecolor": [], "edge_x": [], "edge_y": [], "edge_z": [],
+                "hover_x": [], "hover_y": [], "hover_z": [], "hover_text": [],
+            })
+            base_idx = len(batch["x"])
+            batch["x"].extend(prism["x"])
+            batch["y"].extend(prism["y"])
+            batch["z"].extend(prism["z"])
+            batch["i"].extend([base_idx + int(v) for v in prism["i"]])
+            batch["j"].extend([base_idx + int(v) for v in prism["j"]])
+            batch["k"].extend([base_idx + int(v) for v in prism["k"]])
+            batch["text"].extend([label] * len(prism["x"]))
+            batch["facecolor"].extend([color] * len(prism["i"]))
+            batch["hover_x"].append(0.5 * (x0 + x1))
+            batch["hover_y"].append(0.5 * (y0 + y1))
+            batch["hover_z"].append(0.5 * (z0 + z1))
+            batch["hover_text"].append(label)
+
+            # Arestas reais do prisma.  Não desenhamos diagonais internas dos
+            # triângulos da malha; isso evita a falsa impressão de que um palito
+            # foi repartido em mais peças do que existe no CSV.
+            ex, ey, ez = self._prism_edge_polyline(prism)
+            batch["edge_x"].extend(ex)
+            batch["edge_y"].extend(ey)
+            batch["edge_z"].extend(ez)
+            bounds["x"].extend([x0, x1])
+            bounds["y"].extend([y0, y1])
+            bounds["z"].extend([z0, z1])
+
+        return {
+            "rows": rows,
+            "batches": batches,
+            "bounds": bounds,
+            "has_real_section_offsets": has_real_section_offsets,
+            "color_by": color_by_norm,
+        }
+
     def plotly_stick_pieces(
         self,
         stick_pieces,
@@ -917,241 +1171,92 @@ class VisualizationService:
         max_pieces: int = 1500,
         lane_offset_mm: float = 5.0,
         render_mode: str = "prismas reais",
+        precomputed_mesh_batches: Dict[str, Any] | None = None,
+        color_by: str = "assembly_unit",
     ):
-        rows = list(stick_pieces or [])
-        if member_id is not None:
-            # Filtra apenas o membro solicitado
-            rows = [r for r in rows if int(safe_float(r.get("member_id"), -1) or -1) == int(member_id)]
-        # Limita número máximo de peças para evitar travamentos na renderização
-        rows = rows[:max_pieces]
-
+        data = precomputed_mesh_batches or self.prepare_stick_piece_mesh_batches(
+            stick_pieces,
+            member_id=member_id,
+            max_pieces=max_pieces,
+            lane_offset_mm=lane_offset_mm,
+            color_by=color_by,
+        )
+        rows = list(data.get("rows", []) or [])
         fig = go.Figure()
         if not rows:
             fig.update_layout(title="Sem peças para mostrar", height=500)
             return fig
 
-        # Agrupa por grupo de membros para colorir de forma consistente
-        groups = sorted({str(r.get("member_group", "sem_grupo")) for r in rows})
-        # Paleta simples de cores discretas
-        base_colors = [
-            "#1f77b4",  # azul
-            "#ff7f0e",  # laranja
-            "#2ca02c",  # verde
-            "#d62728",  # vermelho
-            "#9467bd",  # roxo
-            "#8c564b",  # marrom
-            "#e377c2",  # rosa
-            "#7f7f7f",  # cinza
-            "#bcbd22",  # oliva
-            "#17becf",  # ciano
-        ]
+        batches = data.get("batches", {}) or {}
+        for group, batch in sorted(batches.items(), key=lambda kv: kv[0]):
+            fig.add_trace(
+                go.Mesh3d(
+                    x=batch.get("x", []),
+                    y=batch.get("y", []),
+                    z=batch.get("z", []),
+                    i=batch.get("i", []),
+                    j=batch.get("j", []),
+                    k=batch.get("k", []),
+                    text=batch.get("text", []),
+                    hovertemplate="%{text}<extra></extra>",
+                    name=str(group),
+                    opacity=1.0,
+                    facecolor=batch.get("facecolor", []),
+                    flatshading=True,
+                    lighting={"ambient": 0.85, "diffuse": 0.55, "roughness": 1.0, "specular": 0.05},
+                    showscale=False,
+                    showlegend=True,
+                )
+            )
+            if batch.get("edge_x"):
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=batch.get("edge_x", []),
+                        y=batch.get("edge_y", []),
+                        z=batch.get("edge_z", []),
+                        mode="lines",
+                        line={"width": 1.15, "color": "rgba(0,0,0,0.42)"},
+                        name=f"arestas reais — {group}",
+                        hoverinfo="skip",
+                        showlegend=False,
+                    )
+                )
+            # Mesh3d nem sempre dispara hover no centro da face. Estes marcadores
+            # quase invisíveis ficam no centro geométrico de cada peça física e
+            # garantem que a auditoria mostre dados ao passar o mouse.
+            if batch.get("hover_x"):
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=batch.get("hover_x", []),
+                        y=batch.get("hover_y", []),
+                        z=batch.get("hover_z", []),
+                        mode="markers",
+                        # Marcadores de hover devem existir para capturar o mouse,
+                        # mas não podem aparecer como "pontos brancos" de montagem.
+                        # Usar cor quase transparente e tamanho mínimo mantém o
+                        # hover peça-a-peça sem poluir a leitura geométrica.
+                        marker={"size": 2, "color": "rgba(0,0,0,0.001)"},
+                        text=batch.get("hover_text", []),
+                        hovertemplate="%{text}<extra></extra>",
+                        name=f"dados das peças — {group}",
+                        showlegend=False,
+                    )
+                )
 
-        render_mode_norm = str(render_mode or "prismas reais").strip().lower()
-        use_lines = render_mode_norm in {"linhas", "linhas leves", "light_lines", "eixos reais"}
-        # O modo exagerado existe apenas para didática.  Exagero alto faz uma
-        # ponte estreita parecer desconectada; 1.25× preserva leitura sem
-        # destruir a percepção de colagem lado-a-lado.
-        exaggeration = 1.0 if render_mode_norm in {"prismas reais", "prismas_reais"} else 1.25
-        has_real_section_offsets = any(
-            safe_float(r.get("section_global_offset_y_mm"), None) is not None
-            or safe_float(r.get("section_global_offset_z_mm"), None) is not None
-            for r in rows
-        )
+        # Linhas de travamento local foram removidas da vista peça-a-peça.
+        # No Plotly elas eram percebidas como cortes/arestas no meio dos palitos,
+        # embora fossem apenas linhas auxiliares. A auditoria geométrica deve vir
+        # do CSV e do hover individual de cada prisma físico.
 
-        for gi, g in enumerate(groups):
-            color = base_colors[gi % len(base_colors)]
-            # Desenha cada peça como um prisma 3D
-            for r in [rr for rr in rows if str(rr.get("member_group", "sem_grupo")) == g]:
-                lane = int(safe_float(r.get("lane"), 1) or 1)
-                pidx = int(safe_float(r.get("piece_index"), 1) or 1)
-                # Em versões antigas, as lanes eram afastadas artificialmente
-                # apenas para leitura visual.  Isso fazia uma seção box parecer
-                # torta/desconectada.  Quando o detalhamento já traz offsets
-                # reais de seção, renderizamos exatamente as coordenadas físicas.
-                if has_real_section_offsets:
-                    off_y = 0.0
-                    off_z = 0.0
-                else:
-                    off_y = (lane - 1) * lane_offset_mm
-                    off_z = (0.35 * lane_offset_mm) * ((pidx % 2) - 0.5)
-                x0 = safe_float(r.get("x0_mm"), 0.0) or 0.0
-                y0 = (safe_float(r.get("y0_mm"), 0.0) or 0.0) + off_y
-                z0 = (safe_float(r.get("z0_mm"), 0.0) or 0.0) + off_z
-                x1 = safe_float(r.get("x1_mm"), 0.0) or 0.0
-                y1 = (safe_float(r.get("y1_mm"), 0.0) or 0.0) + off_y
-                z1 = (safe_float(r.get("z1_mm"), 0.0) or 0.0) + off_z
-                # Recupera dimensões físicas e orientação do palito.
-                # width_mm/thickness_mm permanecem a dimensão nominal do blank;
-                # visual_width_mm/visual_thickness_mm representam a orientação construtiva
-                # no prisma renderizado (edge = lateral para cima).
-                try:
-                    nominal_wmm = float(r.get("width_mm"))
-                    nominal_tmm = float(r.get("thickness_mm"))
-                except (TypeError, ValueError):
-                    nominal_wmm = 7.0
-                    nominal_tmm = 1.5
-
-                stick_orientation = str(r.get("stick_orientation", "flat") or "flat").strip().lower()
-                try:
-                    wmm = float(r.get("visual_width_mm"))
-                    tmm = float(r.get("visual_thickness_mm"))
-                except (TypeError, ValueError):
-                    if stick_orientation == "edge":
-                        wmm = nominal_tmm
-                        tmm = nominal_wmm
-                    else:
-                        wmm = nominal_wmm
-                        tmm = nominal_tmm
-                # Monta label para hover
-                label_parts = [
-                    f"{r.get('stick_id', '')}",
-                    f"Membro {r.get('member_id', '?')} — {g}",
-                    f"Linha {lane}, peça {pidx}",
-                    f"Corte {safe_float(r.get('cut_length_mm'), 0.0) or 0.0:.1f} mm",
-                    f"N peça {safe_float(r.get('N_piece_N'), 0.0) or 0.0:.2f} N",
-                ]
-                label_parts.append(f"Blank nominal {nominal_wmm:.1f}×{nominal_tmm:.1f} mm")
-                label_parts.append(f"Render/orientação {wmm:.1f}×{tmm:.1f} mm — {stick_orientation}")
-                sy = safe_float(r.get("section_local_y_mm"), None)
-                sz = safe_float(r.get("section_local_z_mm"), None)
-                if sy is not None and sz is not None:
-                    label_parts.append(f"Posição seção local y/z = {sy:.1f}/{sz:.1f} mm")
-                label = "<br>".join(label_parts)
-                if use_lines:
-                    fig.add_trace(
-                        go.Scatter3d(
-                            x=[x0, x1],
-                            y=[y0, y1],
-                            z=[z0, z1],
-                            mode="lines",
-                            line={"width": 3, "color": color},
-                            name=g,
-                            hovertext=label,
-                            hoverinfo="text",
-                            showlegend=False,
-                        )
-                    )
-                else:
-                    axis_y = (
-                        safe_float(r.get("section_axis_y_x"), None),
-                        safe_float(r.get("section_axis_y_y"), None),
-                        safe_float(r.get("section_axis_y_z"), None),
-                    )
-                    axis_z = (
-                        safe_float(r.get("section_axis_z_x"), None),
-                        safe_float(r.get("section_axis_z_y"), None),
-                        safe_float(r.get("section_axis_z_z"), None),
-                    )
-                    if any(v is None for v in axis_y) or any(v is None for v in axis_z):
-                        axis_y = None
-                        axis_z = None
-                    prism = self.make_oriented_stick_prism(
-                        (x0, y0, z0),
-                        (x1, y1, z1),
-                        width_mm=wmm * exaggeration,
-                        thickness_mm=tmm * exaggeration,
-                        width_axis=axis_y,
-                        thickness_axis=axis_z,
-                    )
-                    fig.add_trace(
-                        go.Mesh3d(
-                            x=prism["x"],
-                            y=prism["y"],
-                            z=prism["z"],
-                            i=prism["i"],
-                            j=prism["j"],
-                            k=prism["k"],
-                            name=g,
-                            opacity=0.85,
-                            color=color,
-                            hovertext=label,
-                            hoverinfo="text",
-                            showscale=False,
-                        )
-                    )
-
-        # Em seções espaçadas (box real com 4+ palitos), desenha linhas finas
-        # ligando os centros das lanes nos pontos de corte.  Isso não adiciona
-        # resistência ao modelo; serve para deixar claro no CAD/3D que a seção
-        # exige travamento local/gabarito e que os palitos não estão soltos.
-        if not use_lines:
-            by_member: Dict[int, List[Dict[str, Any]]] = {}
-            for r in rows:
-                mid = int(safe_float(r.get("member_id"), -1) or -1)
-                by_member.setdefault(mid, []).append(r)
-            for mid, mrows in by_member.items():
-                lanes = {int(safe_float(r.get("lane"), 0) or 0) for r in mrows}
-                layout_names = {str(r.get("layout", "")) for r in mrows}
-                if len(lanes) < 2 or "box" not in layout_names:
-                    continue
-                # Só liga visualmente se houver espaçamento real entre lanes.
-                max_sep = 0.0
-                centers = []
-                for r in mrows[:min(len(mrows), 20)]:
-                    centers.append((
-                        safe_float(r.get("section_local_y_mm"), 0.0) or 0.0,
-                        safe_float(r.get("section_local_z_mm"), 0.0) or 0.0,
-                    ))
-                for a in centers:
-                    for b in centers:
-                        max_sep = max(max_sep, math.hypot(a[0] - b[0], a[1] - b[1]))
-                if max_sep < 3.0:
-                    continue
-                stations: Dict[float, List[tuple[float, float, float]]] = {}
-                for r in mrows:
-                    for prefix, s_key in (("0", "s0_mm"), ("1", "s1_mm")):
-                        s_val = round(safe_float(r.get(s_key), 0.0) or 0.0, 3)
-                        pt = (
-                            safe_float(r.get(f"x{prefix}_mm"), 0.0) or 0.0,
-                            safe_float(r.get(f"y{prefix}_mm"), 0.0) or 0.0,
-                            safe_float(r.get(f"z{prefix}_mm"), 0.0) or 0.0,
-                        )
-                        stations.setdefault(s_val, []).append(pt)
-                for s_val, pts in list(stations.items())[:14]:
-                    # Remove pontos repetidos e conecta cada lane ao centroide local
-                    # da estação.  Evita uma malha completa que poluiria o desenho.
-                    uniq = []
-                    seen = set()
-                    for pt in pts:
-                        key = tuple(round(v, 3) for v in pt)
-                        if key not in seen:
-                            seen.add(key)
-                            uniq.append(pt)
-                    if len(uniq) < 2 or len(uniq) > 8:
-                        continue
-                    cx = sum(p[0] for p in uniq) / len(uniq)
-                    cy = sum(p[1] for p in uniq) / len(uniq)
-                    cz = sum(p[2] for p in uniq) / len(uniq)
-                    xs = []
-                    ys = []
-                    zs = []
-                    for px, py, pz in uniq:
-                        xs += [px, cx, None]
-                        ys += [py, cy, None]
-                        zs += [pz, cz, None]
-                    fig.add_trace(
-                        go.Scatter3d(
-                            x=xs,
-                            y=ys,
-                            z=zs,
-                            mode="lines",
-                            line={"width": 2, "color": "rgba(80,80,80,0.55)"},
-                            hoverinfo="text",
-                            hovertext=f"Travamento local visual — membro {mid}, estação {s_val:.1f} mm",
-                            name="travamento local",
-                            showlegend=False,
-                        )
-                    )
-
-        # Ajusta aspectos da figura para melhor visualização
-        xs_all = [safe_float(r.get("x0_mm"), 0.0) or 0.0 for r in rows] + [safe_float(r.get("x1_mm"), 0.0) or 0.0 for r in rows]
-        ys_all = [safe_float(r.get("y0_mm"), 0.0) or 0.0 for r in rows] + [safe_float(r.get("y1_mm"), 0.0) or 0.0 for r in rows]
-        zs_all = [safe_float(r.get("z0_mm"), 0.0) or 0.0 for r in rows] + [safe_float(r.get("z1_mm"), 0.0) or 0.0 for r in rows]
+        bounds = data.get("bounds", {}) or {}
+        xs_all = list(bounds.get("x", []) or [0.0])
+        ys_all = list(bounds.get("y", []) or [0.0])
+        zs_all = list(bounds.get("z", []) or [0.0])
         x_span = max(max(xs_all) - min(xs_all), 1.0)
         y_span = max(max(ys_all) - min(ys_all), 1.0)
         z_span = max(max(zs_all) - min(zs_all), 1.0)
         fig.update_layout(
-            title=f"Modelo peça‑a‑peça ({'linhas leves' if use_lines else render_mode})",
+            title="Modelo peça‑a‑peça (prismas reais; cores por peça/unidade de montagem)",
             scene={
                 "xaxis": {"title": "x [mm]"},
                 "yaxis": {"title": "y [mm]"},

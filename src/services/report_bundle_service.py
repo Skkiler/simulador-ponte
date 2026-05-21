@@ -667,6 +667,7 @@ Arquivo completo: `05_mapa_juntas_por_tipo.csv`.
 
         total = len(rows)
         over_len = []
+        short_constructive = []
         bad_width = []
         bad_thk = []
         by_model: Dict[str, int] = {}
@@ -676,6 +677,8 @@ Arquivo completo: `05_mapa_juntas_por_tipo.csv`.
             cut = safe_float(r.get("cut_length_mm"), None)
             if cut is not None and cut > cut_limit + 1.0e-9:
                 over_len.append(r)
+            if not bool(r.get("constructive_piece_length_ok", True)):
+                short_constructive.append(r)
             vw = safe_float(r.get("visual_width_mm"), None)
             vt = safe_float(r.get("visual_thickness_mm"), None)
             if vw is not None and vt is not None:
@@ -688,12 +691,17 @@ Arquivo completo: `05_mapa_juntas_por_tipo.csv`.
             x_handling = str(r.get("x_bracing_crossing_handling", "") or "")
             if x_handling:
                 by_x_layer[x_handling] = by_x_layer.get(x_handling, 0) + 1
-            if str(r.get("member_group")) in {"bottom_bracing", "cross_frame_bracing"} and x_handling not in {"alternate_front_back_layer_no_midspan_joint"}:
+            ok_x_handling = {"single_diagonal_no_crossing", "not_x_bracing"}
+            if str(r.get("member_group")) in {"bottom_bracing", "top_bracing", "cross_frame_bracing"} and x_handling not in ok_x_handling:
                 x_unresolved.append(r)
 
         top_over = "\n".join(
             f"| {r.get('stick_id')} | {r.get('member_id')} | {r.get('member_group')} | {safe_float(r.get('cut_length_mm'), None)} | {safe_float(r.get('max_cut_length_mm'), cut_limit)} |"
             for r in over_len[:25]
+        ) or "| — | — | — | — | — |"
+        top_short = "\n".join(
+            f"| {r.get('stick_id')} | {r.get('member_id')} | {r.get('member_group')} | {safe_float(r.get('geometric_piece_length_mm'), None)} | {safe_float(r.get('min_constructive_piece_length_mm'), None)} |"
+            for r in short_constructive[:25]
         ) or "| — | — | — | — | — |"
         model_rows = "\n".join(
             f"| {model} | {count} |"
@@ -707,7 +715,7 @@ Arquivo completo: `05_mapa_juntas_por_tipo.csv`.
             f"| {r.get('stick_id')} | {r.get('member_id')} | {r.get('member_group')} | {r.get('x_bracing_crossing_handling')} |"
             for r in x_unresolved[:25]
         ) or "| — | — | — |"
-        verdict = "OK" if not over_len and not bad_width and not bad_thk and not x_unresolved else "FALHA"
+        verdict = "OK" if not over_len and not short_constructive and not bad_width and not bad_thk and not x_unresolved else "FALHA"
         text = f"""# Auditoria de conectividade e limites físicos dos palitos
 
 Veredito: **{verdict}**.
@@ -719,9 +727,10 @@ Veredito: **{verdict}**.
 
 ## Contagens de falha
 - Cortes acima do limite: **{len(over_len)}**.
+- Peças abaixo do comprimento construtivo mínimo: **{len(short_constructive)}**.
 - Prismas/peças com largura visual acima do palito: **{len(bad_width)}**.
 - Prismas/peças com espessura visual acima do palito: **{len(bad_thk)}**.
-- Contraventamentos em X sem solução de cruzamento por camada: **{len(x_unresolved)}**.
+- Contraventamentos em X ou bracings equivalentes sem solução física de cruzamento: **{len(x_unresolved)}**.
 
 ## Modelos de conexão usados
 | modelo de conexão | peças |
@@ -733,12 +742,17 @@ Veredito: **{verdict}**.
 | --- | ---: |
 {x_rows}
 
-O tratamento `alternate_front_back_layer_no_midspan_joint` significa que as duas diagonais do X são contínuas, mas ficam em camadas opostas. Elas **não** são consideradas conectadas no cruzamento central; a transferência de força continua acontecendo pelas extremidades/nós. Essa é a alternativa construtiva preferida quando só há palitos e cola, porque evita cortar uma diagonal e criar uma junta de ponta pequena no meio do vão.
+O tratamento `single_diagonal_no_crossing` substitui X por diagonais alternadas do tipo Warren/Pratt-Howe, eliminando o cruzamento físico. `split_midpoint_lap_joint` e `alternate_front_back_layer_no_midspan_joint` ficam apenas como modos de estudo; no pacote final, eles são sinalizados como não resolvidos porque ainda exigem uma junta central/camada de extremidade que precisa ser modelada com mais detalhes.
 
 ### Cruzamentos em X não resolvidos
 | stick | membro | grupo | tratamento |
 | --- | ---: | --- | --- |
 {top_x_bad}
+
+## Retalhos construtivamente frágeis
+| stick | membro | grupo | comprimento geométrico [mm] | mínimo [mm] |
+| --- | ---: | --- | ---: | ---: |
+{top_short}
 
 ## Cortes acima do limite
 | stick | membro | grupo | corte [mm] | limite [mm] |

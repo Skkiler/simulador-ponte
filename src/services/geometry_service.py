@@ -124,6 +124,38 @@ class GeometryService:
         return str(raw) if raw is not None else default_mode
 
 
+
+    @staticmethod
+    def _physical_bracing_mode(cfg: Dict, mode: str, group: str) -> str:
+        """Resolve modos de bracing para geometrias fisicamente montáveis.
+
+        Um X feito por dois palitos contínuos no mesmo plano atravessa a outra
+        diagonal no centro do painel.  Jogar uma diagonal para frente/trás também
+        cria problema nas extremidades, pois a ponta deixa de coincidir com a
+        face de colagem do nó.  Quando a política física está ativa, trocamos X
+        de bracing secundário por diagonais simples alternadas, sem cruzamento.
+        """
+        raw = str(mode or "").strip()
+        norm = GeometryService._normalize_truss_mode(raw)
+        detail = cfg.get("detail_model", {}) or {}
+        policy = str(detail.get("x_bracing_crossing_policy", "warren_no_crossing")).strip().lower()
+        groups = set(str(v) for v in (detail.get("x_bracing_no_crossing_groups") or []))
+        if norm == "x" and group in groups and policy in {
+            "split_midpoint_lap_joint",
+            "split_midpoint",
+            "midpoint_lap",
+            "x_midpoint_lap",
+        }:
+            return raw
+        if norm == "x" and group in groups and policy in {
+            "single_diagonal_no_crossing",
+            "single_diagonal",
+            "convert_to_single_diagonal",
+            "warren_no_crossing",
+        }:
+            return "warren_symmetric"
+        return raw
+
     def _add_plane_bracing(
         self,
         mode: str,
@@ -143,6 +175,19 @@ class GeometryService:
         if mode == "x":
             add_member(nid(x0, ys[0], level), nid(x1, ys[1], level), group)
             add_member(nid(x0, ys[1], level), nid(x1, ys[0], level), group)
+        elif mode == "x_midpoint_lap":
+            # X físico montável sem atravessar palitos: as duas diagonais são
+            # divididas no cruzamento e coladas em junta central palito-palito.
+            # Isso preserva a função de contraventamento do X no solver, mas a
+            # peça-a-peça deixa de ter duas barras contínuas ocupando o mesmo
+            # volume. O nó central é real: deve ser colado e auditado como junta.
+            xm = 0.5 * (float(x0) + float(x1))
+            ym = 0.5 * (float(ys[0]) + float(ys[1]))
+            c = nid(xm, ym, f"{level}_xlap")
+            add_member(nid(x0, ys[0], level), c, group)
+            add_member(c, nid(x1, ys[1], level), group)
+            add_member(nid(x0, ys[1], level), c, group)
+            add_member(c, nid(x1, ys[0], level), group)
         elif mode in {"warren", "warren_symmetric"}:
             add_member(nid(x0, ys[0], level) if idx % 2 == 0 else nid(x0, ys[1], level), nid(x1, ys[1], level) if idx % 2 == 0 else nid(x1, ys[0], level), group)
         elif mode == "warren_mid_braced":
@@ -163,7 +208,7 @@ class GeometryService:
         else:
             add_member(nid(x0, ys[0], level), nid(x1, ys[1], level), group)
 
-    def _add_cross_frame_bracing(self, mode: str, idx: int, x: float, ys: List[float], nid, add_member) -> None:
+    def _add_cross_frame_bracing(self, mode: str, idx: int, x: float, ys: List[float], nid, add_member, mid_node=None) -> None:
         mode = self._normalize_truss_mode(mode)
 
         if mode == "none":
@@ -172,6 +217,23 @@ class GeometryService:
         if mode == "x":
             add_member(nid(x, ys[0], "bottom"), nid(x, ys[1], "top"), "cross_frame_bracing")
             add_member(nid(x, ys[1], "bottom"), nid(x, ys[0], "top"), "cross_frame_bracing")
+            return
+
+        if mode == "x_midpoint_lap":
+            if mid_node is None:
+                # Fallback conservador se a geometria for chamada por código
+                # legado que ainda não sabe criar nó central.
+                if idx % 2 == 0:
+                    add_member(nid(x, ys[0], "bottom"), nid(x, ys[1], "top"), "cross_frame_bracing")
+                else:
+                    add_member(nid(x, ys[1], "bottom"), nid(x, ys[0], "top"), "cross_frame_bracing")
+                return
+            ym = 0.5 * (float(ys[0]) + float(ys[1]))
+            c = mid_node(float(x), ym, "cross_frame_xlap")
+            add_member(nid(x, ys[0], "bottom"), c, "cross_frame_bracing")
+            add_member(c, nid(x, ys[1], "top"), "cross_frame_bracing")
+            add_member(nid(x, ys[1], "bottom"), c, "cross_frame_bracing")
+            add_member(c, nid(x, ys[0], "top"), "cross_frame_bracing")
             return
 
         if mode in {"warren", "warren_symmetric"}:
@@ -255,7 +317,22 @@ class GeometryService:
         members_raw: List[Tuple[int, int, str]] = []
 
         def nid(x: float, y: float, level: str) -> int:
-            return node_lookup[(float(x), float(y), level)]
+            key = (round(float(x), 6), round(float(y), 6), level)
+            if key not in node_id_by_key:
+                z = 0.0 if str(level).startswith("bottom") else self.top_height(cfg, float(x))
+                node_id = add_node(float(x), float(y), z, level)
+                node_by_id[node_id] = nodes[-1]
+                node_lookup[(float(x), float(y), level)] = node_id
+            return node_id_by_key[key]
+
+        def mid_node(x: float, y: float, level: str) -> int:
+            z = 0.5 * self.top_height(cfg, float(x))
+            key = (round(float(x), 6), round(float(y), 6), level)
+            if key not in node_id_by_key:
+                node_id = add_node(float(x), float(y), z, level)
+                node_by_id[node_id] = nodes[-1]
+                node_lookup[(float(x), float(y), level)] = node_id
+            return node_id_by_key[key]
 
         def add_member(i: int, j: int, group: str) -> None:
             if i == j:
@@ -351,7 +428,7 @@ class GeometryService:
                     bottom_chord_truss_type,
                 )
                 self._add_plane_bracing(
-                    bottom_mode_panel,
+                    self._physical_bracing_mode(cfg, bottom_mode_panel, "bottom_bracing"),
                     idx_panel,
                     x0,
                     x1,
@@ -369,7 +446,7 @@ class GeometryService:
                     top_chord_truss_type,
                 )
                 self._add_plane_bracing(
-                    top_mode_panel,
+                    self._physical_bracing_mode(cfg, top_mode_panel, "top_bracing"),
                     idx_panel,
                     x0,
                     x1,
@@ -383,7 +460,15 @@ class GeometryService:
 
         if cfg["bridge"].get("include_cross_frame_bracing", True):
             for idx_x, x in enumerate(xs):
-                self._add_cross_frame_bracing(internal_type, idx_x, x, ys, nid, add_member)
+                self._add_cross_frame_bracing(
+                    self._physical_bracing_mode(cfg, internal_type, "cross_frame_bracing"),
+                    idx_x,
+                    x,
+                    ys,
+                    nid,
+                    add_member,
+                    mid_node=mid_node,
+                )
 
         if cfg["bridge"].get("include_support_pad_members", True):
             for y in ys:

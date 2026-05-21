@@ -299,7 +299,7 @@ class ConfigService:
         # ---------------------------------------------------------------------
         bridge.setdefault("span_mm", 1200.0)
         bridge.setdefault("panel_mm", 100.0)
-        bridge.setdefault("width_mm", 160.0)
+        bridge.setdefault("width_mm", 100.0)
 
         if bool(analysis.get("enforce_symmetry", True)) and bool(analysis.get("snap_panel_to_even_span_divisor", True)):
             span_val = float(bridge.get("span_mm", 1200.0))
@@ -322,6 +322,16 @@ class ConfigService:
 
         bridge.setdefault("tension_only_bracing_solver_enabled", True)
         bridge.setdefault("tension_only_bracing_interpretation", True)
+        analysis.setdefault("enable_tension_only_solver_globally", True)
+        analysis.setdefault("enable_tension_only_solver_in_funnel", True)
+        analysis.setdefault("tension_only_groups", ["top_bracing", "bottom_bracing", "cross_frame_bracing"])
+        # O plano superior/inferior em X estava custando muita massa e criando
+        # compressões locais artificiais no diagnóstico. Para o alvo 80/20, o
+        # padrão leve usa somente pórticos/contraventamento transversal; os Xs
+        # planos continuam disponíveis por configuração ou mutação do funil.
+        bridge.setdefault("include_top_x_bracing", False)
+        bridge.setdefault("include_bottom_x_bracing", False)
+        bridge.setdefault("include_cross_frame_bracing", True)
 
         bridge["load_total_N"] = float(bridge["load_total_kgf"]) * 9.80665
 
@@ -336,6 +346,7 @@ class ConfigService:
         bridge.setdefault("load_footprint_length_mm", 0.0)
         bridge.setdefault("load_footprint_width_mm", float(bridge["width_mm"]))
         bridge.setdefault("load_footprint_y_center_mm", 0.0)
+        bridge.setdefault("load_spreader_side_equalization", 0.88)
 
         bridge["load_distribution_x_mm"] = self._normalize_load_distribution_x_mm(bridge)
 
@@ -592,6 +603,25 @@ class ConfigService:
         detail.setdefault("min_cut_length_mm", 5.0)
         detail.setdefault("strict_cut_length", True)
         detail.setdefault("max_cut_length_mm", float(mat.get("stick_length_mm", 120.0)))
+        detail.setdefault("min_constructive_piece_length_mm", 40.0)
+        detail.setdefault("joint_face_setback_enabled", True)
+        detail.setdefault("joint_face_clearance_mm", 0.10)
+        detail.setdefault("joint_min_setback_mm", 1.00)
+        detail.setdefault("joint_max_setback_mm", 8.0)
+        detail.setdefault("joint_max_setback_fraction", 0.12)
+        detail.setdefault(
+            "joint_setback_groups",
+            [
+                "diagonal",
+                "vertical",
+                "top_transverse",
+                "bottom_transverse",
+                "top_bracing",
+                "bottom_bracing",
+                "cross_frame_bracing",
+                "chord_lacing",
+            ],
+        )
         detail.setdefault("allow_recommend_removal_if_fs_gt", 8.0)
         detail.setdefault("reinforce_if_fs_lt", 2.0)
         detail.setdefault("tension_only_stabilizers", True)
@@ -613,8 +643,52 @@ class ConfigService:
 
         detail.setdefault("generate_member_templates", True)
         detail.setdefault("generate_piece_views", True)
-        detail.setdefault("max_piece_prism_html_pieces", 80)
+        detail.setdefault("max_piece_prism_html_pieces", 10000)
         detail.setdefault("generate_group_piece_html", False)
+        detail.setdefault("visual_beveled_end_cuts", True)
+        detail.setdefault("show_section_tie_lines_in_piece_view", False)
+        detail.setdefault("miter_cut_min_host_slope_deg", 7.5)
+        detail.setdefault("miter_cut_terminal_groups", ["vertical", "diagonal", "top_transverse", "bottom_transverse"])
+        detail.setdefault("node_lap_visual_side_offset_enabled", True)
+        detail.setdefault("node_lap_visual_side_offset_mm", 14.0)
+        detail.setdefault("node_lap_visual_side_offset_groups", ["vertical", "diagonal"])
+        # Contraventamentos em X podem existir, mas não no mesmo volume. O
+        # padrão físico alterna camadas reais de palito e não cria nó estrutural
+        # fictício no cruzamento.
+        detail.setdefault("x_bracing_crossing_policy", "layered_x_no_interpenetration")
+        _x_policy_default = str(detail.get("x_bracing_crossing_policy", "layered_x_no_interpenetration")).strip().lower()
+        _secondary_x_groups = ["diagonal", "bottom_bracing", "top_bracing", "cross_frame_bracing"]
+        if "x_bracing_no_crossing_groups" not in detail:
+            detail["x_bracing_no_crossing_groups"] = (
+                _secondary_x_groups
+                if _x_policy_default in {
+                    "single_diagonal_no_crossing",
+                    "single_diagonal",
+                    "convert_to_single_diagonal",
+                    "warren_no_crossing",
+                    "split_midpoint_lap_joint",
+                    "split_midpoint",
+                    "midpoint_lap",
+                    "x_midpoint_lap",
+                }
+                else []
+            )
+        detail.setdefault(
+            "x_bracing_layered_groups",
+            _secondary_x_groups,
+        )
+        detail.setdefault("x_bracing_layer_clearance_mm", 0.60)
+
+        if _x_policy_default in {"layered_x_no_interpenetration", "layered_x", "layered"}:
+            # Se o cruzamento é resolvido por camadas, esses membros são
+            # travamentos/contraventamentos: funcionam bem tracionados e não
+            # devem governar ruptura global por flambagem compressiva axial.
+            # Isso mantém funil, CLI e UI na mesma interpretação.
+            bridge["tension_only_bracing_solver_enabled"] = True
+            bridge["tension_only_bracing_interpretation"] = True
+            analysis["enable_tension_only_solver_globally"] = True
+            analysis["enable_tension_only_solver_in_funnel"] = True
+            analysis.setdefault("tension_only_groups", ["top_bracing", "bottom_bracing", "cross_frame_bracing"])
 
         glue_cure = float(detail.get("glue_cure_solids_fraction", 0.50))
 
@@ -778,7 +852,6 @@ class ConfigService:
         analysis.setdefault(
             "tension_only_forbidden_groups",
             [
-                "cross_frame_bracing",
                 "top_transverse",
                 "bottom_transverse",
                 "vertical",
@@ -802,7 +875,6 @@ class ConfigService:
             bridge["tension_only_bracing_interpretation"] = False
         else:
             forbidden_tension_only = {
-                "cross_frame_bracing",
                 "top_transverse",
                 "bottom_transverse",
                 "vertical",
@@ -810,8 +882,6 @@ class ConfigService:
                 "bottom_chord",
                 "support_pad",
                 "diagonal",
-                "top_bracing",
-                "bottom_bracing",
                 "chord_lacing",
             }
 
@@ -865,6 +935,22 @@ class ConfigService:
                 "bottom_bracing": 6,
                 "cross_frame_bracing": 6,
                 "chord_lacing": 4,
+            },
+        )
+        analysis.setdefault(
+            "planner_min_sticks_per_group_by_group",
+            {
+                # Piso construtivo para impedir que a etapa de resgate de massa
+                # deixe o banzo comprimido e os montantes abaixo de uma seção
+                # fisicamente razoável.  O banzo superior governa a flambagem;
+                # diagonais/montantes precisam de área de cola suficiente nos nós.
+                "top_chord": 7,
+                "bottom_chord": 1,
+                "vertical": 4,
+                "diagonal": 2,
+                "support_pad": 3,
+                "top_transverse": 2,
+                "bottom_transverse": 2,
             },
         )
 
@@ -1440,13 +1526,13 @@ class ConfigService:
                 # Guardas de forma: banzos, montantes e diagonais não podem
                 # ser "emagrecidos" até quebrar a continuidade visual/estrutural.
                 # O dimensionamento pode reforçar acima disso, mas não reduzir abaixo.
-                "top_chord": 4,
-                "bottom_chord": 2,
-                "vertical": 2,
+                "top_chord": 7,
+                "bottom_chord": 1,
+                "vertical": 4,
                 "diagonal": 2,
                 "top_transverse": 1,
                 "bottom_transverse": 1,
-                "support_pad": 2,
+                "support_pad": 3,
             },
         )
         local_sizing.setdefault(
@@ -1474,9 +1560,8 @@ class ConfigService:
             "consider_top_profiles",
             [
                 "parker_plateau",
-                "triangular_peak",
-                "shallow_arch",
                 "flat",
+                "triangular_peak",
             ],
         )
         planner.setdefault(
@@ -1600,7 +1685,39 @@ class ConfigService:
                 "Warren_mid_braced",
             ]
 
+        # If continuous X bracing is not physically allowed, keep the planner
+        # from scoring candidates as X while GeometryService later fabricates
+        # them as single alternating diagonals.  The side truss domain is left
+        # untouched because those panels are part of the primary side topology.
+        x_policy = str(detail.get("x_bracing_crossing_policy", "warren_no_crossing")).strip().lower()
+        if x_policy in {
+            "single_diagonal_no_crossing",
+            "single_diagonal",
+            "convert_to_single_diagonal",
+            "warren_no_crossing",
+        }:
+            no_cross_fallback = ["Pratt_symmetric", "Warren_symmetric", "Howe_inverted"]
+
+            def _drop_x_secondary(values: Any) -> List[Any]:
+                clean = [
+                    v
+                    for v in list(values or [])
+                    if str(v).strip().lower() not in {"x", "duplo_x", "double_x"}
+                ]
+                return clean or list(no_cross_fallback)
+
+            planner["consider_internal_trusses"] = _drop_x_secondary(
+                planner.get("consider_internal_trusses")
+            )
+            planner["consider_top_chord_trusses"] = _drop_x_secondary(
+                planner.get("consider_top_chord_trusses")
+            )
+            planner["consider_bottom_chord_trusses"] = _drop_x_secondary(
+                planner.get("consider_bottom_chord_trusses")
+            )
+
         planner.setdefault("prefer_truss_by_material", True)
+
 
         self._validate_normalized(cfg)
         return cfg

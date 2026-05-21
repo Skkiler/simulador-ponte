@@ -90,10 +90,10 @@ KGF_TO_FORCE_UNIT = {"gf": 1000.0, "kgf": 1.0, "tgf": 0.001}
 FORCE_UNIT_TO_KGF = {"gf": 0.001, "kgf": 1.0, "tgf": 1000.0}
 
 TOP_PROFILE_LABEL_TO_CODE = {
-    "pontiagudo/triangular": "triangular_peak",
     "platô": "parker_plateau",
-    "arco": "shallow_arch",
     "reto": "flat",
+    "pontiagudo/triangular": "triangular_peak",
+    "arco": "shallow_arch",
 }
 TOP_PROFILE_CODE_TO_LABEL = {v: k for k, v in TOP_PROFILE_LABEL_TO_CODE.items()}
 
@@ -948,11 +948,11 @@ with aba_simulacao:
         top_profile_labels = list(TOP_PROFILE_LABEL_TO_CODE.keys())
         default_top_profiles = [
             TOP_PROFILE_CODE_TO_LABEL.get(code, "platô")
-            for code in planner_cfg.get("consider_top_profiles", ["triangular_peak", "parker_plateau", "shallow_arch", "flat"])
+            for code in planner_cfg.get("consider_top_profiles", ["parker_plateau", "flat", "triangular_peak"])
             if code in TOP_PROFILE_CODE_TO_LABEL
         ]
         if not default_top_profiles:
-            default_top_profiles = ["pontiagudo/triangular", "platô", "arco", "reto"]
+            default_top_profiles = ["platô", "reto", "pontiagudo/triangular"]
 
         with d2:
             side_trusses = st.multiselect(
@@ -1037,7 +1037,19 @@ with aba_simulacao:
             adaptive_iterations=int(adaptive_iterations),
         )
 
+        # from_planner_inputs preserva compatibilidade antiga convertendo
+        # target_min_fs em uma ruptura-alvo rígida.  Na interface atual, a
+        # ruptura-alvo digitada pelo usuário é o critério duro; o FS mínimo é
+        # mantido como meta de dimensionamento/ranqueamento.  Isso evita a
+        # divergência entre execução via app e run_cli.py.
         cfg["planner"]["target_breaking_load_kgf"] = float(target_breaking_load_kgf)
+        cfg["planner"]["stretch_breaking_load_kgf"] = max(
+            float(target_breaking_load_kgf),
+            float(cfg.get("planner", {}).get("stretch_breaking_load_kgf", target_breaking_load_kgf)),
+        )
+        cfg["planner"]["use_stretch_breaking_load_as_acceptance"] = False
+        cfg["analysis"]["acceptance_min_design_breaking_load_kgf"] = float(target_breaking_load_kgf)
+        cfg["analysis"]["use_target_min_fs_as_hard_acceptance"] = False
         cfg["planner"]["consider_side_trusses"] = side_trusses
         cfg["planner"]["consider_top_profiles"] = top_profiles
         cfg["planner"]["consider_internal_trusses"] = internal_trusses
@@ -1570,14 +1582,8 @@ with aba_simulacao:
         assembly_groups = r.get("detailed", {}).get("assembly_groups", [])
         assembly_summary = r.get("detailed", {}).get("assembly_summary", {})
         assembly_tutorial = r.get("detailed", {}).get("assembly_tutorial", {}) or {}
-        render_mode = st.radio(
-            "Render dos palitos",
-            ["linhas leves", "prismas reais", "prismas exagerados"],
-            horizontal=True,
-            index=0,
-            key="stick_render_mode",
-            help="Linhas leves é o modo mais estável para ver conectividade. Prismas reais usa a seção física; prismas exagerados é apenas didático.",
-        )
+        render_mode = "prismas reais"
+        st.caption("Render fixo: prismas reais opacos com arestas. Modos 'linhas leves' e 'prismas exagerados' foram removidos para evitar interpretação incorreta da montagem.")
 
         tutorial_steps = assembly_tutorial.get("assembly_steps", []) or []
         if tutorial_steps:
@@ -1643,65 +1649,121 @@ with aba_simulacao:
                     asm_df["valor"] = asm_df["valor"].astype(str)
                 st.dataframe(asm_df, width="stretch")
 
-            # Optionally allow the user to filter the piece view by selecting a group
-            group_keys = [g.get("friendly_name") for g in assembly_groups]
-            selected_group_name = None
-            if group_keys:
-                selected_group_name = st.selectbox(
-                    "Visualizar detalhes do grupo",
-                    options=["(todos)"] + group_keys,
-                    index=0,
-                    help="Selecione um grupo de montagem para filtrar as peças."
-                )
-            # Filter pieces by selected group if any
+            # Filtro de visualização por peça real, não apenas por classe aproximada.
+            # O agrupamento por comprimento/orientação continua disponível, mas a opção
+            # principal para auditoria fina é a unidade real de montagem gerada pelo CSV.
             pieces_to_show = pieces_all
-            if selected_group_name and selected_group_name != "(todos)":
-                # find group by friendly name
-                selected_keys = [g for g in assembly_groups if g.get("friendly_name") == selected_group_name]
-                if selected_keys:
-                    gsel = selected_keys[0]
-                    # match pieces that belong to this group by comparing grouping attributes
-                    mg = gsel.get("member_group")
-                    orient = gsel.get("orientation")
-                    length_bin = gsel.get("approx_length_mm")
-                    n_sticks = gsel.get("n_sticks")
-                    filtered = []
-                    for r in pieces_all:
-                        if str(r.get("member_group")) != str(mg):
-                            continue
-                        # orientation
-                        p0 = (
-                            float(r.get("x0_mm", 0.0) or 0.0),
-                            float(r.get("y0_mm", 0.0) or 0.0),
-                            float(r.get("z0_mm", 0.0) or 0.0),
-                        )
-                        p1 = (
-                            float(r.get("x1_mm", 0.0) or 0.0),
-                            float(r.get("y1_mm", 0.0) or 0.0),
-                            float(r.get("z1_mm", 0.0) or 0.0),
-                        )
-                        from src.services.assembly_grouping_service import _orientation_from_endpoints  # type: ignore
-                        ori = _orientation_from_endpoints(p0, p1)
-                        if ori != orient:
-                            continue
-                        # length bin
-                        try:
-                            L = float(r.get("cut_length_mm"))
-                        except (TypeError, ValueError):
-                            L = ((p1[0] - p0[0]) ** 2 + (p1[1] - p0[1]) ** 2 + (p1[2] - p0[2]) ** 2) ** 0.5
-                        length_bin_r = round(L / 10.0) * 10.0
-                        if abs(length_bin_r - length_bin) > 1e-3:
-                            continue
-                        # n_sticks (optional)
-                        if n_sticks is not None:
-                            try:
-                                ns = int(r.get("n_sticks"))
-                            except (TypeError, ValueError):
-                                ns = None
-                            if ns != n_sticks:
+            color_by_mode = "member_group"
+            filter_mode = st.radio(
+                "Tipo de filtro da visualização",
+                ["todos", "grupo estrutural", "subconjunto de montagem", "peça real"],
+                index=0,
+                horizontal=True,
+                help=(
+                    "'peça real' usa assembly_unit_key/stick_id do stick_pieces.csv. "
+                    "Assim o 3D mostra exatamente a unidade física selecionada, e não um grupo aproximado."
+                ),
+            )
+
+            if filter_mode == "grupo estrutural":
+                structural_groups = sorted({str(r.get("member_group", "sem_grupo")) for r in pieces_all})
+                picked_struct_group = st.selectbox(
+                    "Visualizar grupo estrutural",
+                    options=["(todos)"] + structural_groups,
+                    index=0,
+                )
+                if picked_struct_group != "(todos)":
+                    pieces_to_show = [r for r in pieces_all if str(r.get("member_group")) == picked_struct_group]
+                    color_by_mode = "assembly_unit"
+
+            elif filter_mode == "subconjunto de montagem":
+                group_keys = [g.get("friendly_name") for g in assembly_groups]
+                selected_group_name = None
+                if group_keys:
+                    selected_group_name = st.selectbox(
+                        "Visualizar subconjunto aproximado",
+                        options=["(todos)"] + group_keys,
+                        index=0,
+                        help="Agrupa por grupo estrutural, orientação e comprimento arredondado. Use 'peça real' para isolar uma unidade física exata."
+                    )
+                if selected_group_name and selected_group_name != "(todos)":
+                    selected_keys = [g for g in assembly_groups if g.get("friendly_name") == selected_group_name]
+                    if selected_keys:
+                        gsel = selected_keys[0]
+                        mg = gsel.get("member_group")
+                        orient = gsel.get("orientation")
+                        length_bin = gsel.get("approx_length_mm")
+                        n_sticks = gsel.get("n_sticks")
+                        filtered = []
+                        for r in pieces_all:
+                            if str(r.get("member_group")) != str(mg):
                                 continue
-                        filtered.append(r)
-                    pieces_to_show = filtered
+                            p0 = (
+                                float(r.get("x0_mm", 0.0) or 0.0),
+                                float(r.get("y0_mm", 0.0) or 0.0),
+                                float(r.get("z0_mm", 0.0) or 0.0),
+                            )
+                            p1 = (
+                                float(r.get("x1_mm", 0.0) or 0.0),
+                                float(r.get("y1_mm", 0.0) or 0.0),
+                                float(r.get("z1_mm", 0.0) or 0.0),
+                            )
+                            from src.services.assembly_grouping_service import _orientation_from_endpoints  # type: ignore
+                            ori = _orientation_from_endpoints(p0, p1)
+                            if ori != orient:
+                                continue
+                            try:
+                                L = float(r.get("cut_length_mm"))
+                            except (TypeError, ValueError):
+                                L = ((p1[0] - p0[0]) ** 2 + (p1[1] - p0[1]) ** 2 + (p1[2] - p0[2]) ** 2) ** 0.5
+                            length_bin_r = round(L / 10.0) * 10.0
+                            if abs(length_bin_r - length_bin) > 1e-3:
+                                continue
+                            if n_sticks is not None:
+                                try:
+                                    ns = int(r.get("n_sticks"))
+                                except (TypeError, ValueError):
+                                    ns = None
+                                if ns != n_sticks:
+                                    continue
+                            filtered.append(r)
+                        pieces_to_show = filtered
+                        color_by_mode = "assembly_unit"
+
+            elif filter_mode == "peça real":
+                piece_options = []
+                seen_piece_keys = set()
+                for r in pieces_all:
+                    lane = int(safe_float(r.get("lane"), 0) or 0)
+                    pidx = int(safe_float(r.get("piece_index"), 0) or 0)
+                    key = str(r.get("assembly_unit_key") or r.get("stick_id") or f"M{r.get('member_id')}-L{lane:02d}-P{pidx:02d}")
+                    if key in seen_piece_keys:
+                        continue
+                    seen_piece_keys.add(key)
+                    label = (
+                        f"{key} | {r.get('member_group', 'sem_grupo')} | "
+                        f"corte≈{safe_float(r.get('cut_length_mm'), 0.0) or 0.0:.0f} mm"
+                    )
+                    piece_options.append((key, label))
+                piece_options.sort(key=lambda kv: kv[1])
+                if piece_options:
+                    picked_piece_key = st.selectbox(
+                        "Visualizar peça/unidade real",
+                        options=["(todos)"] + [k for k, _ in piece_options],
+                        index=0,
+                        format_func=lambda k: "(todos)" if k == "(todos)" else dict(piece_options).get(k, k),
+                    )
+                    if picked_piece_key != "(todos)":
+                        pieces_to_show = [
+                            r for r in pieces_all
+                            if str(r.get("assembly_unit_key") or r.get("stick_id")) == str(picked_piece_key)
+                        ]
+                        color_by_mode = "assembly_unit"
+
+            st.caption(
+                f"Peças exibidas: {len(pieces_to_show)} de {len(pieces_all)}. "
+                "Cores por grupo estrutural em '(todos)' e por unidade real quando há filtro."
+            )
 
             # Show 3D piece chart (simplified) for selected group or all
             if pieces_to_show:
@@ -1711,6 +1773,7 @@ with aba_simulacao:
                         member_id=None,
                         max_pieces=2000,
                         render_mode=render_mode,
+                        color_by=color_by_mode,
                     ),
                     width="stretch",
                 )

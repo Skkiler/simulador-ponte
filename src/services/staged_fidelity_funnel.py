@@ -273,7 +273,13 @@ class StagedFidelityFunnelPlanner:
         if stage_flags:
             return bool(stage_flags.get(str(stage_name), False))
 
-        return False
+        # Quando o usuário liga explicitamente o modelo tension-only para
+        # travamentos, todas as etapas do funil devem avaliar a mesma física da
+        # validação final. A versão anterior retornava False sem stage_flags e
+        # o otimizador selecionava topologias penalizadas por flambagem
+        # compressiva artificial em top/bottom/cross bracing. Isso derrubava o
+        # kgf previsto e fazia UI/CLI discordarem.
+        return bool(enabled)
 
     @staticmethod
     def _min_positive(values: Iterable[Any], default: float = 0.0) -> float:
@@ -1122,10 +1128,10 @@ class StagedFidelityFunnelPlanner:
             },
             {
                 **base,
-                "macro_name": "bowstring",
-                "global_pattern": "bowstring",
+                "macro_name": "flat_load_table",
+                "global_pattern": "flat_load_table",
                 "side_truss_type": "Pratt_symmetric",
-                "top_profile": "shallow_arch",
+                "top_profile": "flat",
                 "reinforcement_profile": "strong_top",
             },
             {
@@ -2976,11 +2982,11 @@ class StagedFidelityFunnelPlanner:
         )
         below_strength_target = bool(cur_break < target_break)
         trials_raw = settings.get("plane_bracing_efficiency_trials") or [
-            {"top": "X", "bottom": "Warren_symmetric", "cross_frame": True},
-            {"top": "Warren_symmetric", "bottom": "X", "cross_frame": True},
-            {"top": "Pratt_symmetric", "bottom": "X", "cross_frame": True},
+            {"top": "Pratt_symmetric", "bottom": "Warren_symmetric", "cross_frame": True},
+            {"top": "Warren_symmetric", "bottom": "Pratt_symmetric", "cross_frame": True},
             {"top": "Warren_symmetric", "bottom": "Warren_symmetric", "cross_frame": True},
-            {"top": "X", "bottom": "Pratt_symmetric", "cross_frame": True},
+            {"top": "Howe_inverted", "bottom": "Warren_symmetric", "cross_frame": True},
+            {"top": "Pratt_symmetric", "bottom": "Pratt_symmetric", "cross_frame": True},
         ]
 
         best_cfg = cur_cfg
@@ -5097,7 +5103,7 @@ class StagedFidelityFunnelPlanner:
             raw = safe_float(min_by_group.get(group), None)
             if raw is not None:
                 return int(raw)
-            return {"top_chord": 4, "bottom_chord": 2, "vertical": 2, "diagonal": 2, "support_pad": 2}.get(group, 1)
+            return {"top_chord": 7, "bottom_chord": 1, "vertical": 4, "diagonal": 2, "support_pad": 3}.get(group, 1)
 
         ml_cfg = cur_cfg.get("multi_loadcase_screening", {}) or {}
         case_names = [
@@ -5470,7 +5476,7 @@ class StagedFidelityFunnelPlanner:
             raw = safe_float(min_by_group.get(group), None)
             if raw is not None:
                 return int(raw)
-            return {"top_chord": 4, "bottom_chord": 2, "vertical": 2, "diagonal": 2, "support_pad": 2}.get(group, 1)
+            return {"top_chord": 7, "bottom_chord": 1, "vertical": 4, "diagonal": 2, "support_pad": 3}.get(group, 1)
 
         ml_cfg = cur_cfg.get("multi_loadcase_screening", {}) or {}
         case_names = [
@@ -6135,18 +6141,18 @@ class StagedFidelityFunnelPlanner:
                 c_mixed = self.planner.config.normalize(c_mixed)
                 candidates.append(("create_mixed_panel_pattern", c_mixed, {"pattern_len": len(pattern)}))
 
-                # 3) Conversões de contraventamento X para diagonal única e vice-versa.
-                c_single = copy.deepcopy(cur_cfg)
-                c_single.setdefault("bridge", {})["top_chord_truss_type"] = "Pratt_symmetric"
-                c_single.setdefault("bridge", {})["bottom_chord_truss_type"] = "Pratt_symmetric"
-                c_single = self.planner.config.normalize(c_single)
-                candidates.append(("convert_x_bracing_to_single_tension_diagonal", c_single, {}))
-
-                c_double = copy.deepcopy(cur_cfg)
-                c_double.setdefault("bridge", {})["top_chord_truss_type"] = "X"
-                c_double.setdefault("bridge", {})["bottom_chord_truss_type"] = "X"
-                c_double = self.planner.config.normalize(c_double)
-                candidates.append(("convert_single_diagonal_to_x_tension_bracing", c_double, {}))
+                # 3) Conversões de contraventamento para diagonais únicas montáveis.
+                # X físico contínuo só é permitido se houver nó central real; com
+                # warren_no_crossing o funil não deve reinserir X como mutação.
+                for top_mode, bottom_mode, op_name in [
+                    ("Pratt_symmetric", "Warren_symmetric", "convert_to_pratt_warren_lap_bracing"),
+                    ("Warren_symmetric", "Pratt_symmetric", "convert_to_warren_pratt_lap_bracing"),
+                ]:
+                    c_single = copy.deepcopy(cur_cfg)
+                    c_single.setdefault("bridge", {})["top_chord_truss_type"] = top_mode
+                    c_single.setdefault("bridge", {})["bottom_chord_truss_type"] = bottom_mode
+                    c_single = self.planner.config.normalize(c_single)
+                    candidates.append((op_name, c_single, {"top": top_mode, "bottom": bottom_mode}))
 
             if not candidates:
                 break

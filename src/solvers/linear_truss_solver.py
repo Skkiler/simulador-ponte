@@ -105,22 +105,30 @@ class LinearTrussSolver:
             if tension_only_solver_enabled:
                 tension_iterations += 1
                 if status.startswith("singular") and inactive_tension_only:
-                    # Fallback conservative: reactivate one previously released brace.
-                    restored = False
-                    while removed_order:
-                        mid = int(removed_order.pop())
-                        if mid in inactive_tension_only:
-                            inactive_tension_only.remove(mid)
-                            active_member_ids.add(mid)
-                            restored = True
-                            break
-                    if restored:
-                        instability_due_to_tension_only = True
-                        changed = True
-                    else:
-                        tension_converged = False
-                    if not changed:
-                        break
+                    # Se a liberação unilateral dos contraventamentos cria um
+                    # mecanismo, restaurar peça por peça pode oscilar por muitas
+                    # iterações e travar a UI. Para ponte de palitos, esse caso
+                    # significa que o conjunto X/contraventamento é necessário
+                    # como estabilizador geométrico; então restauramos o conjunto
+                    # liberado, registramos a instabilidade e resolvemos uma vez
+                    # com a geometria estável. A resistência primária continua
+                    # governada pelos membros principais, não por esses braces.
+                    for mid in list(inactive_tension_only):
+                        active_member_ids.add(int(mid))
+                    inactive_tension_only.clear()
+                    removed_order.clear()
+                    instability_due_to_tension_only = True
+                    tension_converged = False
+                    result = self._solve_once(
+                        nodes,
+                        members,
+                        supports,
+                        loads,
+                        active_vertical,
+                        active_member_ids,
+                    )
+                    node_res, member_res, status = result
+                    break
 
                 compressed_tension_only: List[tuple[int, float]] = []
                 for r in member_res:
@@ -255,12 +263,16 @@ class LinearTrussSolver:
         free_dofs = np.array([i for i in all_dofs if i not in fixed_dofs], dtype=int)
         Kff = K[np.ix_(free_dofs, free_dofs)]
         Ff = F[free_dofs]
-        rank = np.linalg.matrix_rank(Kff)
         U = np.zeros(n_dof, dtype=float)
-        if rank == Kff.shape[0]:
+        try:
+            # O caminho comum deve ser resolver diretamente. np.linalg.matrix_rank
+            # faz SVD completo em toda iteração de apoio unilateral/tension-only e
+            # dominava o tempo da UI, sem melhorar o resultado quando a matriz já
+            # é regular. Mantemos o diagnóstico de posto apenas no fallback.
             U[free_dofs] = np.linalg.solve(Kff, Ff)
             status = "regular"
-        else:
+        except np.linalg.LinAlgError:
+            rank = np.linalg.matrix_rank(Kff)
             U[free_dofs] = np.linalg.lstsq(Kff, Ff, rcond=None)[0]
             status = f"singular_lstsq_rank_{rank}_of_{Kff.shape[0]}"
         R = K @ U - F
