@@ -468,3 +468,86 @@ def test_mass_compliant_fallback_understands_s8_proxy_field_names() -> None:
     assert selected["mass_g"] == 975.0
     assert selected["predicted_breaking_load_kgf"] == 94.0
     assert selected["min_fs_primary"] == 1.34
+
+
+def test_simple_macro_generation_respects_flat_domain(base_cfg: dict, tmp_path, monkeypatch) -> None:
+    cfg = copy.deepcopy(base_cfg)
+    cfg["bridge"]["top_profile"] = "parker_plateau"
+    cfg["bridge"]["center_height_mm"] = 280.0
+    cfg["bridge"]["end_height_mm"] = 120.0
+    cfg["planner"]["consider_top_profiles"] = ["flat"]
+    cfg["planner"]["design_mode"] = "simple_buildable_bridge"
+    cfg["analysis"]["staged_fidelity_funnel_enabled"] = True
+    cfg["planner_pipeline"]["mode"] = "staged_fidelity_funnel"
+    cfg["planner_pipeline"]["macro_candidates_count"] = 8
+
+    _install_fast_funnel_mocks(monkeypatch)
+    planner = ActiveDesignPlanner()
+    result = planner.run(cfg, tmp_path / "optimization")
+
+    assert result["s1_macro"]
+    for row in result["s1_macro"]:
+        row_cfg = (row.get("config") or {}).get("bridge", {}) if isinstance(row.get("config"), dict) else {}
+        top = row.get("top_profile", row_cfg.get("top_profile"))
+        end_h = row.get("end_height_mm", row_cfg.get("end_height_mm"))
+        center_h = row.get("center_height_mm", row_cfg.get("center_height_mm"))
+        assert str(top) == "flat"
+        if end_h is not None and center_h is not None:
+            assert float(end_h) == float(center_h)
+
+    best_cfg = (result.get("best") or {}).get("config") or {}
+    bridge = best_cfg.get("bridge", {}) or {}
+    assert bridge.get("top_profile") == "flat"
+    assert float(bridge.get("end_height_mm")) == float(bridge.get("center_height_mm"))
+
+
+def test_self_weight_cannot_govern_strength_case(base_cfg: dict) -> None:
+    cfg = copy.deepcopy(base_cfg)
+    cfg["planner_pipeline"]["mode"] = "staged_fidelity_funnel"
+    cfg["analysis"]["staged_fidelity_funnel_enabled"] = True
+    cfg.setdefault("multi_loadcase_screening", {})["strength_governing_cases"] = ["center", "torsion_60_40"]
+    cfg.setdefault("multi_loadcase_screening", {})["service_cases"] = ["self_weight"]
+    planner = ActiveDesignPlanner()
+    funnel = StagedFidelityFunnelPlanner(planner)
+
+    cases = {
+        "center": 90.0,
+        "torsion_60_40": 84.0,
+        "self_weight": 10.0,
+    }
+
+    def _mock_eval(self, _cfg, load_case_name, *, stage_name, tension_only):  # type: ignore[no-redef]
+        pred = float(cases.get(str(load_case_name), 95.0))
+        return {
+            "case": str(load_case_name),
+            "solver_status": "regular",
+            "solver_regular": True,
+            "equilibrium_error_N": 0.0,
+            "equilibrium_ok": True,
+            "min_fs_primary": 1.2,
+            "min_fs_design": 1.2,
+            "predicted_breaking_load_proxy_kgf": pred,
+            "max_displacement_proxy_mm": 2.0,
+            "support_reaction_balance": 1.0,
+            "load_path_score": 1.0,
+            "topology_stability_proxy": 1.0,
+            "nodal_stability_proxy": 1.0,
+            "buckling_risk_proxy": 0.1,
+            "mass_proxy_g": 850.0,
+            "member_results": [{"member_id": 1, "N_N": 10.0}],
+            "near_zero_member_ids": [],
+            "member_checks": [],
+            "support_checks": [],
+            "node_results": [],
+        }
+
+    funnel._evaluate_case_cached = _mock_eval.__get__(funnel, StagedFidelityFunnelPlanner)  # type: ignore[assignment]
+    summary = funnel._multi_case_summary(
+        cfg,
+        ["center", "torsion_60_40", "self_weight"],
+        stage_name="S3",
+        tension_only=False,
+    )
+
+    assert summary.get("governing_strength_case") in {"center", "torsion_60_40"}
+    assert summary.get("governing_strength_case") != "self_weight"

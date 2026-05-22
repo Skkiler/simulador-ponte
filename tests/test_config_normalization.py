@@ -90,3 +90,28 @@ def test_safe_default_detailing_avoids_unverified_miter_and_visual_offsets(base_
     assert normalized["detail_model"]["angled_end_cuts_enabled"] is False
     assert normalized["detail_model"]["visual_beveled_end_cuts"] is False
     assert normalized["detail_model"]["piece_view_mounted_connection_offset_scale"] == 0.0
+
+
+def test_nonflat_profile_normalization_creates_real_height_difference(base_cfg: dict) -> None:
+    cfg = base_cfg
+    cfg["planner"]["consider_top_profiles"] = ["parker_plateau"]
+    cfg["bridge"]["top_profile"] = "flat"
+    cfg["bridge"]["center_height_mm"] = 300.0
+    cfg["bridge"]["end_height_mm"] = 300.0
+
+    normalized = ConfigService().normalize(cfg)
+
+    assert normalized["bridge"]["top_profile"] == "parker_plateau"
+    assert normalized["bridge"]["end_height_mm"] < normalized["bridge"]["center_height_mm"]
+    assert normalized["bridge"]["end_height_mm"] == 105.0
+
+
+def test_simple_buildable_mode_defaults_to_butt_splints_not_same_axis_overlap(base_cfg: dict) -> None:
+    cfg = base_cfg
+    cfg["planner"]["design_mode"] = "simple_buildable_bridge"
+    cfg["detail_model"].pop("splice_mode", None)
+
+    normalized = ConfigService().normalize(cfg)
+
+    assert normalized["detail_model"]["splice_mode"] == "butt_with_splints"
+    assert normalized["detail_model"]["angled_end_cuts_enabled"] is False

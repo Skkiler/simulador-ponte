@@ -104,7 +104,10 @@ class SpliceStaggeringService:
 
     def validate_splice_alignment(self, full_glue_joints: List[Dict], cfg: Dict) -> Dict:
         d = self._detail(cfg)
-        tol = float(d.get("splice_alignment_tolerance_mm", 10.0))
+        tol = max(
+            float(d.get("splice_alignment_tolerance_mm", 10.0)),
+            float(d.get("splice_min_aligned_distance_mm", 30.0)),
+        )
         clusters = self.detect_aligned_splice_clusters(full_glue_joints, tol)
         critical = [c for c in clusters if int(c.get("count", 0)) >= 4]
         return {
@@ -118,7 +121,10 @@ class SpliceStaggeringService:
     def reduce_aligned_splices(self, full_glue_joints: List[Dict], cfg: Dict) -> List[Dict]:
         # Conservative post-process: annotate risk by detected clusters.
         d = self._detail(cfg)
-        tol = float(d.get("splice_alignment_tolerance_mm", 10.0))
+        tol = max(
+            float(d.get("splice_alignment_tolerance_mm", 10.0)),
+            float(d.get("splice_min_aligned_distance_mm", 30.0)),
+        )
         clusters = self.detect_aligned_splice_clusters(full_glue_joints, tol)
         if not clusters:
             for row in full_glue_joints or []:

@@ -93,7 +93,7 @@ TOP_PROFILE_LABEL_TO_CODE = {
     "platô": "parker_plateau",
     "reto": "flat",
     "pontiagudo/triangular": "triangular_peak",
-    "arco": "shallow_arch",
+    "arco": "shallow_arch_faceted",
 }
 TOP_PROFILE_CODE_TO_LABEL = {v: k for k, v in TOP_PROFILE_LABEL_TO_CODE.items()}
 
@@ -434,6 +434,8 @@ def _prepare_table(data: Any) -> pd.DataFrame:
 
 def _translate_top_profile(code: Any) -> str:
     raw = str(code or "").strip().lower()
+    if raw == "shallow_arch":
+        raw = "shallow_arch_faceted"
     return TOP_PROFILE_CODE_TO_LABEL.get(raw, str(code or "—"))
 
 
@@ -1073,6 +1075,7 @@ with aba_simulacao:
         cfg["detail_model"]["generate_piece_views"] = bool(generate_piece_views)
         cfg["detail_model"]["tension_joint_model"] = str(tension_joint_model)
         cfg["detail_model"]["compression_joint_model"] = str(compression_joint_model)
+        cfg = cs.normalize(cfg)
 
         progress = st.progress(0, text="Inicializando análise...")
         log_box = st.empty()
@@ -1118,7 +1121,7 @@ with aba_simulacao:
 
     cols = st.columns(8)
     cols[0].metric("Modelo", model_label)
-    cols[1].metric("FS principal", _format_float(metrics.get("min_fs_primary"), 2))
+    cols[1].metric("FS membros", _format_float(metrics.get("min_fs_member_design", metrics.get("min_fs_design")), 2))
     cols[2].metric("Ruptura estimada", _format_force_kgf(metrics.get("predicted_breaking_load_kgf"), force_unit, 1))
     cols[3].metric("Massa estimada", f"{_format_float(dsum.get('estimated_total_mass_g'), 0, '0')} g")
     cols[4].metric("Limite efetivo", f"{_format_float(mass_limits.get('effective_limit_g'), 0, '0')} g")
@@ -1131,6 +1134,15 @@ with aba_simulacao:
         f"nominal={_format_float(mass_limits.get('nominal_limit_g'), 1)} g | "
         f"efetivo={_format_float(mass_limits.get('effective_limit_g'), 1)} g "
         f"({mass_limits.get('effective_source', '—')})."
+    )
+    gov_state = str(metrics.get("governing_limit_state", "—") or "—")
+    gov_fs = metrics.get("governing_fs")
+    st.caption(
+        "Ruptura governante: "
+        f"{gov_state} | FS governante={_format_float(gov_fs, 3, '—')} | "
+        f"membros={_format_force_kgf(metrics.get('predicted_breaking_load_by_members_kgf'), force_unit, 1)} | "
+        f"apoios={_format_force_kgf(metrics.get('predicted_breaking_load_by_supports_kgf'), force_unit, 1)} | "
+        f"cola={_format_force_kgf(metrics.get('predicted_breaking_load_by_glue_kgf'), force_unit, 1)}."
     )
 
     st.caption(
@@ -1850,14 +1862,19 @@ with aba_simulacao:
 
         st.subheader("Memorial de cálculo (síntese)")
         carga_projeto = float(r.get("cfg", {}).get("bridge", {}).get("load_total_kgf", 0.0))
-        fs_min = float(metrics.get("min_fs_primary", 0.0) or 0.0)
-        ruptura_prevista = float(metrics.get("predicted_breaking_load_kgf", carga_projeto * fs_min) or 0.0)
+        ruptura_prevista = float(metrics.get("predicted_breaking_load_kgf", 0.0) or 0.0)
+        fs_member = metrics.get("min_fs_member_design", metrics.get("min_fs_design"))
+        fs_support = metrics.get("min_fs_support", metrics.get("min_support_fs"))
+        fs_glue = metrics.get("min_fs_glue", metrics.get("min_glue_fs"))
+        gov_ls = str(metrics.get("governing_limit_state", "—") or "—")
         st.markdown(
             f"""
 - Carga de projeto adotada: **{_format_force_kgf(carga_projeto, force_unit, 2)}**.
-- FS mínimo principal obtido: **{_format_float(fs_min, 3)}**.
-- Estimativa de carga de colapso/ruptura: **{_format_force_kgf(ruptura_prevista, force_unit, 2)}**.
-- Relação usada no resumo: `carga_ruptura ≈ carga_projeto × FS_min_principal`.
+- FS membro (design): **{_format_float(fs_member, 3)}**.
+- FS apoio: **{_format_float(fs_support, 3)}**.
+- FS cola: **{_format_float(fs_glue, 3)}**.
+- Estado limite governante: **{gov_ls}**.
+- Estimativa de carga de ruptura de projeto: **{_format_force_kgf(ruptura_prevista, force_unit, 2)}**.
 """
         )
 

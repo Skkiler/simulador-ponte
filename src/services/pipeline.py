@@ -830,6 +830,7 @@ class SimulationPipeline:
                     "target_breaking_load_kgf": cfg.get("analysis", {}).get("acceptance_min_design_breaking_load_kgf", 120.0),
                     "competition_mass_g": best_opt.get("mass_g"),
                     "min_fs_design": best_opt.get("min_fs_primary"),
+                    "validation_stage": "pre_detail",
                     "solver_regular": self._solver_is_regular(str(best_opt.get("solver_status", "regular"))),
                     "equilibrium_ok": abs(safe_float(best_opt.get("equilibrium_error_N"), 0.0) or 0.0) <= 1.0e-6,
                     "source": "pipeline_best_mass_compliant_fallback",
@@ -861,12 +862,25 @@ class SimulationPipeline:
                     "verdict": s8.get("verdict"),
                     "failed_restriction": s8.get("failed_restriction"),
                     "predicted_breaking_load_kgf": s8.get("predicted_breaking_load_kgf"),
+                    "predicted_breaking_load_proxy_kgf": s8.get("predicted_breaking_load_proxy_kgf"),
+                    "predicted_breaking_load_by_members_kgf": s8.get("predicted_breaking_load_by_members_kgf"),
+                    "predicted_breaking_load_by_supports_kgf": s8.get("predicted_breaking_load_by_supports_kgf"),
+                    "predicted_breaking_load_by_glue_kgf": s8.get("predicted_breaking_load_by_glue_kgf"),
                     "target_breaking_load_kgf": s8.get("target_breaking_load_kgf"),
                     "competition_mass_g": s8.get("competition_mass_g"),
                     "min_fs_design": s8.get("min_fs_design"),
+                    "min_fs_member_design": s8.get("min_fs_member_design", s8.get("min_fs_design")),
+                    "min_fs_support": s8.get("min_fs_support"),
+                    "min_fs_glue": s8.get("min_fs_glue"),
                     "solver_regular": s8.get("solver_regular"),
                     "equilibrium_ok": s8.get("equilibrium_ok"),
+                    "validation_stage": s8.get("validation_stage", "pre_detail"),
+                    "governing_limit_state": s8.get("governing_limit_state"),
+                    "governing_fs": s8.get("governing_fs"),
                     "governing_case": s8.get("governing_case"),
+                    "governing_strength_case": s8.get("governing_strength_case", s8.get("governing_case")),
+                    "governing_service_case": s8.get("governing_service_case"),
+                    "governing_contact_case": s8.get("governing_contact_case"),
                     "governing_member_id": s8.get("governing_member_id"),
                     "governing_member_group": s8.get("governing_member_group"),
                     "case_metrics": s8.get("case_metrics") or [],
@@ -1550,6 +1564,25 @@ class SimulationPipeline:
                         color_by=color_by,
                         connection_offset_scale=mounted_scale,
                     )
+                    as_built_audit = {
+                        "mode": "as_built" if abs(float(mounted_scale)) < 1.0e-9 else "mounted_with_offset",
+                        "connection_offset_scale": float(mounted_scale),
+                        "interpenetration_count": int(prism_batches.get("as_built_interpenetration_count", 0) or 0),
+                        "node_connection_gap_piece_count": int(prism_batches.get("as_built_gap_piece_count", 0) or 0),
+                        "interpenetration_samples": list(prism_batches.get("as_built_interpenetration_samples") or []),
+                    }
+                    detailed["as_built_audit"] = as_built_audit
+                    try:
+                        (detail_dir / "as_built_geometry_audit.json").write_text(
+                            json.dumps(as_built_audit, indent=2, ensure_ascii=False),
+                            encoding="utf-8",
+                        )
+                        GeometryService.write_csv(
+                            detail_dir / "as_built_interpenetrations.csv",
+                            as_built_audit.get("interpenetration_samples") or [],
+                        )
+                    except (OSError, TypeError, ValueError):
+                        pass
                     emit_progress(0.886, "Renderizando HTML 3D peça-a-peça em posição de encaixe")
                     fig_prisms = self.viz.plotly_stick_pieces(
                         pieces,
@@ -1623,6 +1656,8 @@ class SimulationPipeline:
                         "orthographic_overview_png": str(plot_dir / "16_vistas_cad_peca_a_peca.png"),
                         "piece_html_sampled_count": min(len(pieces), max_piece_html),
                         "piece_html_total_count": len(pieces),
+                        "as_built_interpenetration_count": as_built_audit.get("interpenetration_count"),
+                        "as_built_gap_piece_count": as_built_audit.get("node_connection_gap_piece_count"),
                     }
             except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
                 emit_warning(
@@ -1723,11 +1758,25 @@ class SimulationPipeline:
             "estimated_total_mass_g": detailed_summary.get("estimated_total_mass_g"),
             "mass_margin_g": detailed_summary.get("mass_margin_g"),
             "estimated_glue_mass_g": detailed_summary.get("estimated_glue_mass_g"),
-            "min_glue_fs": min_glue_fs,
+            "min_glue_fs": safe_float(rupture.get("min_fs_glue"), min_glue_fs),
+            "min_fs_glue": safe_float(rupture.get("min_fs_glue"), min_glue_fs),
+            "min_support_fs": safe_float(rupture.get("min_fs_support"), None),
+            "min_fs_support": safe_float(rupture.get("min_fs_support"), None),
+            "min_fs_member_design": safe_float(rupture.get("min_fs_member_design"), min(fs_design) if fs_design else None),
             "predicted_breaking_load_kgf": predicted_breaking_load_kgf,
             "predicted_breaking_load_primary_kgf": rupture.get("predicted_breaking_load_primary_kgf"),
             "predicted_breaking_load_all_kgf": rupture.get("predicted_breaking_load_all_kgf"),
             "predicted_breaking_load_design_kgf": rupture.get("predicted_breaking_load_design_kgf"),
+            "predicted_breaking_load_by_members_kgf": rupture.get("predicted_breaking_load_by_members_kgf"),
+            "predicted_breaking_load_by_supports_kgf": rupture.get("predicted_breaking_load_by_supports_kgf"),
+            "predicted_breaking_load_by_glue_kgf": rupture.get("predicted_breaking_load_by_glue_kgf"),
+            "governing_limit_state": rupture.get("governing_limit_state"),
+            "governing_fs": rupture.get("governing_fs"),
+            "governing_mode": rupture.get("governing_mode"),
+            "governing_member_id": rupture.get("governing_member_id"),
+            "governing_group": rupture.get("governing_group"),
+            "governing_joint_id": rupture.get("governing_joint_id"),
+            "governing_support_node_id": rupture.get("governing_support_node_id"),
             "rupture_details": rupture,
             "mass_limit_nominal_g": detailed_summary.get("mass_limit_nominal_g"),
             "mass_limit_material_g": detailed_summary.get("mass_limit_material_g"),
@@ -1739,6 +1788,8 @@ class SimulationPipeline:
             "quarter_model_fallback_reason": quarter_summary.get("fallback_reason"),
             "mass_limit_g": detailed_summary.get("mass_limit_effective_g"),
             "n_weak_glue_joints": detailed_summary.get("n_weak_glue_joints"),
+            "as_built_interpenetration_count": int((detailed.get("as_built_audit", {}) or {}).get("interpenetration_count", 0) or 0),
+            "as_built_gap_piece_count": int((detailed.get("as_built_audit", {}) or {}).get("node_connection_gap_piece_count", 0) or 0),
         }
         assert_mass_compliant(metrics, cfg, source="pipeline_final")
         metrics["metric_strength_to_weight"] = (
@@ -1782,8 +1833,11 @@ class SimulationPipeline:
                 use_target_hard = bool(cfg.get("analysis", {}).get("use_target_min_fs_as_hard_acceptance", False))
                 target_min_fs = float(cfg.get("analysis", {}).get("target_min_fs", 2.0))
                 solver_regular = self._solver_is_regular(metrics.get("solver_status", ""))
+                as_built_intersections = int(metrics.get("as_built_interpenetration_count", 0) or 0)
+                as_built_required = bool(cfg.get("detail_model", {}).get("as_built_interpenetration_is_failure", True))
                 structural_passed = bool(
                     solver_regular
+                    and (not as_built_required or as_built_intersections == 0)
                     and (min_fs_primary_val is not None and min_fs_primary_val >= acceptance_min_primary)
                     and (min_support_val is None or min_support_val >= acceptance_min_support)
                     and (min_glue_val is None or min_glue_val >= acceptance_min_glue)
@@ -1814,6 +1868,13 @@ class SimulationPipeline:
                             emit_warning(
                                 "WARN_STRUCTURAL_REJECTED_FINAL",
                                 "Resultado final foi rejeitado: solver estrutural não regular.",
+                                stage="pipeline",
+                            )
+                        elif as_built_required and as_built_intersections > 0:
+                            metrics["solution_block_reason"] = "as_built_interpenetration"
+                            emit_warning(
+                                "WARN_STRUCTURAL_REJECTED_FINAL",
+                                f"Resultado final foi rejeitado: {as_built_intersections} interpenetrações na geometria as-built.",
                                 stage="pipeline",
                             )
                         elif min_fs_primary_val is None or min_fs_primary_val < acceptance_min_primary:
@@ -1900,6 +1961,133 @@ class SimulationPipeline:
             self.output_root / "final_report",
         )
 
+        # Sincroniza a validação final de otimização com a mesma base pós-detalhe
+        # usada no relatório final (incluindo cola). Isso elimina divergência
+        # entre S8 e relatório quando a governança muda após stick_pieces/glue_joints.
+        try:
+            opt_dir = self.output_root / "optimization"
+            opt_dir.mkdir(parents=True, exist_ok=True)
+            fv_path = opt_dir / "final_validation_summary.json"
+            prior_fv: Dict[str, Any] = {}
+            if fv_path.exists():
+                try:
+                    prior_fv = json.loads(fv_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError, TypeError):
+                    prior_fv = {}
+            s8_rows = list((optimization or {}).get("s8_final_validation", []) or [])
+            s8_ref = dict(s8_rows[0]) if s8_rows else {}
+            target_break_sync = float(cfg.get("analysis", {}).get("acceptance_min_design_breaking_load_kgf", 100.0))
+            torsion_80_20_target_sync = float(cfg.get("analysis", {}).get("acceptance_min_torsion_80_20_kgf", 80.0))
+            mass_limit_sync = float(effective_mass_limit_g(cfg))
+            final_break_sync = safe_float(metrics.get("predicted_breaking_load_kgf"), None)
+            final_mass_sync = safe_float(
+                detailed_summary.get("competition_mass_g"),
+                safe_float(detailed_summary.get("estimated_total_mass_g"), None),
+            )
+            min_fs_member_sync = safe_float(
+                metrics.get("min_fs_member_design"),
+                safe_float(metrics.get("min_fs_design"), None),
+            )
+            min_fs_support_sync = safe_float(
+                metrics.get("min_fs_support"),
+                safe_float(metrics.get("min_support_fs"), None),
+            )
+            min_fs_glue_sync = safe_float(
+                metrics.get("min_fs_glue"),
+                safe_float(metrics.get("min_glue_fs"), None),
+            )
+            accept_min_primary_sync = float(cfg.get("analysis", {}).get("acceptance_min_primary_fs", 1.05))
+            accept_min_glue_sync = float(cfg.get("analysis", {}).get("acceptance_min_glue_fs", 1.50))
+            verdict_sync = "APROVADA"
+            failed_sync = ""
+            if not self._solver_is_regular(metrics.get("solver_status", "")):
+                verdict_sync = "REPROVADA"
+                failed_sync = "solver_irregular"
+            elif not bool(metrics.get("equilibrium_ok", True)):
+                verdict_sync = "REPROVADA"
+                failed_sync = "equilibrium"
+            elif final_mass_sync is not None and final_mass_sync > mass_limit_sync + 1.0e-6:
+                verdict_sync = "REPROVADA"
+                failed_sync = f"mass_above_limit:{final_mass_sync:.2f}>{mass_limit_sync:.2f}"
+            elif bool(cfg.get("detail_model", {}).get("as_built_interpenetration_is_failure", True)) and int(metrics.get("as_built_interpenetration_count", 0) or 0) > 0:
+                verdict_sync = "REPROVADA"
+                failed_sync = f"as_built_interpenetration:{int(metrics.get('as_built_interpenetration_count', 0) or 0)}"
+            elif final_break_sync is not None and final_break_sync < target_break_sync:
+                verdict_sync = "REPROVADA"
+                failed_sync = f"nominal_rupture_below_target:{final_break_sync:.2f}<{target_break_sync:.2f}"
+            elif (
+                str(s8_ref.get("governing_strength_case", "")) == "torsion_80_20"
+                and safe_float(s8_ref.get("governing_strength_case_breaking_load_kgf"), None) is not None
+                and float(s8_ref.get("governing_strength_case_breaking_load_kgf")) < torsion_80_20_target_sync
+            ):
+                verdict_sync = "REPROVADA"
+                failed_sync = f"torsion_80_20_below_target:{float(s8_ref.get('governing_strength_case_breaking_load_kgf')):.2f}<{torsion_80_20_target_sync:.2f}"
+            elif min_fs_member_sync is not None and min_fs_member_sync < accept_min_primary_sync:
+                verdict_sync = "REPROVADA"
+                failed_sync = f"fs_member_below_acceptance:{min_fs_member_sync:.3f}<{accept_min_primary_sync:.3f}"
+            elif min_fs_glue_sync is not None and min_fs_glue_sync < accept_min_glue_sync:
+                verdict_sync = "REPROVADA"
+                failed_sync = f"fs_glue_below_acceptance:{min_fs_glue_sync:.3f}<{accept_min_glue_sync:.3f}"
+
+            final_validation_sync = {
+                "verdict": verdict_sync,
+                "failed_restriction": failed_sync,
+                "validation_stage": "post_detail",
+                "predicted_breaking_load_kgf": final_break_sync,
+                "predicted_breaking_load_proxy_kgf": s8_ref.get("predicted_breaking_load_proxy_kgf", prior_fv.get("predicted_breaking_load_proxy_kgf")),
+                "predicted_breaking_load_by_members_kgf": metrics.get("predicted_breaking_load_by_members_kgf"),
+                "predicted_breaking_load_by_supports_kgf": metrics.get("predicted_breaking_load_by_supports_kgf"),
+                "predicted_breaking_load_by_glue_kgf": metrics.get("predicted_breaking_load_by_glue_kgf"),
+                "target_breaking_load_kgf": target_break_sync,
+                "nominal_required_breaking_load_kgf": target_break_sync,
+                "torsion_80_20_required_breaking_load_kgf": torsion_80_20_target_sync,
+                "competition_mass_g": final_mass_sync,
+                "min_fs_design": min_fs_member_sync,
+                "min_fs_member_design": min_fs_member_sync,
+                "min_fs_support": min_fs_support_sync,
+                "min_fs_glue": min_fs_glue_sync,
+                "governing_limit_state": metrics.get("governing_limit_state"),
+                "governing_fs": metrics.get("governing_fs"),
+                "solver_regular": self._solver_is_regular(metrics.get("solver_status", "")),
+                "equilibrium_ok": bool(metrics.get("equilibrium_ok", True)),
+                "hits_target_80kgf": bool((final_break_sync or 0.0) >= 80.0),
+                "hits_nominal_100kgf": bool((final_break_sync or 0.0) >= target_break_sync),
+                "governing_case": s8_ref.get("governing_case", prior_fv.get("governing_case")),
+                "governing_strength_case": s8_ref.get("governing_strength_case", prior_fv.get("governing_strength_case")),
+                "governing_service_case": s8_ref.get("governing_service_case", prior_fv.get("governing_service_case")),
+                "governing_contact_case": s8_ref.get("governing_contact_case", prior_fv.get("governing_contact_case")),
+                "governing_case_breaking_load_kgf": s8_ref.get("governing_case_breaking_load_kgf", prior_fv.get("governing_case_breaking_load_kgf")),
+                "governing_strength_case_breaking_load_kgf": s8_ref.get(
+                    "governing_strength_case_breaking_load_kgf",
+                    prior_fv.get("governing_strength_case_breaking_load_kgf"),
+                ),
+                "governing_service_case_breaking_load_kgf": s8_ref.get(
+                    "governing_service_case_breaking_load_kgf",
+                    prior_fv.get("governing_service_case_breaking_load_kgf"),
+                ),
+                "governing_contact_case_breaking_load_kgf": s8_ref.get(
+                    "governing_contact_case_breaking_load_kgf",
+                    prior_fv.get("governing_contact_case_breaking_load_kgf"),
+                ),
+                "governing_member_id": s8_ref.get("governing_member_id", prior_fv.get("governing_member_id")),
+                "governing_member_group": s8_ref.get("governing_member_group", prior_fv.get("governing_member_group")),
+                "governing_mode": s8_ref.get("governing_mode", prior_fv.get("governing_mode")),
+                "as_built_interpenetration_count": int(metrics.get("as_built_interpenetration_count", 0) or 0),
+                "as_built_gap_piece_count": int(metrics.get("as_built_gap_piece_count", 0) or 0),
+                "case_metrics": s8_ref.get("case_metrics", prior_fv.get("case_metrics", [])),
+                "source": "pipeline_post_detail_sync",
+            }
+            fv_path.write_text(
+                json.dumps(final_validation_sync, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            emit_warning(
+                "WARN_FINAL_VALIDATION_POST_DETAIL_SYNC_FAILED",
+                f"Falha ao sincronizar validação final pós-detalhe: {exc!r}",
+                stage="pipeline",
+            )
+
         edital_checks = self._evaluate_edital_criteria(cfg, metrics, detailed)
         (report_dir / "criterios_edital.json").write_text(
             json.dumps(edital_checks, indent=2, ensure_ascii=False),
@@ -1932,15 +2120,31 @@ class SimulationPipeline:
         break_delta = None if (final_break is None or opt_break is None) else final_break - opt_break
         integrity_status = "OK"
         integrity_reasons: List[str] = []
+        opt_validation_stage = str(opt_final.get("validation_stage", "") or "").strip().lower()
+        opt_is_pre_detail = opt_validation_stage.startswith("pre_detail")
         if not opt_fv_path.exists():
             integrity_status = "WARN"
             integrity_reasons.append("optimization/final_validation_summary.json ausente no run atual")
         if mass_delta is not None and abs(mass_delta) > 2.0:
-            integrity_status = "MISMATCH"
-            integrity_reasons.append(f"massa final difere da validação S8 em {mass_delta:+.2f} g")
+            if opt_is_pre_detail:
+                if integrity_status == "OK":
+                    integrity_status = "WARN"
+                integrity_reasons.append(
+                    f"massa final difere da validação pré-detalhamento em {mass_delta:+.2f} g"
+                )
+            else:
+                integrity_status = "MISMATCH"
+                integrity_reasons.append(f"massa final difere da validação S8 em {mass_delta:+.2f} g")
         if break_delta is not None and abs(break_delta) > 2.0:
-            integrity_status = "MISMATCH"
-            integrity_reasons.append(f"ruptura final difere da validação S8 em {break_delta:+.2f} kgf")
+            if opt_is_pre_detail:
+                if integrity_status == "OK":
+                    integrity_status = "WARN"
+                integrity_reasons.append(
+                    f"ruptura final difere da validação pré-detalhamento em {break_delta:+.2f} kgf"
+                )
+            else:
+                integrity_status = "MISMATCH"
+                integrity_reasons.append(f"ruptura final difere da validação S8 em {break_delta:+.2f} kgf")
         if final_mass is not None and final_mass > effective_mass_limit_g(cfg) + 1.0e-6:
             integrity_reasons.append("relatório final acima do limite de massa")
         integrity = {
@@ -1953,6 +2157,7 @@ class SimulationPipeline:
                 "mass_limit_g": effective_mass_limit_g(cfg),
             },
             "optimization_final_validation": opt_final,
+            "optimization_validation_stage": opt_validation_stage or None,
             "deltas": {
                 "break_final_minus_s8_kgf": break_delta,
                 "mass_final_minus_s8_g": mass_delta,

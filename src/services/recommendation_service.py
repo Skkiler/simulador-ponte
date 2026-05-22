@@ -57,6 +57,7 @@ class RecommendationService:
                 "parker_plateau": "platô",
                 "triangular_peak": "pontiagudo/triangular",
                 "shallow_arch": "arco",
+                "shallow_arch_faceted": "arco",
                 "flat": "reto",
             }
             return mp.get(raw, str(value or "—"))

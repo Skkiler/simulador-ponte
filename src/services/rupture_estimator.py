@@ -107,6 +107,13 @@ def estimate_rupture_load(
                 governing_glue_group = row.get("member_group") or "glue"
 
     predicted_primary = load_kgf * min_fs_primary if min_fs_primary is not None else None
+    predicted_by_members = (
+        load_kgf * min_fs_design
+        if min_fs_design is not None
+        else (load_kgf * min_fs_all_raw if min_fs_all_raw is not None else None)
+    )
+    predicted_by_supports = load_kgf * min_fs_support if min_fs_support is not None else None
+    predicted_by_glue = load_kgf * min_fs_glue if min_fs_glue is not None else None
 
     all_candidates: List[tuple[str, float, Dict[str, Any]]] = []
     if min_fs_all_raw is not None:
@@ -199,6 +206,9 @@ def estimate_rupture_load(
     predicted_main = predicted_design if predicted_design is not None else predicted_all
 
     governing_mode = "unknown"
+    governing_limit_state = governing_design.get("limit_state")
+    if isinstance(governing_limit_state, str) and governing_limit_state.startswith("member"):
+        governing_limit_state = "member"
     if governing_design:
         ls = str(governing_design.get("limit_state", ""))
         if ls.startswith("member"):
@@ -212,13 +222,16 @@ def estimate_rupture_load(
     n_states = len(included_limit_states)
     confidence = "high" if n_states >= 3 else ("medium" if n_states == 2 else "low")
 
-    return {
+    out = {
         "predicted_breaking_load_kgf": predicted_main,
         "predicted_breaking_load_primary_kgf": predicted_primary,
         "predicted_breaking_load_all_kgf": predicted_all,
         "predicted_breaking_load_design_kgf": predicted_design,
+        "predicted_breaking_load_by_members_kgf": predicted_by_members,
+        "predicted_breaking_load_by_supports_kgf": predicted_by_supports,
+        "predicted_breaking_load_by_glue_kgf": predicted_by_glue,
         "governing_rupture_mode": governing_mode,
-        "governing_limit_state": governing_design.get("limit_state"),
+        "governing_limit_state": governing_limit_state,
         "governing_mode": governing_design.get("governing_mode"),
         "governing_member_id": governing_design.get("member_id"),
         "governing_group": governing_design.get("member_group"),
@@ -228,6 +241,7 @@ def estimate_rupture_load(
         "min_fs_primary": min_fs_primary,
         "min_fs_all_raw": min_fs_all_raw,
         "min_fs_design": min_fs_design,
+        "min_fs_member_design": min_fs_design,
         "min_fs_support": min_fs_support,
         "min_fs_glue": min_fs_glue,
         "rupture_basis": "min(limit_state_fs) * load",
@@ -236,3 +250,8 @@ def estimate_rupture_load(
         "governing_all": governing_all,
         "governing_design": governing_design,
     }
+    # Alias de compatibilidade para consumidores antigos.
+    out["predicted_breaking_load_members_kgf"] = out["predicted_breaking_load_by_members_kgf"]
+    out["predicted_breaking_load_supports_kgf"] = out["predicted_breaking_load_by_supports_kgf"]
+    out["predicted_breaking_load_glue_kgf"] = out["predicted_breaking_load_by_glue_kgf"]
+    return out

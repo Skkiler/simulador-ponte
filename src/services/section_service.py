@@ -164,7 +164,15 @@ class SectionService:
     ) -> Dict[str, float]:
         n = max(1, int(n_sticks))
         layout_cfg = layout_cfg or {"layout": "stacked"}
-        layout = str(layout_cfg.get("layout", "stacked")).lower()
+        requested_layout = str(layout_cfg.get("layout", "stacked")).strip().lower()
+        layout_aliases = {
+            "laminated_rectangular": "stacked",
+            "stacked_flat": "stacked",
+            "stacked_edge": "stacked",
+            "contact_box": "box",
+            "simple_box_with_real_spacers": "box",
+        }
+        layout = layout_aliases.get(requested_layout, requested_layout)
         orientation_raw = str(
             layout_cfg.get(
                 "stick_orientation",
@@ -184,6 +192,10 @@ class SectionService:
             "vertical",
         }
         stick_orientation = "edge" if orientation_raw in edge_orientations else "flat"
+        if requested_layout == "stacked_edge":
+            stick_orientation = "edge"
+        elif requested_layout == "stacked_flat":
+            stick_orientation = "flat"
 
         b = float(material["stick_width_mm"])
         t = float(material["stick_thickness_mm"])
@@ -319,6 +331,39 @@ class SectionService:
             "legacy_spaced_box": "legacy_spaced_box_not_recommended",
         }.get(effective_layout, effective_layout)
 
+        # Buildability audit: detect true geometric overlap in section rectangles.
+        no_internal_overlap = True
+        for i, vi in enumerate(stick_defs):
+            yi = float(vi["y"])
+            zi = float(vi["z"])
+            ydi = float(vi["ydim"])
+            zdi = float(vi["zdim"])
+            ai0 = yi - 0.5 * ydi
+            ai1 = yi + 0.5 * ydi
+            bi0 = zi - 0.5 * zdi
+            bi1 = zi + 0.5 * zdi
+            for vj in stick_defs[i + 1:]:
+                yj = float(vj["y"])
+                zj = float(vj["z"])
+                ydj = float(vj["ydim"])
+                zdj = float(vj["zdim"])
+                aj0 = yj - 0.5 * ydj
+                aj1 = yj + 0.5 * ydj
+                bj0 = zj - 0.5 * zdj
+                bj1 = zj + 0.5 * zdj
+                oy = max(0.0, min(ai1, aj1) - max(ai0, aj0))
+                oz = max(0.0, min(bi1, bj1) - max(bi0, bj0))
+                if oy > 1.0e-9 and oz > 1.0e-9:
+                    no_internal_overlap = False
+                    break
+            if not no_internal_overlap:
+                break
+
+        section_buildable = bool(
+            no_internal_overlap
+            and effective_layout not in {"legacy_spaced_box"}
+        )
+
         return {
             "A": A,
             "Iy": Iy,
@@ -330,10 +375,12 @@ class SectionService:
             "centroid_y_mm": cy,
             "centroid_z_mm": cz,
             "layout": effective_layout,
-            "requested_layout": layout,
+            "requested_layout": requested_layout,
             "stick_orientation": stick_orientation if len(set(orientations)) == 1 else "mixed",
             "stick_orientations": orientations,
             "section_connection_model": section_connection_model,
+            "section_buildable": section_buildable,
+            "no_internal_overlap": no_internal_overlap,
             "stick_width_y_mm": stick_y_mm,
             "stick_height_z_mm": stick_z_mm,
             "stick_width_y_mm_by_lane": ydims,
@@ -348,13 +395,15 @@ class SectionService:
             "Iz_noncomposite": Iz_noncomp,
             "eta_I": eta_I,
             "eta_A": eta_A,
+            "composite_action_eta_I": eta_I,
+            "composite_action_eta_A": eta_A,
         }
 
     @staticmethod
     def _layout_efficiency(layout: str, n_sticks: int) -> float:
         base = max(0.65, 1.0 - 0.035 * max(0, n_sticks - 2))
         l = str(layout or "").lower()
-        if l in {"box", "double_stack"}:
+        if l in {"box", "contact_box", "simple_box_with_real_spacers", "double_stack"}:
             base += 0.08
         if l in {"laced", "continuous_box"}:
             base += 0.12

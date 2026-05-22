@@ -565,7 +565,7 @@ class ActiveDesignPlanner:
                 "top_chord_truss_type": top_chord,
                 "bottom_chord_truss_type": bottom_chord,
                 "chord_truss_type": chord_legacy,
-                "end_height_mm": height if top_profile == "flat" else max(50.0, height / 3.0),
+                "end_height_mm": height if top_profile == "flat" else max(40.0, min(height - max(20.0, 0.18 * height), height / 3.0)),
                 "plateau_start_mm": span / 3.0,
                 "plateau_end_mm": 2.0 * span / 3.0,
                 "support_contact_y_mm": [-width / 2.0, width / 2.0],
@@ -611,22 +611,24 @@ class ActiveDesignPlanner:
             tc_ratio = t_cap / c_cap
             layout_by_group = v.setdefault("section_layout_by_group", {})
             if tc_ratio >= 5.0:
+                # Modo construtivo simples: não conceder inércia de caixa
+                # sem talas/lacing reais.  Usar laminação edge/side-by-side
+                # que pode ser montada em gabarito com palitos inteiros.
+                simple_mode = str(p.get("design_mode", "simple_buildable_bridge")).lower() == "simple_buildable_bridge" or bool(p.get("prefer_simple_buildable_archetypes", True))
                 for g in ("top_chord", "bottom_chord"):
                     gcfg = dict(layout_by_group.get(g, {}) or {})
-                    if str(gcfg.get("layout", "stacked")).lower() in {"stacked", "single", "side_by_side"}:
+                    if simple_mode:
+                        gcfg.update({"layout": "stacked_edge", "spacing_y_mm": 0.0, "spacing_z_mm": 0.0})
+                    elif str(gcfg.get("layout", "stacked")).lower() in {"stacked", "single", "side_by_side"}:
                         gcfg.update({"layout": "box", "stick_orientation": "edge", "spacing_y_mm": 12.0, "spacing_z_mm": 12.0})
-                        layout_by_group[g] = gcfg
+                    layout_by_group[g] = gcfg
                 for g in ("vertical", "diagonal"):
                     gcfg = dict(layout_by_group.get(g, {}) or {})
-                    if str(gcfg.get("layout", "stacked")).lower() in {"stacked", "single"}:
-                        gcfg.update(
-                            {
-                                "layout": "box",
-                                "spacing_y_mm": 10.0,
-                                "spacing_z_mm": 10.0,
-                            }
-                        )
-                        layout_by_group[g] = gcfg
+                    if simple_mode:
+                        gcfg.update({"layout": "side_by_side", "spacing_y_mm": 0.0, "spacing_z_mm": 0.0})
+                    elif str(gcfg.get("layout", "stacked")).lower() in {"stacked", "single"}:
+                        gcfg.update({"layout": "box", "spacing_y_mm": 10.0, "spacing_z_mm": 10.0})
+                    layout_by_group[g] = gcfg
 
         return self.config.normalize(v)
 
@@ -1301,7 +1303,8 @@ class ActiveDesignPlanner:
                     for v in (c.get("planner", {}) or {}).get("consider_top_profiles", [])
                 }
                 if (
-                    str(bridge.get("top_profile", "")).lower() in {"flat", "reto", "reta"}
+                    not bool((c.get("planner", {}) or {}).get("user_design_domain_locked", False))
+                    and str(bridge.get("top_profile", "")).lower() in {"flat", "reto", "reta"}
                     and (not allowed_profiles or "triangular_peak" in allowed_profiles)
                 ):
                     bridge["top_profile"] = "triangular_peak"
@@ -1369,6 +1372,7 @@ class ActiveDesignPlanner:
         assembly_procurement_mass_g = None
         weak_glue = None
         min_glue_fs = None
+        min_bottom_chord_glue_fs = None
         eval_warnings: List[str] = []
 
         if include_detail:
@@ -1464,6 +1468,14 @@ class ActiveDesignPlanner:
                 ),
                 None,
             )
+            min_bottom_chord_glue_fs = min_numeric(
+                (
+                    r.get("FS_glue_shear")
+                    for r in (detailed.get("glue_joints") or [])
+                    if str(r.get("member_group", "")).strip() == "bottom_chord"
+                ),
+                None,
+            )
             weak_glue = int(
                 safe_float(
                     dsum.get("n_weak_glue_joints"),
@@ -1519,8 +1531,12 @@ class ActiveDesignPlanner:
             "min_fs_all": min_fs_design,
             "min_fs_all_raw": min_fs_all_raw,
             "min_fs_design": min_fs_design,
+            "min_fs_member_design": rupture.get("min_fs_member_design", min_fs_design),
             "min_support_fs": min_support_fs,
+            "min_fs_support": rupture.get("min_fs_support", min_support_fs),
             "min_glue_fs": min_glue_fs,
+            "min_fs_glue": rupture.get("min_fs_glue", min_glue_fs),
+            "min_bottom_chord_glue_fs": min_bottom_chord_glue_fs,
             "mass_g": mass_g,
             "competition_mass_g": competition_mass_g,
             "installed_stick_mass_g": installed_stick_mass_g,
@@ -1533,6 +1549,16 @@ class ActiveDesignPlanner:
             "predicted_breaking_load_primary_kgf": rupture.get("predicted_breaking_load_primary_kgf"),
             "predicted_breaking_load_all_kgf": rupture.get("predicted_breaking_load_all_kgf"),
             "predicted_breaking_load_design_kgf": rupture.get("predicted_breaking_load_design_kgf"),
+            "predicted_breaking_load_by_members_kgf": rupture.get("predicted_breaking_load_by_members_kgf"),
+            "predicted_breaking_load_by_supports_kgf": rupture.get("predicted_breaking_load_by_supports_kgf"),
+            "predicted_breaking_load_by_glue_kgf": rupture.get("predicted_breaking_load_by_glue_kgf"),
+            "governing_limit_state": rupture.get("governing_limit_state"),
+            "governing_fs": rupture.get("governing_fs"),
+            "governing_mode": rupture.get("governing_mode"),
+            "governing_member_id": rupture.get("governing_member_id"),
+            "governing_group": rupture.get("governing_group"),
+            "governing_joint_id": rupture.get("governing_joint_id"),
+            "governing_support_node_id": rupture.get("governing_support_node_id"),
             "critical_members": critical_summary,
             "glue_mass_g": glue_mass_g,
             "weak_glue_joints": weak_glue,
@@ -1630,7 +1656,13 @@ class ActiveDesignPlanner:
             metrics["min_glue_fs"] is None
             or float(metrics["min_glue_fs"]) >= acceptance_min_glue_fs
         )
-        min_primary_ok = float(metrics.get("min_fs_primary", 0.0) or 0.0) >= acceptance_min_primary_fs
+        min_bottom_chord_glue_ok = (
+            metrics.get("min_bottom_chord_glue_fs") is None
+            or float(metrics["min_bottom_chord_glue_fs"]) >= acceptance_min_glue_fs
+        )
+        min_primary_ok = float(
+            metrics.get("min_fs_member_design", metrics.get("min_fs_primary", 0.0)) or 0.0
+        ) >= acceptance_min_primary_fs
         min_design_ok = float(metrics.get("min_fs_design", 0.0) or 0.0) >= target_fs
         break_ok = predicted_break >= acceptance_min_break_kgf
 
@@ -1642,6 +1674,7 @@ class ActiveDesignPlanner:
             and min_primary_ok
             and min_support_ok
             and min_glue_ok
+            and min_bottom_chord_glue_ok
             and ((not use_target_hard) or min_design_ok)
             and ((not enforce_stick_budget) or stick_budget_ok)
             and ((not enforce_wet_glue_budget) or wet_glue_budget_ok)
@@ -2747,9 +2780,10 @@ class ActiveDesignPlanner:
             "triangular_peak": "triangular_peak",
             "triangular": "triangular_peak",
             "pontiagudo/triangular": "triangular_peak",
-            "shallow_arch": "shallow_arch",
-            "arch": "shallow_arch",
-            "arco": "shallow_arch",
+            "shallow_arch": "shallow_arch_faceted",
+            "shallow_arch_faceted": "shallow_arch_faceted",
+            "arch": "shallow_arch_faceted",
+            "arco": "shallow_arch_faceted",
             "flat": "flat",
             "reto": "flat",
             "reta": "flat",
@@ -2894,7 +2928,7 @@ class ActiveDesignPlanner:
             )
 
         top_weights = {o: 1.0 for o in top_vals}
-        top_weights.update({"parker_plateau": 2.0, "flat": 1.35, "triangular_peak": 1.05, "shallow_arch": 0.15})
+        top_weights.update({"parker_plateau": 2.0, "flat": 1.35, "triangular_peak": 1.05, "shallow_arch_faceted": 0.15, "shallow_arch": 0.15})
 
         internal_weights = {o: 1.0 for o in internal_vals}
         internal_weights.update({"X": 2.5, "Warren": 1.45, "Pratt": 1.25, "N": 1.1, "Howe": 0.9, "none": 0.35})
@@ -3172,6 +3206,7 @@ class ActiveDesignPlanner:
             "flat": 0.30,
             "triangular_peak": 0.10,
             "shallow_arch": -0.75,
+            "shallow_arch_faceted": -0.75,
         }.get(top, 0.0)
         return float(score)
 

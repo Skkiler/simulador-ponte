@@ -64,7 +64,8 @@ class GeometryService:
             "platô": "parker_plateau",
             "pontiagudo/triangular": "triangular_peak",
             "triangular": "triangular_peak",
-            "arco": "shallow_arch",
+            "arco": "shallow_arch_faceted",
+            "shallow_arch": "shallow_arch_faceted",
             "reto": "flat",
             "reta": "flat",
         }
@@ -72,10 +73,15 @@ class GeometryService:
         x = max(0.0, min(span, float(x)))
         if profile == "flat":
             return center_h
+        # Defesa adicional: um perfil não-plano com end_h == center_h vira
+        # geometria reta.  A normalização deve impedir isso, mas esta camada
+        # evita regressões quando GeometryService é chamado com cfg parcial.
+        if center_h > 1.0 and end_h >= center_h - max(1.0, 0.02 * center_h):
+            end_h = max(40.0, min(center_h - max(20.0, 0.18 * center_h), 0.35 * center_h))
         if profile == "triangular_peak":
             mid = span / 2.0
             return end_h + (center_h-end_h)*(x/mid) if x <= mid else center_h + (end_h-center_h)*((x-mid)/(span-mid))
-        if profile == "shallow_arch":
+        if profile in {"shallow_arch", "shallow_arch_faceted"}:
             xi = (x - span/2.0) / max(1e-9, span/2.0)
             return end_h + (center_h-end_h) * max(0.0, 1.0 - xi*xi)
         p0 = float(b["plateau_start_mm"]); p1 = float(b["plateau_end_mm"])

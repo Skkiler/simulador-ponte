@@ -254,6 +254,16 @@ class ConnectionPlanner:
             # Ajuste geométrico básico.
             geometry_fit_ok = True
             flags: List[str] = []
+            primary_overlap_floor = max(0.0, float(detail.get("min_primary_overlap_mm", 25.0)))
+            chord_overlap_floor = max(primary_overlap_floor, float(detail.get("min_chord_overlap_mm", 30.0)))
+            overlap_floor = 0.0
+            if group in {"top_chord", "bottom_chord"} and state in {"tension", "compression"}:
+                overlap_floor = chord_overlap_floor
+            elif role == "primary" and state in {"tension", "compression"}:
+                overlap_floor = primary_overlap_floor
+            if required_overlap < overlap_floor:
+                required_overlap = overlap_floor
+                flags.append("overlap_raised_to_constructive_min")
             if required_overlap > 0.85 * stick_len:
                 geometry_fit_ok = False
                 flags.append("overlap_exceeds_stick_fraction")

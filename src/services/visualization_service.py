@@ -1001,6 +1001,55 @@ class VisualizationService:
             total += (i + 1) * ord(ch)
         return total % modulo
 
+    @staticmethod
+    def _obb_from_prism(prism: Dict[str, List[float]]) -> Dict[str, Any] | None:
+        """Caixa orientada do prisma renderizado.
+
+        A auditoria antiga usava apenas AABB; diagonais longas ficavam com
+        envelopes cartesianos enormes e geravam falsos positivos. O OBB/SAT
+        usa a geometria local do próprio palito.
+        """
+        try:
+            import numpy as _np
+
+            pts = _np.array(list(zip(prism["x"], prism["y"], prism["z"])), dtype=float)
+        except Exception:
+            return None
+        if pts.shape[0] < 8:
+            return None
+        center = pts.mean(axis=0)
+        raw_axes = [pts[4] - pts[0], pts[1] - pts[0], pts[3] - pts[0]]
+        axes = []
+        extents = []
+        for vec in raw_axes:
+            n = float(_np.linalg.norm(vec))
+            if n <= 1.0e-9:
+                return None
+            axes.append(vec / n)
+            extents.append(0.5 * n)
+        return {"center": center, "axes": axes, "extents": extents}
+
+    @staticmethod
+    def _obb_intersects(a: Dict[str, Any], b: Dict[str, Any], tol: float = 0.05) -> bool:
+        """Teste SAT entre dois prismas retangulares orientados."""
+        import numpy as _np
+
+        axes = list(a["axes"]) + list(b["axes"])
+        for ax in a["axes"]:
+            for bx in b["axes"]:
+                c = _np.cross(ax, bx)
+                n = float(_np.linalg.norm(c))
+                if n > 1.0e-8:
+                    axes.append(c / n)
+        delta = b["center"] - a["center"]
+        for axis in axes:
+            dist = abs(float(_np.dot(delta, axis)))
+            ra = sum(abs(float(_np.dot(a["axes"][i], axis))) * float(a["extents"][i]) for i in range(3))
+            rb = sum(abs(float(_np.dot(b["axes"][i], axis))) * float(b["extents"][i]) for i in range(3))
+            if dist > ra + rb - tol:
+                return False
+        return True
+
     def prepare_stick_piece_mesh_batches(
         self,
         stick_pieces,
@@ -1075,6 +1124,8 @@ class VisualizationService:
 
         batches: Dict[str, Dict[str, Any]] = {}
         bounds = {"x": [], "y": [], "z": []}
+        as_built_boxes: List[Dict[str, Any]] = []
+        as_built_gap_piece_count = 0
 
         for r in rows:
             group = str(r.get("member_group", "sem_grupo"))
@@ -1207,6 +1258,71 @@ class VisualizationService:
             bounds["x"].extend([x0, x1])
             bounds["y"].extend([y0, y1])
             bounds["z"].extend([z0, z1])
+            if abs(float(offset_scale)) < 1.0e-9:
+                as_built_boxes.append(
+                    {
+                        "stick_id": r.get("stick_id"),
+                        "member_id": r.get("member_id"),
+                        "member_group": group,
+                        "x0": min(prism["x"]),
+                        "x1": max(prism["x"]),
+                        "y0": min(prism["y"]),
+                        "y1": max(prism["y"]),
+                        "z0": min(prism["z"]),
+                        "z1": max(prism["z"]),
+                        "obb": self._obb_from_prism(prism),
+                    }
+                )
+                if not bool(r.get("node_connection_ok", True)):
+                    as_built_gap_piece_count += 1
+
+        as_built_interpenetration_samples: List[Dict[str, Any]] = []
+        if as_built_boxes:
+            tol = 1.0e-6
+            boxes_sorted = sorted(as_built_boxes, key=lambda b: float(b["x0"]))
+            active: List[Dict[str, Any]] = []
+            for box in boxes_sorted:
+                bx0 = float(box["x0"])
+                bx1 = float(box["x1"])
+                by0 = float(box["y0"])
+                by1 = float(box["y1"])
+                bz0 = float(box["z0"])
+                bz1 = float(box["z1"])
+                active = [a for a in active if float(a["x1"]) >= bx0 - tol]
+                for a in active:
+                    ax0 = float(a["x0"])
+                    ax1 = float(a["x1"])
+                    ay0 = float(a["y0"])
+                    ay1 = float(a["y1"])
+                    az0 = float(a["z0"])
+                    az1 = float(a["z1"])
+                    ox = min(ax1, bx1) - max(ax0, bx0)
+                    oy = min(ay1, by1) - max(ay0, by0)
+                    oz = min(az1, bz1) - max(az0, bz0)
+                    if ox > tol and oy > tol and oz > tol:
+                        obb_a = a.get("obb")
+                        obb_b = box.get("obb")
+                        if obb_a is not None and obb_b is not None and not self._obb_intersects(obb_a, obb_b, tol=tol):
+                            continue
+                        as_built_interpenetration_samples.append(
+                            {
+                                "stick_a": a.get("stick_id"),
+                                "stick_b": box.get("stick_id"),
+                                "member_a": a.get("member_id"),
+                                "member_b": box.get("member_id"),
+                                "group_a": a.get("member_group"),
+                                "group_b": box.get("member_group"),
+                                "overlap_x_mm": ox,
+                                "overlap_y_mm": oy,
+                                "overlap_z_mm": oz,
+                                "collision_test": "oriented_box_sat",
+                            }
+                        )
+                        if len(as_built_interpenetration_samples) >= 200:
+                            break
+                if len(as_built_interpenetration_samples) >= 200:
+                    break
+                active.append(box)
 
         return {
             "rows": rows,
@@ -1214,6 +1330,9 @@ class VisualizationService:
             "bounds": bounds,
             "has_real_section_offsets": has_real_section_offsets,
             "color_by": color_by_norm,
+            "as_built_interpenetration_count": len(as_built_interpenetration_samples),
+            "as_built_interpenetration_samples": as_built_interpenetration_samples,
+            "as_built_gap_piece_count": int(as_built_gap_piece_count),
         }
 
     def plotly_stick_pieces(

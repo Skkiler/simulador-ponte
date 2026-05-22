@@ -292,13 +292,12 @@ class StickDetailService:
         overlap: float,
         min_constructive_piece_length_mm: float = 0.0,
     ) -> List[Tuple[float, float, float]]:
-        """
-        Divide um membro de comprimento L em peças de palito.
+        """Divide um membro de comprimento ``L`` em peças fabricáveis.
 
-        Retorna lista de:
-            s0, s1, comprimento_de_corte
-
-        A peça seguinte começa antes do fim da anterior quando há sobreposição.
+        Se ``overlap`` for positivo, mantém a emenda sobreposta tradicional.
+        Se ``overlap`` for zero, usa emenda topo-a-topo com talas: as peças
+        principais ficam adjacentes e não ocupam o mesmo volume físico. Esse
+        caso é essencial para ``splice_mode=butt_with_splints``.
         """
         if L <= 0:
             return []
@@ -310,6 +309,19 @@ class StickDetailService:
             return [(0.0, L, L)]
 
         overlap = max(0.0, min(overlap, stick_len * 0.75))
+
+        if overlap <= 1.0e-9:
+            n = max(1, int(math.ceil(L / stick_len)))
+            base = L / n
+            out: List[Tuple[float, float, float]] = []
+            s0 = 0.0
+            for idx in range(n):
+                s1 = L if idx == n - 1 else min(L, s0 + base)
+                if s1 > s0 + 1.0e-9:
+                    out.append((s0, s1, s1 - s0))
+                s0 = s1
+            return out
+
         step = max(1.0e-6, stick_len - overlap)
 
         out: List[Tuple[float, float, float]] = []
@@ -1019,6 +1031,10 @@ class StickDetailService:
         tension_only = bool(detail.get("tension_only_stabilizers", True))
         terminal_joint_area_factor = max(0.1, float(detail.get("terminal_joint_area_factor", 1.35)))
         terminal_joint_secondary_bending_factor = max(0.5, float(detail.get("terminal_joint_secondary_bending_factor", 1.05)))
+        splice_mode = str(detail.get("splice_mode", "overlap")).strip().lower()
+        use_butt_splints = splice_mode in {"butt_with_splints", "butt_splints", "butt_full_splints"}
+        splint_len = max(15.0, min(0.85 * stick_len, float(detail.get("reinforcement_length_mm", detail.get("overlap_length_mm", 30.0)))))
+        splints_per_splice = max(1, int(detail.get("reinforcement_sticks_per_splice", 2)))
 
         node_by_id = {n.id: n for n in nodes}
         res_by = {int(r["member_id"]): r for r in member_results}
@@ -1057,6 +1073,8 @@ class StickDetailService:
         total_glue_area = 0.0
         total_pieces = 0
         total_cut = 0.0
+        total_splint_sticks_equiv = 0.0
+        total_splint_mass_g = 0.0
 
         # Determinar se estamos usando modelo de quarto de ponte.  Quando
         # `use_quarter_model` é verdadeiro e um valor de
@@ -1211,10 +1229,11 @@ class StickDetailService:
             # estrutural continua nó-a-nó, mas a peça física para na face e o CSV
             # contabiliza a sobreposição de cola no host.
             fabrication_L = max(0.0, L - joint_start_setback - joint_end_setback)
+            interval_overlap = 0.0 if use_butt_splints else member_overlap
             intervals = self._piece_intervals(
                 fabrication_L,
                 stick_len,
-                member_overlap,
+                interval_overlap,
                 min_constructive_piece_length_mm=min_constructive_piece_length_mm,
             )
             if joint_start_setback > 0.0 or joint_end_setback > 0.0:
@@ -1353,7 +1372,7 @@ class StickDetailService:
                     lane_intervals, split_count = self._enforce_stock_limit_on_intervals(
                         lane_intervals,
                         max_cut_mm=max_cut_length_mm,
-                        overlap_mm=overlap,
+                        overlap_mm=interval_overlap,
                         cut_increment_mm=cut_increment_mm,
                         min_constructive_piece_length_mm=min_constructive_piece_length_mm,
                     )
@@ -1622,7 +1641,19 @@ class StickDetailService:
 
                     if prev_id is not None and prev_end is not None:
                         overlap_actual = max(0.0, prev_end - s0)
-                        glue_area = overlap_actual * stick_w * joint_area_factor
+                        if use_butt_splints and overlap_actual <= 1.0e-9:
+                            # Junta topo-a-topo com talas: as peças principais
+                            # não se sobrepõem no mesmo volume. As talas são
+                            # contabilizadas em massa equivalente e área de cola.
+                            effective_overlap = splint_len
+                            glue_area = effective_overlap * stick_w * max(joint_area_factor, 1.70) * splints_per_splice
+                            joint_type = "butt_with_splints"
+                            splice_note = "emenda topo-a-topo com talas laterais; sem interpenetração entre palitos principais"
+                        else:
+                            effective_overlap = overlap_actual
+                            glue_area = overlap_actual * stick_w * joint_area_factor
+                            joint_type = "lap_overlap"
+                            splice_note = "emenda sobreposta ao longo da própria lane"
 
                         if glue_area > 0:
                             glue_shear = (abs(per_lane) / glue_area) * joint_secondary_bending_factor
@@ -1643,6 +1674,10 @@ class StickDetailService:
 
                         member_glue += glue_area
                         total_glue_area += glue_area
+                        if use_butt_splints and overlap_actual <= 1.0e-9:
+                            splint_equiv = splints_per_splice * splint_len / max(1.0e-9, stick_len)
+                            total_splint_sticks_equiv += splint_equiv
+                            total_splint_mass_g += stick_mass * splint_equiv
 
                         joint_rows.append(
                             {
@@ -1652,9 +1687,9 @@ class StickDetailService:
                                 "lane": lane,
                                 "piece_a": prev_id,
                                 "piece_b": sid,
-                                "joint_type": "lap_overlap",
+                                "joint_type": joint_type,
                                 "joint_model": joint_model,
-                                "overlap_length_mm": overlap_actual,
+                                "overlap_length_mm": effective_overlap,
                                 "splice_center_mm": 0.5 * (prev_end + s0),
                                 "quadrant_id": quadrant_id,
                                 "joint_area_factor": joint_area_factor,
@@ -1678,6 +1713,7 @@ class StickDetailService:
                                             quadrant_id,
                                             lane,
                                         ).get("stagger_offset_mm", 0.0),
+                                        "note": splice_note,
                             }
                         )
 
@@ -1818,7 +1854,8 @@ class StickDetailService:
         extra = math.ceil(blank * waste)
         total = blank + extra
 
-        installed_stick_mass = sum(float(r["mass_g"]) for r in stick_rows)
+        primary_piece_mass = sum(float(r["mass_g"]) for r in stick_rows)
+        installed_stick_mass = primary_piece_mass + total_splint_mass_g
         wet_glue_mass = (total_glue_area / 1_000_000.0) * glue_spread / max(glue_eff, 1.0e-6)
         cured_glue_mass = wet_glue_mass * glue_cure_solids_fraction
         evaporated_glue_water = max(0.0, wet_glue_mass - cured_glue_mass)
@@ -1849,6 +1886,15 @@ class StickDetailService:
             fs_joint = safe_float(r.get("FS_glue_shear"), None)
             if fs_joint is not None and fs_joint < glue_acceptance_fs:
                 weak_glue_count += 1
+        min_bottom_chord_glue_fs = min(
+            (
+                safe_float(r.get("FS_glue_shear"), None)
+                for r in (joint_rows or [])
+                if str(r.get("member_group", "")).strip() == "bottom_chord"
+                and safe_float(r.get("FS_glue_shear"), None) is not None
+            ),
+            default=None,
+        )
 
         summary = {
             "total_members": len(member_rows),
@@ -1859,6 +1905,10 @@ class StickDetailService:
             "extra_sticks_for_waste": extra,
             "estimated_total_sticks_with_waste": total,
             "estimated_piece_mass_g_without_waste_scaling": installed_stick_mass,
+            "primary_piece_mass_g": primary_piece_mass,
+            "splint_mass_g": total_splint_mass_g,
+            "splint_sticks_equivalent": total_splint_sticks_equiv,
+            "splice_mode": splice_mode,
             "installed_stick_mass_g": installed_stick_mass,
             "purchased_blank_sticks_needed": purchased_blank_sticks_needed,
             "purchased_stick_mass_g": purchased_stick_mass,
@@ -1887,6 +1937,7 @@ class StickDetailService:
             "nominal_competition_limit_g": nominal_competition_limit_g,
             "competition_mass_margin_g": nominal_competition_limit_g - competition_mass,
             "n_weak_glue_joints": weak_glue_count,
+            "min_bottom_chord_glue_fs": min_bottom_chord_glue_fs,
             "glue_shear_strength_MPa": glue_tau,
             "glue_safety_factor": glue_sf,
             "cut_increment_mm": cut_increment_mm,

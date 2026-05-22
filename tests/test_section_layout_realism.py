@@ -137,3 +137,28 @@ def test_contact_box_sections_do_not_interpenetrate_stick_volumes() -> None:
         for i, a in enumerate(rects):
             for b in rects[i + 1:]:
                 assert _overlap_area(a, b) == pytest.approx(0.0)
+
+
+def test_simple_layout_aliases_expose_buildability_flags() -> None:
+    sec = SectionService.composite_section(
+        4,
+        MAT,
+        {
+            "layout": "laminated_rectangular",
+            "stick_orientation": "flat",
+        },
+    )
+    assert sec["section_buildable"] is True
+    assert sec["no_internal_overlap"] is True
+    assert sec["composite_action_eta_I"] == sec["eta_I"]
+
+    sec_box = SectionService.composite_section(
+        4,
+        MAT,
+        {
+            "layout": "simple_box_with_real_spacers",
+            "stick_orientation": "edge",
+        },
+    )
+    assert sec_box["layout"] == "contact_box"
+    assert sec_box["section_buildable"] is True

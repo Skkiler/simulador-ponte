@@ -80,15 +80,16 @@ class AssemblyTutorialService:
             mass_by_member[mid] += safe_float(r.get("mass_g"), 0.0) or 0.0
 
         step_defs = [
-            ("Separar, conferir e cortar palitos", []),
-            ("Montar banzos inferiores no gabarito", ["bottom_chord", "support_pad"]),
-            ("Montar banzos superiores em pares espelhados", ["top_chord"]),
-            ("Instalar montantes entre banzo inferior e superior", ["vertical"]),
-            ("Instalar diagonais laterais e resolver cruzamentos X", ["diagonal"]),
-            ("Fechar travessas inferiores e superiores", ["bottom_transverse", "top_transverse"]),
-            ("Instalar travamentos centrais e contraventamentos", ["cross_frame_bracing", "top_bracing", "bottom_bracing", "chord_lacing"]),
-            ("Instalar plataforma/sela de carga e conferir apoios", ["top_transverse", "support_pad"]),
-            ("Cura, inspeção dimensional e pesagem", []),
+            ("Desenhar gabarito 1:1", []),
+            ("Montar banzo inferior", ["bottom_chord", "support_pad"]),
+            ("Montar banzo superior", ["top_chord"]),
+            ("Colar montantes", ["vertical"]),
+            ("Colar diagonais", ["diagonal"]),
+            ("Montar segunda lateral igual", ["bottom_chord", "top_chord", "vertical", "diagonal"]),
+            ("Unir laterais com transversais", ["bottom_transverse", "top_transverse", "support_pad"]),
+            ("Aplicar travamentos superior/inferior", ["cross_frame_bracing", "top_bracing", "bottom_bracing", "chord_lacing"]),
+            ("Montar deck/plataforma de carga", ["top_transverse", "support_pad"]),
+            ("Cura e inspeção final", []),
         ]
 
         members_by_group: Dict[str, List[int]] = defaultdict(list)
@@ -97,48 +98,75 @@ class AssemblyTutorialService:
 
         assembly_steps: List[Dict[str, Any]] = []
         stick_count_by_step: Dict[str, int] = {}
+        piece_by_member: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        for p in pieces:
+            mid = int(safe_float(p.get("member_id"), -1) or -1)
+            if mid >= 0:
+                piece_by_member[mid].append(p)
+        joints_by_member: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        for j in joints:
+            mid = int(safe_float(j.get("member_id"), -1) or -1)
+            if mid >= 0:
+                joints_by_member[mid].append(j)
+        cure_stage_default_min = int(safe_float(cfg.get("detail_model", {}).get("joint_cure_stage_minutes", 30), 30) or 30)
+        cure_final_min = int(safe_float(cfg.get("detail_model", {}).get("joint_cure_final_minutes", 720), 720) or 720)
         for idx, (title, groups) in enumerate(step_defs, 1):
             mids: List[int] = []
             if groups:
                 for g in groups:
                     mids.extend(members_by_group.get(g, []))
             mids = sorted(set(mids))
+            step_pieces: List[Dict[str, Any]] = []
+            step_joints: List[Dict[str, Any]] = []
+            for mid in mids:
+                step_pieces.extend(piece_by_member.get(mid, []))
+                step_joints.extend(joints_by_member.get(mid, []))
             step_sticks = sum(int(stick_count_by_member.get(mid, 0)) for mid in mids)
             step_mass = sum(float(mass_by_member.get(mid, 0.0)) for mid in mids)
             key = f"S{idx:02d}"
             stick_count_by_step[key] = step_sticks
-            if not groups and idx == 1:
-                instruction = (
-                    "Cortar por comprimento da lista final, identificar cada peça por membro/lane/peça e separar os cortes em ângulo apenas quando o CSV marcar miter_cut_required=true."
-                )
-            elif "bottom_chord" in groups:
-                instruction = (
-                    "Fixar o banzo inferior primeiro em gabarito reto; colar sapatas/support_pad por sobreposição de face e manter emendas desencontradas entre lanes."
-                )
-            elif "top_chord" in groups:
-                instruction = (
-                    "Montar o banzo superior fora da ponte como par espelhado; usar seções box pares e simples, sem caixa ímpar; conferir paralelismo antes de ligar aos montantes."
-                )
-            elif "vertical" in groups:
-                instruction = (
-                    "Pré-posicionar cada montante a seco entre banzos; se miter_cut_start/end_required=true, fazer um único corte de ponta no ângulo indicado para encostar na face do banzo."
-                )
-            elif "diagonal" in groups:
-                instruction = (
-                    "Instalar diagonais em pares simétricos. Em painéis X, uma diagonal fica na camada frente e a outra na camada fundo, sem junta central resistente; não colar como nó estrutural no cruzamento."
-                )
-            elif "cross_frame_bracing" in groups or "top_bracing" in groups or "bottom_bracing" in groups:
-                instruction = (
-                    "Instalar travamentos depois que as duas laterais estiverem rígidas; respeitar camada frente/fundo dos X e usar cola apenas nas extremidades ou na tala indicada."
-                )
-            elif "top_transverse" in groups or "bottom_transverse" in groups:
-                instruction = (
-                    "Fechar transversais com esquadro, mantendo as faces de cola limpas; eles definem a largura e distribuem a carga da plataforma."
-                )
+            if idx == 1:
+                instruction = "Traçar o vão e as estações dos painéis no gabarito plano; marcar posição dos apoios e dos nós para repetição das duas laterais."
+            elif idx == 2:
+                instruction = "Montar o banzo inferior com palitos inteiros/sobrepostos e emendas desencontradas; manter overlap mínimo e alinhamento longitudinal."
+            elif idx == 3:
+                instruction = "Montar o banzo superior em gabarito, respeitando perfil escolhido e orientação dos palitos."
+            elif idx == 4:
+                instruction = "Colar montantes entre banzos com esquadro, sem desalinhamento torsional."
+            elif idx == 5:
+                instruction = "Colar diagonais no padrão Pratt/Warren sem cruzamento lateral no mesmo plano."
+            elif idx == 6:
+                instruction = "Repetir a lateral oposta com as mesmas peças e mesmas regras de emenda."
+            elif idx == 7:
+                instruction = "Unir as duas laterais com transversais para travar largura e geometria global."
+            elif idx == 8:
+                instruction = "Aplicar travamentos superior/inferior, com X apenas em camadas/documentação física."
+            elif idx == 9:
+                instruction = "Montar mesa/plataforma de carga e verificar distribuição conforme modelo de aplicação."
             else:
-                instruction = (
-                    "Conferir simetria, massa estimada, contato dos apoios e continuidade das juntas antes da cura final."
-                )
+                instruction = "Respeitar tempo de cura final, inspecionar juntas críticas, massa e contato de apoio."
+
+            step_lengths = sorted(
+                {
+                    round(float(safe_float(p.get("cut_length_mm"), 0.0) or 0.0), 3)
+                    for p in step_pieces
+                    if safe_float(p.get("cut_length_mm"), None) is not None
+                }
+            )
+            overlap_vals = [
+                float(safe_float(j.get("overlap_length_mm"), 0.0) or 0.0)
+                for j in step_joints
+                if safe_float(j.get("overlap_length_mm"), None) is not None
+            ]
+            overlap_mm = (min(overlap_vals), max(overlap_vals)) if overlap_vals else (None, None)
+            if "top_chord" in groups or "vertical" in groups:
+                orientation_note = "preferir palito em pé (edge) quando indicado na seção"
+            elif "bottom_chord" in groups:
+                orientation_note = "priorizar continuidade e cola de face; palito em pé/deitado conforme seção"
+            else:
+                orientation_note = "seguir orientação de seção exportada (palito em pé/deitado)"
+            has_angle_cut = any(bool(p.get("miter_cut_required", False)) for p in step_pieces)
+            cure_time_min = cure_final_min if idx == 10 else cure_stage_default_min
             assembly_steps.append(
                 {
                     "step_id": key,
@@ -147,8 +175,17 @@ class AssemblyTutorialService:
                     "target_groups": groups,
                     "member_ids": mids,
                     "stick_count": step_sticks,
+                    "quantity": len(step_pieces),
                     "estimated_mass_g": round(step_mass, 3),
                     "instruction": instruction,
+                    "piece_ids": [str(p.get("stick_id")) for p in step_pieces if p.get("stick_id")][:120],
+                    "lengths_mm": step_lengths,
+                    "glue_face": "sobreposição de face",
+                    "overlap_mm_min": overlap_mm[0],
+                    "overlap_mm_max": overlap_mm[1],
+                    "cure_time_min": cure_time_min,
+                    "orientation_note": orientation_note,
+                    "angle_cut_alert": has_angle_cut,
                 }
             )
 
@@ -241,6 +278,19 @@ class AssemblyTutorialService:
             md_lines.append(f"- Grupos: {', '.join(step['target_groups']) if step['target_groups'] else 'geral'}")
             md_lines.append(f"- Membros: {', '.join(map(str, step['member_ids'])) if step['member_ids'] else '—'}")
             md_lines.append(f"- Palitos estimados nesta etapa: {step['stick_count']}")
+            md_lines.append(f"- Quantidade de peças nesta etapa: {step.get('quantity', 0)}")
+            md_lines.append(f"- IDs de peças (amostra): {', '.join(step.get('piece_ids', [])[:24]) if step.get('piece_ids') else '—'}")
+            md_lines.append(
+                f"- Comprimentos [mm]: {', '.join(f'{v:.1f}' for v in (step.get('lengths_mm') or [])[:16]) if step.get('lengths_mm') else '—'}"
+            )
+            md_lines.append(
+                f"- Overlap [mm]: min={step.get('overlap_mm_min') if step.get('overlap_mm_min') is not None else '—'} / "
+                f"max={step.get('overlap_mm_max') if step.get('overlap_mm_max') is not None else '—'}"
+            )
+            md_lines.append(f"- Face de cola: {step.get('glue_face', 'sobreposição de face')}")
+            md_lines.append(f"- Tempo de cura recomendado: {step.get('cure_time_min', '—')} min")
+            md_lines.append(f"- Orientação: {step.get('orientation_note', '—')}")
+            md_lines.append(f"- Alerta de corte angular: {'sim' if step.get('angle_cut_alert') else 'não'}")
             md_lines.append(f"- Procedimento: {step['instruction']}")
             md_lines.append("- Controle: medir alinhamento, colar a seco primeiro, aplicar cola fina, prensar e aguardar cura antes de avançar para a próxima etapa crítica.")
             md_lines.append("")
@@ -282,7 +332,16 @@ class AssemblyTutorialService:
                 "target_groups": ";".join(step.get("target_groups", [])),
                 "member_ids": ";".join(str(v) for v in step.get("member_ids", [])),
                 "stick_count": step.get("stick_count"),
+                "quantity": step.get("quantity"),
                 "estimated_mass_g": step.get("estimated_mass_g"),
+                "piece_ids_sample": ";".join(step.get("piece_ids", [])[:60]),
+                "lengths_mm": ";".join(str(v) for v in step.get("lengths_mm", [])),
+                "glue_face": step.get("glue_face"),
+                "overlap_mm_min": step.get("overlap_mm_min"),
+                "overlap_mm_max": step.get("overlap_mm_max"),
+                "cure_time_min": step.get("cure_time_min"),
+                "orientation_note": step.get("orientation_note"),
+                "angle_cut_alert": step.get("angle_cut_alert"),
                 "instruction": step.get("instruction"),
             }
             for step in assembly_steps

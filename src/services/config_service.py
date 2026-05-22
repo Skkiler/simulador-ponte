@@ -201,9 +201,10 @@ class ConfigService:
             "triangular_peak": "triangular_peak",
             "triangular": "triangular_peak",
             "pontiagudo/triangular": "triangular_peak",
-            "shallow_arch": "shallow_arch",
-            "arch": "shallow_arch",
-            "arco": "shallow_arch",
+            "shallow_arch": "shallow_arch_faceted",
+            "shallow_arch_faceted": "shallow_arch_faceted",
+            "arch": "shallow_arch_faceted",
+            "arco": "shallow_arch_faceted",
             "flat": "flat",
             "reto": "flat",
             "reta": "flat",
@@ -465,11 +466,26 @@ class ConfigService:
         # ---------------------------------------------------------------------
         detail = cfg.setdefault("detail_model", {})
         detail.setdefault("enabled", True)
-        detail.setdefault("splice_mode", "overlap")
-        detail.setdefault("auto_splice_overlap_enabled", True)
-        detail.setdefault("overlap_length_mm", 30.0)
-        if bool(detail.get("auto_splice_overlap_enabled", True)):
-            detail["overlap_length_mm"] = self._auto_splice_overlap_mm(cfg)
+        detail.setdefault("splice_mode", "butt_with_splints")
+        detail.setdefault("auto_splice_overlap_enabled", False)
+        detail.setdefault("overlap_length_mm", 0.0)
+        detail.setdefault("min_primary_overlap_mm", 25.0)
+        detail.setdefault("min_chord_overlap_mm", 30.0)
+        detail.setdefault("splice_min_aligned_distance_mm", 30.0)
+        splice_mode_norm = str(detail.get("splice_mode", "overlap") or "overlap").strip().lower()
+        if splice_mode_norm in {"butt_with_splints", "butt_splints", "butt_full_splints"}:
+            # Emenda topo-a-topo com talas: as peças principais não podem se
+            # sobrepor no mesmo volume. A área de cola vem das talas, não do
+            # overlap longitudinal.
+            detail["overlap_length_mm"] = 0.0
+            detail["auto_splice_overlap_enabled"] = False
+        else:
+            if bool(detail.get("auto_splice_overlap_enabled", True)):
+                detail["overlap_length_mm"] = self._auto_splice_overlap_mm(cfg)
+            detail["overlap_length_mm"] = max(
+                float(detail.get("overlap_length_mm", 30.0)),
+                float(detail.get("min_primary_overlap_mm", 25.0)),
+            )
         detail.setdefault("min_end_margin_mm", 10.0)
         detail.setdefault("reinforcement_length_mm", 55.0)
         detail.setdefault("reinforcement_sticks_per_splice", 2)
@@ -807,10 +823,14 @@ class ConfigService:
         for _grp in [str(v) for v in (detail.get("simple_even_box_section_groups") or [])]:
             _layout = str((cfg.get("section_layout_by_group", {}) or {}).get(_grp, {}).get("layout", "")).strip().lower()
             _n_raw = safe_float(cfg["member_sticks_by_group"].get(_grp), None)
-            if _layout == "box" and _n_raw is not None and int(_n_raw) >= 5 and int(_n_raw) % 2 == 1:
+            if _n_raw is not None and int(_n_raw) >= 5 and int(_n_raw) % 2 == 1:
+                # Grupos primários compostos devem evitar quantidade ímpar de
+                # palitos, mesmo quando a seção foi rebaixada para laminação
+                # simples. Isso preserva simetria de montagem e mantém testes
+                # de domínio compatíveis com layouts box e não-box.
                 cfg["member_sticks_by_group"][_grp] = int(_n_raw) + 1
             _n_norm = safe_float(cfg["member_sticks_by_group"].get(_grp), None)
-            if _layout == "box" and _n_norm is not None:
+            if _n_norm is not None:
                 _min_target = int(_n_norm)
                 cfg.setdefault("planner", {}).setdefault("local_sizing", {}).setdefault("min_sticks_primary_member_by_group", {})[_grp] = max(
                     int(safe_float(cfg.get("planner", {}).get("local_sizing", {}).get("min_sticks_primary_member_by_group", {}).get(_grp), _min_target) or _min_target),
@@ -841,7 +861,8 @@ class ConfigService:
         analysis.setdefault("acceptance_min_primary_fs", 1.05)
         analysis.setdefault("acceptance_min_support_fs", 1.00)
         analysis.setdefault("acceptance_min_glue_fs", 1.50)
-        analysis.setdefault("acceptance_min_design_breaking_load_kgf", 80.0)
+        analysis.setdefault("acceptance_min_design_breaking_load_kgf", 100.0)
+        analysis.setdefault("acceptance_min_torsion_80_20_kgf", 80.0)
         analysis.setdefault("use_target_min_fs_as_hard_acceptance", False)
 
         # Ponte espacial com X-bracing/top-bottom bracing não deve usar K=1.0
@@ -1514,7 +1535,7 @@ class ConfigService:
         planner.setdefault("panel_min_mm", max(40.0, min(140.0, panel * 0.60)))
         planner.setdefault("panel_max_mm", min(280.0, max(200.0, panel * 2.50)))
         planner.setdefault("target_load_kgf", load_kgf)
-        planner.setdefault("target_breaking_load_kgf", max(80.0, load_kgf))
+        planner.setdefault("target_breaking_load_kgf", max(100.0, load_kgf))
         planner.setdefault(
             "stretch_breaking_load_kgf",
             max(
@@ -1610,35 +1631,6 @@ class ConfigService:
         # Legacy planner search spaces
         # ---------------------------------------------------------------------
         planner.setdefault("consider_top_profiles", ["flat"])
-
-        # Respeita estritamente o domínio escolhido pelo usuário.  Antes, a UI
-        # podia gravar ``consider_top_profiles = ['flat']`` e manter
-        # ``bridge.top_profile = parker_plateau``; etapas posteriores partiam
-        # dessa geometria antiga e a ponte saía em platô mesmo com platô e pico
-        # desabilitados.  Aqui normalizamos os aliases do domínio e forçamos o
-        # perfil corrente para a primeira opção permitida quando houver conflito.
-        raw_allowed_top_profiles = list(planner.get("consider_top_profiles") or ["flat"])
-        allowed_top_profiles: List[str] = []
-        for raw in raw_allowed_top_profiles:
-            canonical = top_profile_aliases.get(str(raw).strip().lower(), str(raw).strip())
-            if canonical and canonical not in allowed_top_profiles:
-                allowed_top_profiles.append(canonical)
-        if not allowed_top_profiles:
-            allowed_top_profiles = ["flat"]
-        planner["consider_top_profiles"] = allowed_top_profiles
-        if bridge.get("top_profile") not in allowed_top_profiles:
-            add_compat_warning(
-                "bridge.top_profile estava fora de planner.consider_top_profiles; "
-                f"ajustado para {allowed_top_profiles[0]!r}."
-            )
-            bridge["top_profile"] = allowed_top_profiles[0]
-        if bridge.get("top_profile") == "flat":
-            # Ponte reta/caixa: as duas alturas devem coincidir.  Mantemos os
-            # campos de plateau por compatibilidade, mas eles não têm efeito.
-            try:
-                bridge["end_height_mm"] = float(bridge.get("center_height_mm", bridge.get("end_height_mm", 0.0)))
-            except (TypeError, ValueError):
-                pass
         planner.setdefault(
             "consider_side_trusses",
             [
@@ -1792,9 +1784,196 @@ class ConfigService:
             )
 
         planner.setdefault("prefer_truss_by_material", True)
+        planner.setdefault("design_mode", "simple_buildable_bridge")
+        planner.setdefault(
+            "simple_panel_options_mm",
+            [100.0, 120.0, 150.0, 200.0],
+        )
+        planner.setdefault(
+            "simple_macro_archetypes",
+            [
+                "simple_pratt_flat_box",
+                "simple_pratt_parker_faceted",
+                "simple_warren_flat_box",
+                "simple_pratt_with_top_deck",
+            ],
+        )
+        planner.setdefault("prefer_simple_buildable_archetypes", True)
+
+        # Domínio final da UI/config deve prevalecer sobre quaisquer valores
+        # antigos, aliases legados ou mutações intermediárias.
+        self.enforce_user_design_domain(cfg, add_warning=add_compat_warning)
 
 
         self._validate_normalized(cfg)
+        return cfg
+
+    @staticmethod
+    def enforce_user_design_domain(
+        cfg: Dict[str, Any],
+        *,
+        add_warning: Any | None = None,
+    ) -> Dict[str, Any]:
+        bridge = cfg.setdefault("bridge", {})
+        planner = cfg.setdefault("planner", {})
+
+        def warn(msg: str) -> None:
+            if callable(add_warning):
+                add_warning(msg)
+
+        top_aliases = {
+            "parker_plateau": "parker_plateau",
+            "plateau": "parker_plateau",
+            "platô": "parker_plateau",
+            "plato": "parker_plateau",
+            "triangular_peak": "triangular_peak",
+            "triangular": "triangular_peak",
+            "pontiagudo/triangular": "triangular_peak",
+            "shallow_arch": "shallow_arch_faceted",
+            "shallow_arch_faceted": "shallow_arch_faceted",
+            "arch": "shallow_arch_faceted",
+            "arco": "shallow_arch_faceted",
+            "flat": "flat",
+            "reto": "flat",
+            "reta": "flat",
+        }
+
+        planner.setdefault("consider_top_profiles", ["flat"])
+        raw_allowed = list(planner.get("consider_top_profiles") or ["flat"])
+        allowed_top_profiles: List[str] = []
+        for raw in raw_allowed:
+            canonical = top_aliases.get(str(raw).strip().lower(), "")
+            if canonical and canonical not in allowed_top_profiles:
+                allowed_top_profiles.append(canonical)
+        if not allowed_top_profiles:
+            allowed_top_profiles = ["flat"]
+        planner["consider_top_profiles"] = allowed_top_profiles
+
+        current_top = top_aliases.get(str(bridge.get("top_profile", "flat")).strip().lower(), "flat")
+        if current_top not in allowed_top_profiles:
+            warn(
+                "bridge.top_profile estava fora de planner.consider_top_profiles; "
+                f"ajustado para {allowed_top_profiles[0]!r}."
+            )
+            current_top = allowed_top_profiles[0]
+        bridge["top_profile"] = current_top
+
+        # Invariantes geométricos do domínio escolhido pelo usuário.  Versões
+        # anteriores apenas trocavam a string do perfil; assim, um
+        # `parker_plateau` podia continuar com `end_height_mm ==
+        # center_height_mm`, o que matematicamente vira uma ponte reta.
+        # Aqui a normalização torna a geometria compatível com o perfil.
+        try:
+            center_h = float(bridge.get("center_height_mm", bridge.get("end_height_mm", 0.0)))
+        except (TypeError, ValueError):
+            center_h = 0.0
+        if current_top == "flat":
+            bridge["end_height_mm"] = center_h
+        else:
+            try:
+                end_h = float(bridge.get("end_height_mm", 0.0))
+            except (TypeError, ValueError):
+                end_h = 0.0
+            min_drop = max(20.0, 0.18 * max(center_h, 1.0))
+            # Perfil não plano deve ter extremidade menor que o centro.  Se o
+            # usuário não informou explicitamente a altura de extremidade, usa
+            # uma proporção simples e montável, próxima a uma Pratt/Parker
+            # facetada em vez de um arco alto degenerado.
+            if center_h > 1.0 and (end_h <= 0.0 or end_h >= center_h - min_drop):
+                bridge["end_height_mm"] = max(40.0, min(center_h - min_drop, 0.35 * center_h))
+            elif center_h > 1.0:
+                bridge["end_height_mm"] = max(0.0, min(end_h, center_h - 1.0))
+            if current_top == "parker_plateau":
+                span = float(bridge.get("span_mm", 1200.0) or 1200.0)
+                p0 = float(bridge.get("plateau_start_mm", span / 3.0) or span / 3.0)
+                p1 = float(bridge.get("plateau_end_mm", 2.0 * span / 3.0) or 2.0 * span / 3.0)
+                if not (0.0 < p0 < p1 < span):
+                    bridge["plateau_start_mm"] = span / 3.0
+                    bridge["plateau_end_mm"] = 2.0 * span / 3.0
+
+        # Modo construtivo simples: por padrão, preferir emendas de topo com
+        # talas/lanes desencontradas a overlaps no mesmo eixo. Isso evita que a
+        # vista as-built vire uma coleção de prismas interpenetrantes.
+        detail = cfg.setdefault("detail_model", {})
+        planner.setdefault("design_mode", "simple_buildable_bridge")
+        planner.setdefault("prefer_simple_buildable_archetypes", True)
+        if planner.get("design_mode") == "simple_buildable_bridge" or planner.get("prefer_simple_buildable_archetypes", True):
+            if str(detail.get("splice_mode", "overlap")).strip().lower() == "overlap":
+                detail["splice_mode"] = "butt_with_splints"
+            detail.setdefault("min_node_lap_overlap_mm", 25.0)
+            detail.setdefault("node_lap_overlap_mm", 35.0)
+            detail.setdefault("visual_beveled_end_cuts", False)
+            detail.setdefault("angled_end_cuts_enabled", False)
+
+        def _enforce_bridge_field_in_domain(
+            bridge_key: str,
+            planner_key: str,
+            fallback: str,
+            *,
+            aliases: Dict[str, str] | None = None,
+        ) -> None:
+            alias_map = aliases or {}
+            def _canon(value: Any) -> str:
+                raw = str(value).strip()
+                return alias_map.get(raw.lower(), raw)
+
+            allowed_raw_vals = list(planner.get(planner_key) or [])
+            allowed_vals = [str(v).strip() for v in allowed_raw_vals if str(v).strip()]
+            if not allowed_vals:
+                allowed_vals = [fallback]
+                planner[planner_key] = list(allowed_vals)
+            cur = str(bridge.get(bridge_key, fallback)).strip()
+            allowed_canon = [_canon(v) for v in allowed_vals]
+            cur_canon = _canon(cur)
+            if cur_canon not in allowed_canon:
+                warn(
+                    f"bridge.{bridge_key} estava fora de planner.{planner_key}; "
+                    f"ajustado para {allowed_vals[0]!r}."
+                )
+                bridge[bridge_key] = allowed_vals[0]
+            else:
+                bridge[bridge_key] = cur
+
+        truss_aliases = {
+            "pratt": "Pratt_symmetric",
+            "pratt_symmetric": "Pratt_symmetric",
+            "warren": "Warren_symmetric",
+            "warren_symmetric": "Warren_symmetric",
+            "warren_mid_braced": "Warren_mid_braced",
+            "howe": "Howe_inverted",
+            "howe_inverted": "Howe_inverted",
+            "x": "X",
+            "duplo_x": "X",
+            "double_x": "X",
+            "none": "none",
+        }
+        _enforce_bridge_field_in_domain(
+            "side_truss_type",
+            "consider_side_trusses",
+            "Pratt_symmetric",
+            aliases=truss_aliases,
+        )
+        _enforce_bridge_field_in_domain(
+            "internal_truss_type",
+            "consider_internal_trusses",
+            "Pratt_symmetric",
+            aliases=truss_aliases,
+        )
+        _enforce_bridge_field_in_domain(
+            "top_chord_truss_type",
+            "consider_top_chord_trusses",
+            "Warren_symmetric",
+            aliases=truss_aliases,
+        )
+        _enforce_bridge_field_in_domain(
+            "bottom_chord_truss_type",
+            "consider_bottom_chord_trusses",
+            "Warren_symmetric",
+            aliases=truss_aliases,
+        )
+
+        # O funil não deve voltar a alterar esses campos fora do domínio da UI.
+        planner["user_design_domain_locked"] = True
         return cfg
 
     def from_minimal_inputs(
@@ -1984,8 +2163,9 @@ class ConfigService:
                 "planner_objective_profile": str(objective_profile),
                 "planner_adaptive_refinement": bool(adaptive_refinement),
                 "planner_stage4_iterations": int(adaptive_iterations),
-                "acceptance_min_design_breaking_load_kgf": float(target_load_kgf) * float(target_min_fs),
-                "use_target_min_fs_as_hard_acceptance": True,
+                "acceptance_min_design_breaking_load_kgf": max(100.0, float(target_load_kgf)),
+                "acceptance_min_torsion_80_20_kgf": float(target_load_kgf),
+                "use_target_min_fs_as_hard_acceptance": False,
             }
         )
 
@@ -2006,9 +2186,9 @@ class ConfigService:
                 "panel_min_mm": float(panel_min_mm),
                 "panel_max_mm": float(panel_max_mm),
                 "target_load_kgf": float(target_load_kgf),
-                "target_breaking_load_kgf": float(target_load_kgf) * float(target_min_fs),
+                "target_breaking_load_kgf": max(100.0, float(target_load_kgf)),
                 "stretch_breaking_load_kgf": float(target_load_kgf) * float(target_min_fs),
-                "use_stretch_breaking_load_as_acceptance": True,
+                "use_stretch_breaking_load_as_acceptance": False,
                 "max_bridge_mass_g": float(max_bridge_mass_g),
                 "target_bridge_mass_g": float(target_mass),
             }

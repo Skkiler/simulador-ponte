@@ -42,11 +42,17 @@ class ReportBundleService:
         analysis = cfg.get("analysis", {}) or {}
         pred = safe_float(metrics.get("predicted_breaking_load_kgf"), 0.0) or 0.0
         break_target = float(analysis.get("acceptance_min_design_breaking_load_kgf", 80.0))
-        min_primary = safe_float(metrics.get("min_fs_primary"), 0.0) or 0.0
+        min_primary = safe_float(
+            metrics.get("min_fs_member_design"),
+            safe_float(metrics.get("min_fs_primary"), 0.0),
+        ) or 0.0
         min_primary_target = float(analysis.get("acceptance_min_primary_fs", 1.05))
         min_support = safe_float(metrics.get("min_support_fs"), None)
         min_support_target = float(analysis.get("acceptance_min_support_fs", 1.0))
-        min_glue = safe_float(metrics.get("min_glue_fs"), None)
+        min_glue = safe_float(
+            metrics.get("min_fs_glue"),
+            safe_float(metrics.get("min_glue_fs"), None),
+        )
         min_glue_target = float(analysis.get("acceptance_min_glue_fs", 1.5))
         comp_ok = bool(metrics.get("competition_mass_compliant", metrics.get("mass_compliant", False)))
         solver_ok = self._solver_regular(metrics.get("solver_status"))
@@ -67,6 +73,9 @@ class ReportBundleService:
             failures.append(f"FS apoio {min_support:.3f} < {min_support_target:.3f}")
         if min_glue is not None and min_glue < min_glue_target:
             failures.append(f"FS cola {min_glue:.3f} < {min_glue_target:.3f}")
+        as_built_intersections = int(metrics.get("as_built_interpenetration_count", 0) or 0)
+        if as_built_intersections > 0:
+            failures.append(f"interpenetrações volumétricas as-built: {as_built_intersections}")
 
         # O relatório nominal e o funil S8 podem usar bases diferentes.
         # Para evitar contradição, o relatório final também considera o S8
@@ -77,7 +86,8 @@ class ReportBundleService:
             s8_verdict = str(s8.get("verdict", "")).strip().upper()
             s8_break = safe_float(s8.get("predicted_breaking_load_kgf"), None)
             s8_failed = str(s8.get("failed_restriction", "") or "")
-            if s8_verdict == "REPROVADA":
+            s8_stage = str(s8.get("validation_stage", "pre_detail")).strip().lower()
+            if s8_verdict == "REPROVADA" and not s8_stage.startswith("pre_detail"):
                 if s8_break is not None:
                     failures.append(
                         f"ruptura design multi-loadcase {s8_break:.2f} < {break_target:.2f} kgf"
@@ -670,6 +680,8 @@ Arquivo completo: `05_mapa_juntas_por_tipo.csv`.
         cut_limit = min(float(stick_len), float(max_cut))
 
         total = len(rows)
+        as_built = (detailed or {}).get("as_built_audit", {}) or {}
+        as_built_intersections = int(as_built.get("interpenetration_count", 0) or 0)
         over_len = []
         short_constructive = []
         bad_width = []
@@ -719,7 +731,7 @@ Arquivo completo: `05_mapa_juntas_por_tipo.csv`.
             f"| {r.get('stick_id')} | {r.get('member_id')} | {r.get('member_group')} | {r.get('x_bracing_crossing_handling')} |"
             for r in x_unresolved[:25]
         ) or "| — | — | — |"
-        verdict = "OK" if not over_len and not short_constructive and not bad_width and not bad_thk and not x_unresolved else "FALHA"
+        verdict = "OK" if not over_len and not short_constructive and not bad_width and not bad_thk and not x_unresolved and as_built_intersections == 0 else "FALHA"
         text = f"""# Auditoria de conectividade e limites físicos dos palitos
 
 Veredito: **{verdict}**.
@@ -735,6 +747,7 @@ Veredito: **{verdict}**.
 - Prismas/peças com largura visual acima do palito: **{len(bad_width)}**.
 - Prismas/peças com espessura visual acima do palito: **{len(bad_thk)}**.
 - Contraventamentos em X ou bracings equivalentes sem solução física de cruzamento: **{len(x_unresolved)}**.
+- Interpenetrações volumétricas na geometria `as_built`: **{as_built_intersections}**.
 
 ## Modelos de conexão usados
 | modelo de conexão | peças |
@@ -789,14 +802,28 @@ O tratamento `single_diagonal_no_crossing` substitui X por diagonais alternadas 
         summary = (detailed or {}).get("summary", {}) or {}
         verdict, verdict_reason, failures = self._verdict(cfg, metrics, optimization)
         acceptance_break = float(cfg.get("analysis", {}).get("acceptance_min_design_breaking_load_kgf", 80.0))
-        pred_break = safe_float(metrics.get("predicted_breaking_load_kgf"), 0.0) or 0.0
+        pred_break = safe_float(
+            metrics.get("predicted_breaking_load_design_kgf"),
+            safe_float(metrics.get("predicted_breaking_load_kgf"), 0.0),
+        ) or 0.0
         s8_rows_for_report = list((optimization or {}).get("s8_final_validation", []) or [])
         s8_for_report = s8_rows_for_report[0] if s8_rows_for_report else {}
         design_break = safe_float(
-            s8_for_report.get("predicted_breaking_load_kgf"),
-            None,
+            metrics.get("predicted_breaking_load_kgf"),
+            safe_float(
+                metrics.get("predicted_breaking_load_design_kgf"),
+                safe_float(s8_for_report.get("predicted_breaking_load_kgf"), None),
+            ),
         )
-        design_verdict = s8_for_report.get("verdict")
+        design_verdict = verdict
+        governing_limit_state = (
+            s8_for_report.get("governing_limit_state")
+            or metrics.get("governing_limit_state")
+        )
+        governing_fs = safe_float(
+            s8_for_report.get("governing_fs"),
+            safe_float(metrics.get("governing_fs"), None),
+        )
         competition_mass = safe_float(metrics.get("competition_mass_g"), safe_float(metrics.get("estimated_total_mass_g"), 0.0)) or 0.0
         mass_limit = safe_float(metrics.get("mass_limit_effective_g"), 1000.0) or 1000.0
         mass_margin = mass_limit - competition_mass
@@ -809,10 +836,21 @@ O tratamento `single_diagonal_no_crossing` substitui X por diagonais alternadas 
             "predicted_breaking_load_design_multicase_kgf": design_break,
             "design_multicase_verdict": design_verdict,
             "design_multicase_governing_case": s8_for_report.get("governing_case"),
+            "design_multicase_governing_strength_case": s8_for_report.get("governing_strength_case"),
+            "design_multicase_governing_service_case": s8_for_report.get("governing_service_case"),
+            "design_multicase_governing_contact_case": s8_for_report.get("governing_contact_case"),
             "design_multicase_governing_member_id": s8_for_report.get("governing_member_id"),
             "design_multicase_governing_member_group": s8_for_report.get("governing_member_group"),
             "design_multicase_governing_mode": s8_for_report.get("governing_mode"),
+            "governing_limit_state": governing_limit_state,
+            "governing_fs": governing_fs,
             "predicted_breaking_load_kgf": pred_break,
+            "predicted_breaking_load_by_members_kgf": metrics.get("predicted_breaking_load_by_members_kgf"),
+            "predicted_breaking_load_by_supports_kgf": metrics.get("predicted_breaking_load_by_supports_kgf"),
+            "predicted_breaking_load_by_glue_kgf": metrics.get("predicted_breaking_load_by_glue_kgf"),
+            "min_fs_member_design": metrics.get("min_fs_member_design", metrics.get("min_fs_design")),
+            "min_fs_support": metrics.get("min_fs_support", metrics.get("min_support_fs")),
+            "min_fs_glue": metrics.get("min_fs_glue", metrics.get("min_glue_fs")),
             "target_breaking_load_kgf": acceptance_break,
             "competition_mass_g": competition_mass,
             "competition_mass_margin_g": mass_margin,
@@ -855,7 +893,7 @@ O tratamento `single_diagonal_no_crossing` substitui X por diagonais alternadas 
         GeometryService.write_csv(out / "load_contact_assessment.csv", load_contact_rows)
         bridge_cfg = cfg.get("bridge", {}) or {}
         arch_warning = ""
-        if str(bridge_cfg.get("top_profile", "")).lower() in {"shallow_arch", "arco"}:
+        if str(bridge_cfg.get("top_profile", "")).lower() in {"shallow_arch", "shallow_arch_faceted", "arco"}:
             arch_warning = (
                 "\n> Atenção: banzo superior arqueado só é compatível com carga distribuída "
                 "se existir uma sela/plataforma rígida de madeira transferindo a carga "

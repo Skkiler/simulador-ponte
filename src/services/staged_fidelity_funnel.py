@@ -391,6 +391,59 @@ class StagedFidelityFunnelPlanner:
         return max(0.0, (float(member_count) - 420.0) / 280.0)
 
     @staticmethod
+    def _buildability_score(cfg: Dict[str, Any], member_count: int) -> float:
+        """Score 0..1 for constructive simplicity with popsicle sticks and glue."""
+        bridge = cfg.get("bridge", {}) or {}
+        detail = cfg.get("detail_model", {}) or {}
+        planner = cfg.get("planner", {}) or {}
+        section_layout = cfg.get("section_layout_by_group", {}) or {}
+
+        score = 1.0
+
+        panel = safe_float(bridge.get("panel_mm"), None)
+        simple_panels = [
+            safe_float(v, None)
+            for v in (planner.get("simple_panel_options_mm") or [100.0, 120.0, 150.0, 200.0])
+        ]
+        simple_panels = [float(v) for v in simple_panels if v is not None]
+        if panel is not None and simple_panels:
+            if min(abs(float(panel) - p) for p in simple_panels) > 1.0e-6:
+                score -= 0.18
+
+        side = str(bridge.get("side_truss_type", "")).strip().lower()
+        if side in {"x", "duplo_x", "double_x"}:
+            score -= 0.35
+
+        for key in ("top_chord_truss_type", "bottom_chord_truss_type", "internal_truss_type"):
+            if str(bridge.get(key, "")).strip().lower() in {"x", "duplo_x", "double_x"}:
+                score -= 0.10
+
+        if bool(detail.get("angled_end_cuts_enabled", False)):
+            score -= 0.30
+
+        allowed_layouts = {
+            "single",
+            "side_by_side",
+            "stacked",
+            "stacked_flat",
+            "stacked_edge",
+            "laminated_rectangular",
+            "double_stack",
+            "box",
+            "simple_box_with_real_spacers",
+            "contact_box",
+        }
+        for _, gcfg in section_layout.items():
+            layout = str((gcfg or {}).get("layout", "stacked")).strip().lower()
+            if layout not in allowed_layouts:
+                score -= 0.12
+            elif layout in {"double_stack", "box", "contact_box"}:
+                score -= 0.08
+
+        score -= min(0.25, 0.20 * StagedFidelityFunnelPlanner._topology_complexity_penalty(member_count))
+        return float(_clamp(score, 0.0, 1.0))
+
+    @staticmethod
     def _sync_bridge_contacts(bridge: Dict[str, Any]) -> None:
         span = float(bridge.get("span_mm", 1200.0))
         width = float(bridge.get("width_mm", 160.0))
@@ -789,6 +842,18 @@ class StagedFidelityFunnelPlanner:
                 or ["self_weight"]
             )
         }
+        contact_names = {
+            str(v)
+            for v in (
+                ml_cfg.get("contact_cases")
+                or [
+                    "single_plate_center",
+                    "physical_plate_center",
+                    "crown_contact",
+                    "loose_weight_crown_contact",
+                ]
+            )
+        }
 
         strength_cases = [
             c for c in cases
@@ -801,6 +866,14 @@ class StagedFidelityFunnelPlanner:
         robustness_cases = [
             c for c in cases
             if str(c.get("case")) in robustness_names
+        ]
+        service_cases = [
+            c for c in cases
+            if str(c.get("case")) in service_names
+        ]
+        contact_cases = [
+            c for c in cases
+            if str(c.get("case")) in contact_names
         ]
 
         min_fs_pre = self._min_positive(
@@ -920,9 +993,9 @@ class StagedFidelityFunnelPlanner:
 
         mass_limit = max(1.0, float(effective_mass_limit_g(cfg)))
 
-        complexity_penalty = self._topology_complexity_penalty(
-            int(len((cases[0] or {}).get("member_results") or []))
-        )
+        member_count = int(len((cases[0] or {}).get("member_results") or []))
+        complexity_penalty = self._topology_complexity_penalty(member_count)
+        buildability = self._buildability_score(cfg, member_count)
 
         valid_for_selection = (
             all_regular
@@ -934,10 +1007,21 @@ class StagedFidelityFunnelPlanner:
         mechanism_penalty = 0.0 if valid_for_selection else 1.0
 
         constructability = _clamp(
-            0.5 * support_balance + 0.5 * load_path,
+            0.40 * support_balance + 0.30 * load_path + 0.30 * buildability,
             0.0,
             1.0,
         )
+
+        def _governing_case_row(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+            return min(
+                list(rows or []),
+                key=lambda r: safe_float(r.get("predicted_breaking_load_proxy_kgf"), 1.0e99) or 1.0e99,
+                default={},
+            )
+
+        governing_strength_row = _governing_case_row(strength_cases)
+        governing_service_row = _governing_case_row(service_cases)
+        governing_contact_row = _governing_case_row(contact_cases)
 
         target_break = float(
             cfg.get("analysis", {}).get(
@@ -993,9 +1077,19 @@ class StagedFidelityFunnelPlanner:
             "support_reaction_balance": support_balance,
             "load_path_score": load_path,
             "topology_stability_proxy": topology_stability_proxy,
+            "buildability_score": buildability,
             "objective": objective,
             "valid_for_selection": valid_for_selection,
             "mass_limit_g": mass_limit,
+            "strength_case_names": sorted(str(c.get("case")) for c in strength_cases),
+            "service_case_names": sorted(str(c.get("case")) for c in service_cases),
+            "contact_case_names": sorted(str(c.get("case")) for c in contact_cases),
+            "governing_strength_case": governing_strength_row.get("case"),
+            "governing_strength_case_breaking_load_kgf": governing_strength_row.get("predicted_breaking_load_proxy_kgf"),
+            "governing_service_case": governing_service_row.get("case"),
+            "governing_service_case_breaking_load_kgf": governing_service_row.get("predicted_breaking_load_proxy_kgf"),
+            "governing_contact_case": governing_contact_row.get("case"),
+            "governing_contact_case_breaking_load_kgf": governing_contact_row.get("predicted_breaking_load_proxy_kgf"),
             "geometry_hash": self._signature_hashes(cfg, "center")["geometry_hash"],
             "topology_hash": self._signature_hashes(cfg, "center")["topology_hash"],
             "sizing_hash": self._signature_hashes(cfg, "center")["sizing_hash"],
@@ -1064,18 +1158,270 @@ class StagedFidelityFunnelPlanner:
 
     def _build_macro_archetypes(self, cfg: Dict[str, Any], macro_count: int) -> List[Dict[str, Any]]:
         b = cfg.get("bridge", {}) or {}
+        planner = cfg.get("planner", {}) or {}
         span = float(b.get("span_mm", 1200.0))
         width = float(b.get("width_mm", 160.0))
         height = float(b.get("center_height_mm", 300.0))
         panel = float(b.get("panel_mm", 100.0))
         overlap = float(cfg.get("detail_model", {}).get("overlap_length_mm", 30.0))
+        top_alias = {
+            "parker_plateau": "parker_plateau",
+            "plateau": "parker_plateau",
+            "platô": "parker_plateau",
+            "plato": "parker_plateau",
+            "triangular_peak": "triangular_peak",
+            "triangular": "triangular_peak",
+            "pontiagudo/triangular": "triangular_peak",
+            "shallow_arch": "shallow_arch_faceted",
+            "shallow_arch_faceted": "shallow_arch_faceted",
+            "arch": "shallow_arch_faceted",
+            "arco": "shallow_arch_faceted",
+            "flat": "flat",
+            "reto": "flat",
+            "reta": "flat",
+        }
 
-        allowed_profiles = [str(v) for v in (cfg.get("planner", {}) or {}).get("consider_top_profiles", [])]
+        allowed_profiles = [
+            top_alias.get(str(v).strip().lower(), str(v).strip())
+            for v in (planner.get("consider_top_profiles", []) or [])
+        ]
+        allowed_profiles = [v for v in allowed_profiles if v]
         if not allowed_profiles:
-            allowed_profiles = [str(b.get("top_profile", "flat"))]
-        preferred_profile = str(b.get("top_profile", allowed_profiles[0]))
+            allowed_profiles = [
+                top_alias.get(
+                    str(b.get("top_profile", "flat")).strip().lower(),
+                    "flat",
+                )
+            ]
+        preferred_profile = top_alias.get(
+            str(b.get("top_profile", allowed_profiles[0])).strip().lower(),
+            allowed_profiles[0],
+        )
         if preferred_profile not in allowed_profiles:
             preferred_profile = allowed_profiles[0]
+
+        allowed_side = {
+            str(v).strip().lower()
+            for v in (planner.get("consider_side_trusses", []) or [])
+            if str(v).strip()
+        }
+        allowed_internal = {
+            str(v).strip().lower()
+            for v in (planner.get("consider_internal_trusses", []) or [])
+            if str(v).strip()
+        }
+        allowed_top_chord = {
+            str(v).strip().lower()
+            for v in (planner.get("consider_top_chord_trusses", []) or [])
+            if str(v).strip()
+        }
+        allowed_bottom_chord = {
+            str(v).strip().lower()
+            for v in (planner.get("consider_bottom_chord_trusses", []) or [])
+            if str(v).strip()
+        }
+
+        design_mode = str(planner.get("design_mode", "simple_buildable_bridge")).strip().lower()
+        prefer_simple = bool(planner.get("prefer_simple_buildable_archetypes", True))
+        use_simple_mode = design_mode == "simple_buildable_bridge" or prefer_simple
+
+        def _choose_simple_panels() -> List[float]:
+            p_min = float(planner.get("panel_min_mm", panel))
+            p_max = float(planner.get("panel_max_mm", panel))
+            lo = min(p_min, p_max)
+            hi = max(p_min, p_max)
+            raw_vals = list(planner.get("simple_panel_options_mm") or [100.0, 120.0, 150.0, 200.0])
+            vals: List[float] = []
+            for raw in raw_vals:
+                p = safe_float(raw, None)
+                if p is None:
+                    continue
+                p = float(p)
+                if p < lo - 1.0e-9 or p > hi + 1.0e-9:
+                    continue
+                n = span / max(1.0, p)
+                if abs(n - round(n)) > 1.0e-6:
+                    continue
+                if int(round(n)) < 6:
+                    continue
+                vals.append(round(p, 6))
+            if not vals:
+                vals = [round(panel, 6)]
+            vals = sorted(set(vals), key=lambda p: (abs(float(p) - panel), float(p)))
+            return vals
+
+        if use_simple_mode:
+            simple_panels = _choose_simple_panels()
+            p0 = float(simple_panels[0])
+            p1 = float(simple_panels[min(1, len(simple_panels) - 1)])
+
+            def _nonflat_end_height(h: float) -> float:
+                h = max(1.0, float(h))
+                return max(40.0, min(h - max(20.0, 0.18 * h), 0.35 * h))
+
+            flat_height = min(height, float(planner.get("simple_flat_height_mm", 180.0) or 180.0))
+            flat_height = max(120.0, min(240.0, flat_height))
+            flat_height_alt = max(120.0, min(260.0, flat_height + 40.0))
+            default_nonflat = (
+                "parker_plateau"
+                if "parker_plateau" in allowed_profiles
+                else ("shallow_arch_faceted" if "shallow_arch_faceted" in allowed_profiles else preferred_profile)
+            )
+            simple_macros: List[Dict[str, Any]] = [
+                {
+                    "macro_name": "simple_pratt_flat_box",
+                    "global_pattern": "simple_pratt_flat_box",
+                    "span_mm": span,
+                    "width_mm": width,
+                    "center_height_mm": flat_height,
+                    "panel_mm": p0,
+                    "top_profile": "flat",
+                    "side_truss_type": "Pratt_symmetric",
+                    "internal_truss_type": "Pratt_symmetric",
+                    "top_chord_truss_type": "Warren_symmetric",
+                    "bottom_chord_truss_type": "Warren_symmetric",
+                    "chord_truss_type": "none",
+                    "reinforcement_profile": "balanced",
+                    "tension_joint_model": "double_lap_reinforced",
+                    "compression_joint_model": "double_lap_reinforced",
+                    "splice_mode": "butt_with_splints",
+                    "overlap_length_mm": overlap,
+                    "load_distribution_model": "point_stations",
+                },
+                {
+                    "macro_name": "simple_warren_flat_box",
+                    "global_pattern": "simple_warren_flat_box",
+                    "span_mm": span,
+                    "width_mm": width,
+                    "center_height_mm": flat_height_alt,
+                    "panel_mm": p1,
+                    "top_profile": "flat",
+                    "side_truss_type": "Warren_symmetric",
+                    "internal_truss_type": "Warren_symmetric",
+                    "top_chord_truss_type": "Warren_symmetric",
+                    "bottom_chord_truss_type": "Warren_symmetric",
+                    "chord_truss_type": "none",
+                    "reinforcement_profile": "balanced",
+                    "tension_joint_model": "double_lap_reinforced",
+                    "compression_joint_model": "double_lap_reinforced",
+                    "splice_mode": "butt_with_splints",
+                    "overlap_length_mm": overlap,
+                    "load_distribution_model": "point_stations",
+                },
+                {
+                    "macro_name": "simple_pratt_with_top_deck",
+                    "global_pattern": "simple_pratt_with_top_deck",
+                    "span_mm": span,
+                    "width_mm": width,
+                    "center_height_mm": flat_height,
+                    "panel_mm": p0,
+                    "top_profile": "flat",
+                    "side_truss_type": "Pratt_symmetric",
+                    "internal_truss_type": "Pratt_symmetric",
+                    "top_chord_truss_type": "Warren_symmetric",
+                    "bottom_chord_truss_type": "Warren_symmetric",
+                    "chord_truss_type": "none",
+                    "reinforcement_profile": "strong_top",
+                    "tension_joint_model": "double_lap_reinforced",
+                    "compression_joint_model": "double_lap_reinforced",
+                    "splice_mode": "butt_with_splints",
+                    "overlap_length_mm": overlap,
+                    "load_distribution_model": "plate_surface_uniform",
+                    "load_application_level": "top",
+                    "load_footprint_length_mm": max(180.0, min(span * 0.30, 320.0)),
+                },
+                {
+                    "macro_name": "simple_pratt_parker_faceted",
+                    "global_pattern": "simple_pratt_parker_faceted",
+                    "span_mm": span,
+                    "width_mm": width,
+                    "center_height_mm": max(height, 260.0),
+                    "panel_mm": p1,
+                    "top_profile": default_nonflat,
+                    "end_height_mm": _nonflat_end_height(max(height, 260.0)),
+                    "plateau_start_mm": span / 3.0,
+                    "plateau_end_mm": 2.0 * span / 3.0,
+                    "side_truss_type": "Pratt_symmetric",
+                    "internal_truss_type": "Pratt_symmetric",
+                    "top_chord_truss_type": "Warren_symmetric",
+                    "bottom_chord_truss_type": "Warren_symmetric",
+                    "chord_truss_type": "none",
+                    "reinforcement_profile": "strong_top",
+                    "tension_joint_model": "double_lap_reinforced",
+                    "compression_joint_model": "double_lap_reinforced",
+                    "splice_mode": "butt_with_splints",
+                    "overlap_length_mm": overlap,
+                    "load_distribution_model": "plate_surface_uniform",
+                    "load_application_level": "top",
+                    "load_footprint_length_mm": max(180.0, min(span * 0.30, 320.0)),
+                },
+            ]
+            requested_simple_names = {
+                str(v).strip()
+                for v in (planner.get("simple_macro_archetypes") or [])
+                if str(v).strip()
+            }
+            if requested_simple_names:
+                simple_macros = [
+                    m for m in simple_macros
+                    if str(m.get("macro_name", "")).strip() in requested_simple_names
+                ] or simple_macros
+
+            filtered: List[Dict[str, Any]] = []
+            for m in simple_macros:
+                top_profile = top_alias.get(
+                    str(m.get("top_profile", preferred_profile)).strip().lower(),
+                    str(m.get("top_profile", preferred_profile)),
+                )
+                m["top_profile"] = top_profile
+                if top_profile not in allowed_profiles:
+                    continue
+                if allowed_side and str(m.get("side_truss_type", "")).strip().lower() not in allowed_side:
+                    continue
+                if allowed_internal and str(m.get("internal_truss_type", "")).strip().lower() not in allowed_internal:
+                    continue
+                if allowed_top_chord and str(m.get("top_chord_truss_type", "")).strip().lower() not in allowed_top_chord:
+                    continue
+                if allowed_bottom_chord and str(m.get("bottom_chord_truss_type", "")).strip().lower() not in allowed_bottom_chord:
+                    continue
+                if top_profile == "flat":
+                    m["end_height_mm"] = float(m.get("center_height_mm", height))
+                else:
+                    m["end_height_mm"] = float(m.get("end_height_mm", _nonflat_end_height(float(m.get("center_height_mm", height)))))
+                    if top_profile == "parker_plateau":
+                        m.setdefault("plateau_start_mm", span / 3.0)
+                        m.setdefault("plateau_end_mm", 2.0 * span / 3.0)
+                filtered.append(m)
+
+            if not filtered:
+                fallback_profile = preferred_profile if preferred_profile in allowed_profiles else allowed_profiles[0]
+                fallback_height = flat_height if fallback_profile == "flat" else height
+                fallback_end = fallback_height if fallback_profile == "flat" else _nonflat_end_height(fallback_height)
+                filtered = [{
+                    "macro_name": f"simple_pratt_{fallback_profile}",
+                    "global_pattern": "simple_pratt_buildable",
+                    "span_mm": span,
+                    "width_mm": width,
+                    "center_height_mm": fallback_height,
+                    "panel_mm": p0,
+                    "top_profile": fallback_profile,
+                    "side_truss_type": "Pratt_symmetric",
+                    "internal_truss_type": "Pratt_symmetric",
+                    "top_chord_truss_type": "Warren_symmetric",
+                    "bottom_chord_truss_type": "Warren_symmetric",
+                    "chord_truss_type": "none",
+                    "reinforcement_profile": "balanced",
+                    "tension_joint_model": "double_lap_reinforced",
+                    "compression_joint_model": "double_lap_reinforced",
+                    "splice_mode": "butt_with_splints",
+                    "overlap_length_mm": overlap,
+                    "load_distribution_model": "plate_surface_uniform" if fallback_profile != "flat" else "point_stations",
+                    "end_height_mm": fallback_end,
+                    "plateau_start_mm": span / 3.0,
+                    "plateau_end_mm": 2.0 * span / 3.0,
+                }]
+            macro_count = max(4, min(16, int(macro_count)))
+            return filtered[:macro_count]
 
         base = {
             "span_mm": span,
@@ -1247,12 +1593,14 @@ class StagedFidelityFunnelPlanner:
             },
         ]
 
-        allowed_internal = {str(v).strip().lower() for v in (cfg.get("planner", {}) or {}).get("consider_internal_trusses", [])}
-        allowed_top_chord = {str(v).strip().lower() for v in (cfg.get("planner", {}) or {}).get("consider_top_chord_trusses", [])}
-        allowed_bottom_chord = {str(v).strip().lower() for v in (cfg.get("planner", {}) or {}).get("consider_bottom_chord_trusses", [])}
-
         def _macro_allowed(m: Dict[str, Any]) -> bool:
-            if str(m.get("top_profile", preferred_profile)) not in allowed_profiles:
+            top_profile = top_alias.get(
+                str(m.get("top_profile", preferred_profile)).strip().lower(),
+                str(m.get("top_profile", preferred_profile)).strip(),
+            )
+            if top_profile not in allowed_profiles:
+                return False
+            if allowed_side and str(m.get("side_truss_type", "")).strip().lower() not in allowed_side:
                 return False
             if allowed_internal and str(m.get("internal_truss_type", "")).strip().lower() not in allowed_internal:
                 return False
@@ -1273,6 +1621,11 @@ class StagedFidelityFunnelPlanner:
         for k in ("panel_side_truss_pattern", "panel_top_chord_pattern", "panel_bottom_chord_pattern"):
             if k in macro:
                 bridge[k] = copy.deepcopy(macro[k])
+        for k in ("load_distribution_model", "load_application_level", "load_footprint_length_mm"):
+            if k in macro:
+                bridge[k] = macro[k]
+        if str(bridge.get("top_profile", "")).strip().lower() == "flat":
+            bridge["end_height_mm"] = float(bridge.get("center_height_mm", bridge.get("end_height_mm", 0.0)))
         self._sync_bridge_contacts(bridge)
         if bridge.get("panel_side_truss_pattern") == "__symmetric_span_mixed__":
             bridge["panel_side_truss_pattern"] = self._make_symmetric_span_pattern(bridge)
@@ -1280,6 +1633,11 @@ class StagedFidelityFunnelPlanner:
             cfg.setdefault("analysis", {})["enable_tension_only_solver_in_funnel"] = True
             bridge["tension_only_bracing_solver_enabled"] = True
             bridge["tension_only_bracing_interpretation"] = True
+        if str(cfg.get("planner", {}).get("design_mode", "simple_buildable_bridge")).strip().lower() == "simple_buildable_bridge":
+            detail = cfg.setdefault("detail_model", {})
+            detail["angled_end_cuts_enabled"] = False
+            detail["visual_beveled_end_cuts"] = False
+        self.planner.config.enforce_user_design_domain(cfg)
         return self.planner.config.normalize(cfg)
 
     @staticmethod
@@ -7593,8 +7951,24 @@ class StagedFidelityFunnelPlanner:
             stage_name="S8",
             tension_only=tension_only_s8,
         )
+        strength_case_names = {
+            str(v)
+            for v in (final_summary.get("strength_case_names") or [])
+            if str(v).strip()
+        }
+        service_case_names = {
+            str(v)
+            for v in (final_summary.get("service_case_names") or [])
+            if str(v).strip()
+        }
+        contact_case_names = {
+            str(v)
+            for v in (final_summary.get("contact_case_names") or [])
+            if str(v).strip()
+        }
         final_case_diag_rows = []
         for c in final_summary.get("cases") or []:
+            case_name = str(c.get("case"))
             design_checks = [
                 r for r in (c.get("member_checks") or [])
                 if r.get("design_relevant", True)
@@ -7630,6 +8004,9 @@ class StagedFidelityFunnelPlanner:
                     "support_reaction_balance": c.get("support_reaction_balance"),
                     "load_path_score": c.get("load_path_score"),
                     "mass_proxy_g": c.get("mass_proxy_g"),
+                    "is_strength_case": case_name in strength_case_names,
+                    "is_service_case": case_name in service_case_names,
+                    "is_contact_case": case_name in contact_case_names,
                     "governing_member_id": worst.get("member_id"),
                     "governing_member_group": worst.get("group"),
                     "governing_mode": worst.get("governing_mode"),
@@ -7639,11 +8016,35 @@ class StagedFidelityFunnelPlanner:
                 }
             )
         GeometryService.write_csv(out / "s8_case_diagnostics.csv", final_case_diag_rows)
-        predicted_break = safe_float(final_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
-        min_fs = safe_float(final_summary.get("min_fs_design_proxy"), 0.0) or 0.0
+        rupture_s7 = metrics_s7.get("rupture_details", {}) or {}
+        predicted_break_proxy = safe_float(final_summary.get("predicted_breaking_load_proxy_kgf"), 0.0) or 0.0
+        predicted_break_detail = safe_float(
+            rupture_s7.get("predicted_breaking_load_design_kgf"),
+            safe_float(metrics_s7.get("predicted_breaking_load_kgf"), None),
+        )
+        validation_stage = "post_detail" if predicted_break_detail is not None else "pre_detail"
+        predicted_break = predicted_break_detail if predicted_break_detail is not None else predicted_break_proxy
+        min_fs_member = safe_float(
+            rupture_s7.get("min_fs_member_design"),
+            safe_float(metrics_s7.get("min_fs_design"), safe_float(final_summary.get("min_fs_design_proxy"), 0.0)),
+        ) or 0.0
+        min_fs_support = safe_float(
+            rupture_s7.get("min_fs_support"),
+            safe_float(metrics_s7.get("min_support_fs"), None),
+        )
+        min_fs_glue = safe_float(
+            rupture_s7.get("min_fs_glue"),
+            safe_float(metrics_s7.get("min_glue_fs"), None),
+        )
+        break_by_members = safe_float(rupture_s7.get("predicted_breaking_load_by_members_kgf"), None)
+        break_by_supports = safe_float(rupture_s7.get("predicted_breaking_load_by_supports_kgf"), None)
+        break_by_glue = safe_float(rupture_s7.get("predicted_breaking_load_by_glue_kgf"), None)
+        governing_limit_state = str(rupture_s7.get("governing_limit_state", "") or "")
+        governing_fs = safe_float(rupture_s7.get("governing_fs"), None)
         mass_comp = safe_float(summary_s7.get("competition_mass_g"), safe_float(final_summary.get("dead_weight_proxy_g"), 0.0)) or 0.0
         target_break = float(base.get("analysis", {}).get("acceptance_min_design_breaking_load_kgf", 80.0))
         min_primary_req = float(base.get("analysis", {}).get("acceptance_min_primary_fs", 1.05))
+        min_glue_req = float(base.get("analysis", {}).get("acceptance_min_glue_fs", 1.50))
         mass_limit = float(effective_mass_limit_g(best_cfg_s7))
 
         verdict = "APROVADA"
@@ -7660,12 +8061,28 @@ class StagedFidelityFunnelPlanner:
         elif predicted_break < target_break:
             verdict = "REPROVADA"
             failed_restriction = f"rupture_below_target:{predicted_break:.2f}<{target_break:.2f}"
-        elif min_fs < min_primary_req:
+        elif min_fs_member < min_primary_req:
             verdict = "REPROVADA"
-            failed_restriction = f"fs_below_acceptance:{min_fs:.3f}<{min_primary_req:.3f}"
+            failed_restriction = f"fs_member_below_acceptance:{min_fs_member:.3f}<{min_primary_req:.3f}"
+        elif min_fs_glue is not None and min_fs_glue < min_glue_req:
+            verdict = "REPROVADA"
+            failed_restriction = f"fs_glue_below_acceptance:{min_fs_glue:.3f}<{min_glue_req:.3f}"
 
+        strength_case_rows = [r for r in final_case_diag_rows if bool(r.get("is_strength_case"))]
+        service_case_rows = [r for r in final_case_diag_rows if bool(r.get("is_service_case"))]
+        contact_case_rows = [r for r in final_case_diag_rows if bool(r.get("is_contact_case"))]
         governing_case_row = min(
-            final_case_diag_rows,
+            strength_case_rows or final_case_diag_rows,
+            key=lambda r: safe_float(r.get("predicted_breaking_load_proxy_kgf"), 1.0e99) or 1.0e99,
+            default={},
+        )
+        governing_service_case_row = min(
+            service_case_rows,
+            key=lambda r: safe_float(r.get("predicted_breaking_load_proxy_kgf"), 1.0e99) or 1.0e99,
+            default={},
+        )
+        governing_contact_case_row = min(
+            contact_case_rows,
             key=lambda r: safe_float(r.get("predicted_breaking_load_proxy_kgf"), 1.0e99) or 1.0e99,
             default={},
         )
@@ -7675,15 +8092,31 @@ class StagedFidelityFunnelPlanner:
             "objective": final_summary.get("objective"),
             "solver_regular": final_summary.get("solver_regular"),
             "equilibrium_ok": final_summary.get("equilibrium_ok"),
-            "min_fs_design": min_fs,
+            "validation_stage": validation_stage,
+            "min_fs_design": min_fs_member,
+            "min_fs_member_design": min_fs_member,
+            "min_fs_support": min_fs_support,
+            "min_fs_glue": min_fs_glue,
+            "governing_limit_state": governing_limit_state,
+            "governing_fs": governing_fs,
             "predicted_breaking_load_kgf": predicted_break,
+            "predicted_breaking_load_proxy_kgf": predicted_break_proxy,
+            "predicted_breaking_load_by_members_kgf": break_by_members,
+            "predicted_breaking_load_by_supports_kgf": break_by_supports,
+            "predicted_breaking_load_by_glue_kgf": break_by_glue,
             "competition_mass_g": mass_comp,
             "verdict": verdict,
             "failed_restriction": failed_restriction,
             "target_breaking_load_kgf": target_break,
             "mass_limit_g": mass_limit,
             "governing_case": governing_case_row.get("case"),
+            "governing_strength_case": governing_case_row.get("case"),
             "governing_case_breaking_load_kgf": governing_case_row.get("predicted_breaking_load_proxy_kgf"),
+            "governing_strength_case_breaking_load_kgf": governing_case_row.get("predicted_breaking_load_proxy_kgf"),
+            "governing_service_case": governing_service_case_row.get("case"),
+            "governing_service_case_breaking_load_kgf": governing_service_case_row.get("predicted_breaking_load_proxy_kgf"),
+            "governing_contact_case": governing_contact_case_row.get("case"),
+            "governing_contact_case_breaking_load_kgf": governing_contact_case_row.get("predicted_breaking_load_proxy_kgf"),
             "governing_member_id": governing_case_row.get("governing_member_id"),
             "governing_member_group": governing_case_row.get("governing_member_group"),
             "governing_mode": governing_case_row.get("governing_mode"),
@@ -7695,15 +8128,34 @@ class StagedFidelityFunnelPlanner:
         final_validation = {
             "verdict": verdict,
             "failed_restriction": failed_restriction,
+            "validation_stage": validation_stage,
             "predicted_breaking_load_kgf": predicted_break,
+            "predicted_breaking_load_proxy_kgf": predicted_break_proxy,
+            "predicted_breaking_load_by_members_kgf": break_by_members,
+            "predicted_breaking_load_by_supports_kgf": break_by_supports,
+            "predicted_breaking_load_by_glue_kgf": break_by_glue,
             "target_breaking_load_kgf": target_break,
             "competition_mass_g": mass_comp,
-            "min_fs_design": min_fs,
+            "min_fs_design": min_fs_member,
+            "min_fs_member_design": min_fs_member,
+            "min_fs_support": min_fs_support,
+            "min_fs_glue": min_fs_glue,
+            "governing_limit_state": governing_limit_state,
+            "governing_fs": governing_fs,
             "solver_regular": bool(final_summary.get("solver_regular")),
             "equilibrium_ok": bool(final_summary.get("equilibrium_ok")),
             "hits_target_80kgf": bool(predicted_break >= 80.0),
+            "hits_nominal_100kgf": bool(predicted_break >= target_break),
+            "nominal_required_breaking_load_kgf": target_break,
+            "torsion_80_20_required_breaking_load_kgf": float(base.get("analysis", {}).get("acceptance_min_torsion_80_20_kgf", 80.0)),
             "governing_case": governing_case_row.get("case"),
+            "governing_strength_case": governing_case_row.get("case"),
             "governing_case_breaking_load_kgf": governing_case_row.get("predicted_breaking_load_proxy_kgf"),
+            "governing_strength_case_breaking_load_kgf": governing_case_row.get("predicted_breaking_load_proxy_kgf"),
+            "governing_service_case": governing_service_case_row.get("case"),
+            "governing_service_case_breaking_load_kgf": governing_service_case_row.get("predicted_breaking_load_proxy_kgf"),
+            "governing_contact_case": governing_contact_case_row.get("case"),
+            "governing_contact_case_breaking_load_kgf": governing_contact_case_row.get("predicted_breaking_load_proxy_kgf"),
             "governing_member_id": governing_case_row.get("governing_member_id"),
             "governing_member_group": governing_case_row.get("governing_member_group"),
             "governing_mode": governing_case_row.get("governing_mode"),

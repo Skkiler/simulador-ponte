@@ -15,6 +15,7 @@ class ReportService:
             "parker_plateau": "platô",
             "triangular_peak": "pontiagudo/triangular",
             "shallow_arch": "arco",
+            "shallow_arch_faceted": "arco",
             "flat": "reto",
         }
         return mp.get(raw, str(value or "—"))
@@ -176,11 +177,25 @@ class ReportService:
         panel = float(cfg["bridge"]["panel_mm"])
         load_kgf = float(cfg["bridge"]["load_total_kgf"])
 
-        min_fs = safe_float(metrics.get("min_fs_primary"), None)
+        min_fs = safe_float(
+            metrics.get("min_fs_member_design"),
+            safe_float(metrics.get("min_fs_primary"), None),
+        )
         pred_break = safe_float(metrics.get("predicted_breaking_load_kgf"), None)
         if pred_break is None and min_fs is not None:
             pred_break = load_kgf * min_fs
         collapse_est = pred_break
+        rupture = metrics.get("rupture_details", {}) or {}
+        governing_ls = str(
+            metrics.get("governing_limit_state", rupture.get("governing_limit_state", "—"))
+            or "—"
+        )
+        fs_member = safe_float(metrics.get("min_fs_member_design"), safe_float(metrics.get("min_fs_design"), None))
+        fs_support = safe_float(metrics.get("min_fs_support"), safe_float(metrics.get("min_support_fs"), None))
+        fs_glue = safe_float(metrics.get("min_fs_glue"), safe_float(metrics.get("min_glue_fs"), None))
+        break_by_members = safe_float(metrics.get("predicted_breaking_load_by_members_kgf"), None)
+        break_by_supports = safe_float(metrics.get("predicted_breaking_load_by_supports_kgf"), None)
+        break_by_glue = safe_float(metrics.get("predicted_breaking_load_by_glue_kgf"), None)
 
         criter = self._criterios_edital(cfg, metrics, detailed)
         criter_lines = "\n".join(
@@ -236,6 +251,22 @@ class ReportService:
             if int(r.get("n_sticks_recommended", r.get("n_sticks_current", 0)) or 0)
             != int(r.get("n_sticks_current", 0) or 0)
         )
+        governing_note = ""
+        if str(governing_ls).strip().lower() == "glue":
+            governing_note = (
+                f"- Ruptura governada por cola: FS_glue = {self._fmt(fs_glue, 3, '')}; "
+                f"carga prevista = {self._fmt(break_by_glue, 2, ' kgf')}."
+            )
+        elif str(governing_ls).strip().lower() == "support":
+            governing_note = (
+                f"- Ruptura governada por apoio: FS_support = {self._fmt(fs_support, 3, '')}; "
+                f"carga prevista = {self._fmt(break_by_supports, 2, ' kgf')}."
+            )
+        elif str(governing_ls).strip().lower().startswith("member"):
+            governing_note = (
+                f"- Ruptura governada por membros: FS_member = {self._fmt(fs_member, 3, '')}; "
+                f"carga prevista = {self._fmt(break_by_members, 2, ' kgf')}."
+            )
 
         md = f"""# Relatório técnico automático - ponte de palitos
 
@@ -268,7 +299,14 @@ class ReportService:
 - Hipótese base: modelo linear axial 3D.
 - Carga prevista de colapso: {self._fmt(collapse_est, 2, ' kgf')}
 - Carga prevista de ruptura: {self._fmt(pred_break, 2, ' kgf')}
-- Relação usada: carga_ruptura ~= carga_projeto x FS_min_principal.
+- FS membros (design): {self._fmt(fs_member, 3, '')}
+- FS apoios: {self._fmt(fs_support, 3, '')}
+- FS cola: {self._fmt(fs_glue, 3, '')}
+- Ruptura governante: {governing_ls}
+- Ruptura por membros: {self._fmt(break_by_members, 2, ' kgf')}
+- Ruptura por apoios: {self._fmt(break_by_supports, 2, ' kgf')}
+- Ruptura por cola: {self._fmt(break_by_glue, 2, ' kgf')}
+- Observação do estado limite governante: {governing_note or '—'}
 - Verificações consideradas: tração, compressão direta, flambagem por Euler e reações de apoio.
 
 ## 5) Peso, dimensões e consumo
@@ -312,6 +350,9 @@ class ReportService:
 
 ## 10) Comentários finais
 {summary}
+
+Limitação do modelo:
+- A previsão acima é idealizada (modelo numérico). Ensaios físicos reais ainda são obrigatórios para validação experimental.
 
 Arquivos detalhados de apoio:
 - `outputs/details/stick_pieces.csv`

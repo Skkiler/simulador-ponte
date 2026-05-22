@@ -11,8 +11,8 @@
     "right_support_overhang_mm": 100.0,
     "panel_mm": 100.0,
     "width_mm": 100.0,
-    "end_height_mm": 300.0,
-    "center_height_mm": 300.0,
+    "end_height_mm": 180.0,
+    "center_height_mm": 180.0,
     "plateau_start_mm": 400.0,
     "plateau_end_mm": 800.0,
     "load_total_kgf": 80.0,
@@ -82,16 +82,16 @@
     "compression_area_cap_max_multiplier_vs_table": 1.75
   },
   "member_sticks_by_group": {
-    "bottom_chord": 1,
-    "top_chord": 8,
-    "vertical": 4,
+    "bottom_chord": 3,
+    "top_chord": 6,
+    "vertical": 3,
     "diagonal": 2,
     "top_transverse": 1,
     "bottom_transverse": 1,
     "top_bracing": 1,
     "bottom_bracing": 1,
     "cross_frame_bracing": 1,
-    "support_pad": 3
+    "support_pad": 4
   },
   "effective_length_factor_by_group": {
     "bottom_chord": {
@@ -139,12 +139,13 @@
     "contact_length_per_support_node_mm": 50.0,
     "n_contact_sticks_per_support_node": 4,
     "allowable_reaction_per_support_node_kgf": 22.0,
-    "negative_reaction_means_uplift": true
+    "negative_reaction_means_uplift": true,
+    "max_effective_contact_sticks_per_node": 10
   },
   "planner": {
     "target_load_kgf": 80.0,
-    "target_breaking_load_kgf": 80.0,
-    "stretch_breaking_load_kgf": 100.0,
+    "target_breaking_load_kgf": 100.0,
+    "stretch_breaking_load_kgf": 120.0,
     "max_bridge_mass_g": 1000.0,
     "target_bridge_mass_g": 950.0,
     "target_installed_stick_mass_g": 900.0,
@@ -164,13 +165,13 @@
       "max_local_iterations": 6,
       "require_topology_validation_after_removal": true,
       "min_sticks_primary_member_by_group": {
-        "top_chord": 8,
-        "bottom_chord": 1,
-        "vertical": 4,
+        "top_chord": 6,
+        "bottom_chord": 3,
+        "vertical": 3,
         "diagonal": 2,
         "top_transverse": 1,
         "bottom_transverse": 1,
-        "support_pad": 3
+        "support_pad": 4
       }
     },
     "use_stretch_breaking_load_as_acceptance": false,
@@ -192,7 +193,22 @@
     "consider_top_profiles": [
       "flat"
     ],
-    "mass_limit_g": 1000.0
+    "mass_limit_g": 1000.0,
+    "design_mode": "simple_buildable_bridge",
+    "prefer_simple_buildable_archetypes": true,
+    "simple_panel_options_mm": [
+      100.0,
+      120.0,
+      150.0,
+      200.0
+    ],
+    "simple_macro_archetypes": [
+      "simple_pratt_flat_box",
+      "simple_pratt_parker_faceted",
+      "simple_warren_flat_box",
+      "simple_pratt_with_top_deck"
+    ],
+    "simple_flat_height_mm": 180.0
   },
   "analysis": {
     "frame3dd_path": "auto",
@@ -205,7 +221,7 @@
     "acceptance_min_primary_fs": 1.05,
     "acceptance_min_support_fs": 1.0,
     "acceptance_min_glue_fs": 1.5,
-    "acceptance_min_design_breaking_load_kgf": 80.0,
+    "acceptance_min_design_breaking_load_kgf": 100.0,
     "use_target_min_fs_as_hard_acceptance": false,
     "planner_objective_profile": "max_strength_per_competition_mass",
     "tension_only_groups": [
@@ -244,23 +260,24 @@
       "S8": true
     },
     "planner_min_sticks_per_group_by_group": {
-      "top_chord": 8,
-      "bottom_chord": 1,
-      "vertical": 4,
+      "top_chord": 6,
+      "bottom_chord": 3,
+      "vertical": 3,
       "diagonal": 2,
-      "support_pad": 3,
+      "support_pad": 4,
       "top_transverse": 2,
       "bottom_transverse": 2
     },
     "use_quarter_model": false,
-    "quarter_model_available_for_debug": true
+    "quarter_model_available_for_debug": true,
+    "acceptance_min_torsion_80_20_kgf": 80.0
   },
   "detail_model": {
     "enabled": true,
-    "splice_mode": "overlap",
-    "overlap_length_mm": 30.0,
+    "splice_mode": "butt_with_splints",
+    "overlap_length_mm": 0.0,
     "min_end_margin_mm": 15.0,
-    "reinforcement_length_mm": 55.0,
+    "reinforcement_length_mm": 45.0,
     "reinforcement_sticks_per_splice": 2,
     "glue_shear_strength_MPa": 3.5,
     "glue_spread_g_per_m2": 160.0,
@@ -286,7 +303,7 @@
     },
     "generate_member_templates": true,
     "generate_piece_views": true,
-    "auto_splice_overlap_enabled": true,
+    "auto_splice_overlap_enabled": false,
     "strict_cut_length": true,
     "max_cut_length_mm": 120.0,
     "cut_increment_mm": 5.0,
@@ -398,34 +415,29 @@
     "miter_cut_material_loss_factor": 0.5,
     "joint_face_contact_depth_mode": "stick_thickness",
     "x_midpoint_gusset_overlap_mm": 20.0,
-    "x_midpoint_gusset_note": "Se X for usado manualmente, dividir no centro e colar com tala curta; padrão automático evita X contínuo."
+    "x_midpoint_gusset_note": "Se X for usado manualmente, dividir no centro e colar com tala curta; padrão automático evita X contínuo.",
+    "as_built_interpenetration_is_failure": true
   },
   "section_layout_by_group": {
     "bottom_chord": {
-      "layout": "box",
-      "spacing_y_mm": 10,
-      "spacing_z_mm": 8,
-      "box_extra_stick_strategy": "balanced"
+      "layout": "stacked_edge",
+      "spacing_y_mm": 0,
+      "spacing_z_mm": 0
     },
     "top_chord": {
-      "layout": "box",
-      "spacing_y_mm": 24,
-      "spacing_z_mm": 24,
-      "box_extra_stick_strategy": "balanced"
+      "layout": "stacked_edge",
+      "spacing_y_mm": 0,
+      "spacing_z_mm": 0
     },
     "vertical": {
-      "layout": "box",
-      "spacing_y_mm": 18,
-      "spacing_z_mm": 24,
-      "box_extra_stick_strategy": "balanced"
+      "layout": "side_by_side",
+      "spacing_y_mm": 0,
+      "spacing_z_mm": 0
     },
     "diagonal": {
-      "layout": "box",
-      "columns": 2,
-      "spacing_y_mm": 16,
-      "spacing_z_mm": 16,
-      "stick_orientation": "edge",
-      "box_extra_stick_strategy": "balanced"
+      "layout": "side_by_side",
+      "spacing_y_mm": 0,
+      "spacing_z_mm": 0
     },
     "top_transverse": {
       "layout": "stacked",
