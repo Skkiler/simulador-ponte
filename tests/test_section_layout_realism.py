@@ -27,8 +27,11 @@ def test_balanced_box_keeps_odd_count_centroid_on_member_axis() -> None:
     )
 
     assert sec["centroid_y_mm"] == pytest.approx(0.0)
-    assert sec["centroid_z_mm"] == pytest.approx(0.0)
-    assert (0.0, 0.0) in sec["stick_positions_yz"]
+    # Com número ímpar de palitos acima de 4, uma seção sem interpenetração pode
+    # ficar levemente excêntrica. O requisito de realismo aqui é não usar um
+    # palito central ocupando o mesmo volume dos caps/webs.
+    assert abs(float(sec["centroid_z_mm"])) <= 1.0
+    assert sec["no_internal_overlap"] is True
 
 
 def test_contact_box_for_six_sticks_is_centered_and_buildable() -> None:

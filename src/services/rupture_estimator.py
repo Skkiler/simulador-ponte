@@ -223,7 +223,12 @@ def estimate_rupture_load(
     confidence = "high" if n_states >= 3 else ("medium" if n_states == 2 else "low")
 
     out = {
+        # Nome legado: a ruptura principal é a ruptura de sistema pós-detalhe,
+        # isto é, o mínimo entre estados-limite estruturais, apoios e cola.
+        # Campos explícitos evitam a leitura ambígua antiga em que FS de membros
+        # parecia aprovar a ponte enquanto cola ou apoio governava a ruptura.
         "predicted_breaking_load_kgf": predicted_main,
+        "predicted_breaking_load_system_kgf": predicted_main,
         "predicted_breaking_load_primary_kgf": predicted_primary,
         "predicted_breaking_load_all_kgf": predicted_all,
         "predicted_breaking_load_design_kgf": predicted_design,
@@ -242,6 +247,7 @@ def estimate_rupture_load(
         "min_fs_all_raw": min_fs_all_raw,
         "min_fs_design": min_fs_design,
         "min_fs_member_design": min_fs_design,
+        "min_fs_system_design": governing_design.get("fs"),
         "min_fs_support": min_fs_support,
         "min_fs_glue": min_fs_glue,
         "rupture_basis": "min(limit_state_fs) * load",

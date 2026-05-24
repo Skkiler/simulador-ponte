@@ -1264,6 +1264,10 @@ class VisualizationService:
                         "stick_id": r.get("stick_id"),
                         "member_id": r.get("member_id"),
                         "member_group": group,
+                        "lane": r.get("lane"),
+                        "piece_index": r.get("piece_index"),
+                        "s0_mm": safe_float(r.get("s0_mm"), None),
+                        "s1_mm": safe_float(r.get("s1_mm"), None),
                         "x0": min(prism["x"]),
                         "x1": max(prism["x"]),
                         "y0": min(prism["y"]),
@@ -1300,6 +1304,21 @@ class VisualizationService:
                     oy = min(ay1, by1) - max(ay0, by0)
                     oz = min(az1, bz1) - max(az0, bz0)
                     if ox > tol and oy > tol and oz > tol:
+                        # Ignore exact butt contact between consecutive pieces of
+                        # the same member/lane.  They intentionally share a face;
+                        # the continuity is supplied by splints, not by overlap.
+                        if (
+                            str(a.get("member_id")) == str(box.get("member_id"))
+                            and str(a.get("lane")) == str(box.get("lane"))
+                        ):
+                            a0 = safe_float(a.get("s0_mm"), None)
+                            a1 = safe_float(a.get("s1_mm"), None)
+                            b0 = safe_float(box.get("s0_mm"), None)
+                            b1 = safe_float(box.get("s1_mm"), None)
+                            if None not in (a0, a1, b0, b1):
+                                param_overlap = min(float(a1), float(b1)) - max(float(a0), float(b0))
+                                if param_overlap <= 1.0e-6:
+                                    continue
                         obb_a = a.get("obb")
                         obb_b = box.get("obb")
                         if obb_a is not None and obb_b is not None and not self._obb_intersects(obb_a, obb_b, tol=tol):

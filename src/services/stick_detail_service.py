@@ -415,11 +415,44 @@ class StickDetailService:
 
         return fixed
 
+
+    @staticmethod
+    def _force_butt_nonoverlap_intervals(
+        intervals: List[Tuple[float, float, float]],
+        *,
+        domain_start_mm: float,
+        domain_end_mm: float,
+    ) -> List[Tuple[float, float, float]]:
+        """Clamp butt-splice intervals so adjacent main sticks never overlap.
+
+        Minimum-length repair and lane staggering may move a terminal boundary
+        backwards.  That is acceptable for a lap-splice model, but in
+        butt-with-splints it creates two real prisms in the same volume and a
+        false tiny glue overlap.  This cleanup preserves ordering and removes
+        the overlap; splints carry the continuity instead of the main sticks.
+        """
+        if not intervals:
+            return []
+        lo = float(domain_start_mm)
+        hi = float(domain_end_mm)
+        cleaned: List[Tuple[float, float, float]] = []
+        prev_end = lo
+        for a, b, _c in sorted((float(a), float(b), float(c)) for a, b, c in intervals):
+            aa = max(lo, min(hi, max(a, prev_end)))
+            bb = max(lo, min(hi, b))
+            if bb <= aa + 1.0e-9:
+                continue
+            cleaned.append((aa, bb, bb - aa))
+            prev_end = bb
+        return cleaned
+
     @staticmethod
     def _joint_setback_groups(detail: Dict[str, Any]) -> set[str]:
         raw = detail.get(
             "joint_setback_groups",
             [
+                "top_chord",
+                "bottom_chord",
                 "diagonal",
                 "vertical",
                 "top_transverse",
@@ -464,8 +497,35 @@ class StickDetailService:
         """
         if not bool(detail.get("joint_face_setback_enabled", True)):
             return 0.0, 0.0
-        if str(member.group) not in StickDetailService._joint_setback_groups(detail):
+        group = str(member.group)
+        if group not in StickDetailService._joint_setback_groups(detail):
             return 0.0, 0.0
+
+        # Membros colados por face lateral (montantes, diagonais, transversais e
+        # contraventamentos) não devem ser encurtados axialmente até antes do nó:
+        # eles precisam encostar/ultrapassar a face do banzo hospedeiro para haver
+        # área real de cola. O recuo axial fazia a peça parecer "flutuando" com
+        # um vão visível na montagem. A separação volumétrica desses membros é
+        # tratada pelo offset físico de camada, não por um gap no eixo.
+        if bool(detail.get("side_lap_groups_skip_axis_setback", True)):
+            no_axis_setback = {
+                str(v)
+                for v in detail.get(
+                    "side_lap_no_axis_setback_groups",
+                    [
+                        "vertical",
+                        "diagonal",
+                        "top_transverse",
+                        "bottom_transverse",
+                        "top_bracing",
+                        "bottom_bracing",
+                        "cross_frame_bracing",
+                        "chord_lacing",
+                    ],
+                )
+            }
+            if group in no_axis_setback and group in StickDetailService._node_lap_groups(detail):
+                return 0.0, 0.0
 
         clearance = max(0.0, float(detail.get("joint_face_clearance_mm", 0.50)))
         min_setback = max(0.0, float(detail.get("joint_min_setback_mm", 0.50 * max(stick_w, stick_t))))
@@ -780,13 +840,13 @@ class StickDetailService:
         nj: Node,
         detail: Dict[str, Any],
     ) -> Tuple[float, float, float]:
-        """Move side-web lap members to the outside face in the fabrication view.
+        """Return the real assembly layer offset for terminal face-lap members.
 
-        The solver axis remains node-to-node.  The physical palito, however,
-        should be glued on the outside face of the chord/montant rather than
-        occupying the same centroidal volume.  This deterministic side offset
-        removes most chord/web interpenetration in the 3D view and makes the
-        lap-joint assumption visually explicit.
+        The solver member remains node-to-node, but the physical stick must sit
+        on an external glue face instead of passing through the centroidal volume
+        of the host.  This offset is therefore part of the as-built geometry, not
+        merely a rendering trick.  It is deterministic by group so two generated
+        runs with the same topology keep the same jig/assembly layers.
         """
         if not bool(detail.get("node_lap_visual_side_offset_enabled", True)):
             return (0.0, 0.0, 0.0)
@@ -794,16 +854,54 @@ class StickDetailService:
             str(v)
             for v in detail.get(
                 "node_lap_visual_side_offset_groups",
-                ["vertical", "diagonal"],
+                [
+                    "vertical",
+                    "diagonal",
+                    "top_transverse",
+                    "bottom_transverse",
+                    "top_bracing",
+                    "bottom_bracing",
+                    "cross_frame_bracing",
+                    "support_pad",
+                ],
             )
         }
-        if str(member.group) not in groups:
+        group = str(member.group)
+        if group not in groups:
             return (0.0, 0.0, 0.0)
+        base = max(0.0, float(detail.get("node_lap_visual_side_offset_mm", 4.0)))
+        cap = max(base, float(detail.get("node_lap_visual_side_offset_max_mm", 8.0) or 8.0))
         y_mid = 0.5 * (float(ni.y) + float(nj.y))
-        if abs(y_mid) <= 1.0e-6:
-            return (0.0, 0.0, 0.0)
-        offset = max(0.0, float(detail.get("node_lap_visual_side_offset_mm", 14.0)))
-        return (0.0, math.copysign(offset, y_mid), 0.0)
+        x_mid = 0.5 * (float(ni.x) + float(nj.x))
+
+        g = str(member.group).strip().lower()
+        if g in {"vertical", "diagonal", "top_bracing", "bottom_bracing"}:
+            if abs(y_mid) <= 1.0e-6:
+                return (0.0, 0.0, 0.0)
+            if g == "vertical":
+                mult = 0.60
+            elif g == "diagonal":
+                # A diagonal fica em uma camada externa ao montante. A folga
+                # precisa ser maior que a espessura do palito para evitar colisão,
+                # mas ainda pequena o bastante para parecer montagem encaixada.
+                mult = 1.80 + (0.20 if int(getattr(member, "id", 0) or 0) % 2 else -0.20)
+            else:
+                mult = 1.70
+            return (0.0, math.copysign(min(cap, base * mult), y_mid), 0.0)
+        if g in {"top_transverse", "bottom_transverse"}:
+            # Transversais precisam sair do plano do banzo, mas só o bastante
+            # para representar cola em face. Valores grandes deixam a vista
+            # montada parecer explodida.
+            sign = 1.0 if g == "top_transverse" else -1.0
+            return (0.0, 0.0, sign * min(cap, base * 0.75))
+        if g == "support_pad":
+            return (0.0, 0.0, -min(cap, base * 1.70))
+        if g == "cross_frame_bracing":
+            sign = 1.0 if x_mid >= 0.5 * float(detail.get("bridge_span_reference_mm", 0.0) or 0.0) else -1.0
+            if abs(x_mid) <= 1.0e-6:
+                sign = 1.0
+            return (sign * min(cap, base * 1.20), 0.0, 0.0)
+        return (0.0, 0.0, 0.0)
 
     @staticmethod
     def _miter_material_loss_length_mm(
@@ -1005,7 +1103,7 @@ class StickDetailService:
         min_cut_length_mm = max(1.0, float(detail.get("min_cut_length_mm", 5.0)))
         min_constructive_piece_length_mm = max(
             min_cut_length_mm,
-            float(detail.get("min_constructive_piece_length_mm", 40.0)),
+            float(detail.get("min_constructive_piece_length_mm", 20.0)),
         )
         max_cut_length_mm = min(
             stick_len,
@@ -1033,8 +1131,8 @@ class StickDetailService:
         terminal_joint_secondary_bending_factor = max(0.5, float(detail.get("terminal_joint_secondary_bending_factor", 1.05)))
         splice_mode = str(detail.get("splice_mode", "overlap")).strip().lower()
         use_butt_splints = splice_mode in {"butt_with_splints", "butt_splints", "butt_full_splints"}
-        splint_len = max(15.0, min(0.85 * stick_len, float(detail.get("reinforcement_length_mm", detail.get("overlap_length_mm", 30.0)))))
-        splints_per_splice = max(1, int(detail.get("reinforcement_sticks_per_splice", 2)))
+        splint_len = max(12.0, min(0.85 * stick_len, float(detail.get("reinforcement_length_mm", detail.get("overlap_length_mm", 25.0)))))
+        splints_per_splice = max(1, int(detail.get("reinforcement_sticks_per_splice", 1)))
 
         node_by_id = {n.id: n for n in nodes}
         res_by = {int(r["member_id"]): r for r in member_results}
@@ -1071,6 +1169,7 @@ class StickDetailService:
         cut_lengths: List[float] = []
 
         total_glue_area = 0.0
+        total_glue_physical_area = 0.0
         total_pieces = 0
         total_cut = 0.0
         total_splint_sticks_equiv = 0.0
@@ -1302,6 +1401,7 @@ class StickDetailService:
             sig_comb = abs(sigma_axial_member) + abs(sig_by) + abs(sig_bz)
 
             member_glue = 0.0
+            member_glue_physical = 0.0
             joint_fs_values: List[float] = []
             # Determine joint model.  If a connection plan is attached to
             # the configuration it overrides the global defaults on a per
@@ -1348,10 +1448,11 @@ class StickDetailService:
                 except (TypeError, ValueError, IndexError):
                     lane_y = 0.0
                     lane_z = 0.0
+                physical_face_lap_offset = visual_connection_offset if bool(detail.get("node_lap_physical_offset_enabled", True)) else (0.0, 0.0, 0.0)
                 lane_offset_vec = (
-                    lane_y * local_y_axis[0] + lane_z * local_z_axis[0] + float(x_layer_offset[0]),
-                    lane_y * local_y_axis[1] + lane_z * local_z_axis[1] + float(x_layer_offset[1]),
-                    lane_y * local_y_axis[2] + lane_z * local_z_axis[2] + float(x_layer_offset[2]),
+                    lane_y * local_y_axis[0] + lane_z * local_z_axis[0] + float(x_layer_offset[0]) + float(physical_face_lap_offset[0]),
+                    lane_y * local_y_axis[1] + lane_z * local_z_axis[1] + float(x_layer_offset[1]) + float(physical_face_lap_offset[1]),
+                    lane_y * local_y_axis[2] + lane_z * local_z_axis[2] + float(x_layer_offset[2]) + float(physical_face_lap_offset[2]),
                 )
                 lane_orientation = str(lane_orientations[lane - 1]).strip().lower() if lane - 1 < len(lane_orientations) else stick_orientation
                 lane_visual_width_mm = safe_float(lane_widths[lane - 1], None) if lane - 1 < len(lane_widths) else None
@@ -1384,6 +1485,12 @@ class StickDetailService:
                     domain_end_mm=max(joint_start_setback, L - joint_end_setback),
                     stock_limit_mm=max_cut_length_mm,
                 )
+                if use_butt_splints:
+                    lane_intervals = self._force_butt_nonoverlap_intervals(
+                        lane_intervals,
+                        domain_start_mm=joint_start_setback,
+                        domain_end_mm=max(joint_start_setback, L - joint_end_setback),
+                    )
                 prev_id = None
                 prev_end = None
 
@@ -1522,6 +1629,10 @@ class StickDetailService:
                             "visual_connection_offset_x_mm": visual_connection_offset[0],
                             "visual_connection_offset_y_mm": visual_connection_offset[1],
                             "visual_connection_offset_z_mm": visual_connection_offset[2],
+                            "physical_face_lap_offset_applied": bool(detail.get("node_lap_physical_offset_enabled", True)),
+                            "physical_face_lap_offset_x_mm": physical_face_lap_offset[0],
+                            "physical_face_lap_offset_y_mm": physical_face_lap_offset[1],
+                            "physical_face_lap_offset_z_mm": physical_face_lap_offset[2],
                             "x_bracing_layer": x_layer.get("layer"),
                             "x_bracing_plane": x_layer.get("plane"),
                             "x_bracing_crossing_handling": x_layer.get("handling"),
@@ -1595,6 +1706,7 @@ class StickDetailService:
                     for terminal_side, terminal_node_id, piece_a, piece_b, terminal_s, terminal_mode, terminal_angle in terminal_specs:
                         terminal_overlap = min(terminal_lap_overlap_mm, max(0.0, geom_len))
                         terminal_glue_area = terminal_overlap * stick_w * terminal_joint_area_factor
+                        terminal_physical_glue_area = terminal_overlap * stick_w
                         if terminal_glue_area > 0:
                             terminal_glue_shear = (abs(per_lane) / terminal_glue_area) * terminal_joint_secondary_bending_factor
                         else:
@@ -1608,7 +1720,9 @@ class StickDetailService:
                         if terminal_fs_clean is not None:
                             joint_fs_values.append(terminal_fs_clean)
                         member_glue += terminal_glue_area
+                        member_glue_physical += terminal_physical_glue_area
                         total_glue_area += terminal_glue_area
+                        total_glue_physical_area += terminal_physical_glue_area
                         joint_rows.append(
                             {
                                 "joint_id": f"J-M{m.id:03d}-L{lane:02d}-{terminal_side.upper()}-NODE{int(terminal_node_id):03d}",
@@ -1628,6 +1742,7 @@ class StickDetailService:
                                 "joint_area_factor": terminal_joint_area_factor,
                                 "joint_secondary_bending_factor": terminal_joint_secondary_bending_factor,
                                 "glue_area_mm2": terminal_glue_area,
+                                "physical_glue_area_mm2": terminal_physical_glue_area,
                                 "force_transfer_N": abs(per_lane),
                                 "glue_shear_MPa": terminal_glue_shear,
                                 "glue_allow_design_MPa": terminal_allow,
@@ -1647,11 +1762,13 @@ class StickDetailService:
                             # contabilizadas em massa equivalente e área de cola.
                             effective_overlap = splint_len
                             glue_area = effective_overlap * stick_w * max(joint_area_factor, 1.70) * splints_per_splice
+                            physical_glue_area = effective_overlap * stick_w * splints_per_splice
                             joint_type = "butt_with_splints"
                             splice_note = "emenda topo-a-topo com talas laterais; sem interpenetração entre palitos principais"
                         else:
                             effective_overlap = overlap_actual
                             glue_area = overlap_actual * stick_w * joint_area_factor
+                            physical_glue_area = overlap_actual * stick_w
                             joint_type = "lap_overlap"
                             splice_note = "emenda sobreposta ao longo da própria lane"
 
@@ -1673,11 +1790,16 @@ class StickDetailService:
                             joint_fs_values.append(fs_glue_clean)
 
                         member_glue += glue_area
+                        member_glue_physical += physical_glue_area
                         total_glue_area += glue_area
+                        total_glue_physical_area += physical_glue_area
+                        splint_equiv = 0.0
+                        splint_mass_g = 0.0
                         if use_butt_splints and overlap_actual <= 1.0e-9:
                             splint_equiv = splints_per_splice * splint_len / max(1.0e-9, stick_len)
+                            splint_mass_g = stick_mass * splint_equiv
                             total_splint_sticks_equiv += splint_equiv
-                            total_splint_mass_g += stick_mass * splint_equiv
+                            total_splint_mass_g += splint_mass_g
 
                         joint_rows.append(
                             {
@@ -1695,6 +1817,10 @@ class StickDetailService:
                                 "joint_area_factor": joint_area_factor,
                                 "joint_secondary_bending_factor": joint_secondary_bending_factor,
                                 "glue_area_mm2": glue_area,
+                                "physical_glue_area_mm2": physical_glue_area,
+                                "splint_length_mm": splint_len if joint_type == "butt_with_splints" else 0.0,
+                                "splints_per_splice": splints_per_splice if joint_type == "butt_with_splints" else 0,
+                                "splint_mass_g": splint_mass_g if joint_type == "butt_with_splints" else 0.0,
                                 "force_transfer_N": abs(per_lane),
                                 "glue_shear_MPa": glue_shear,
                                 "glue_allow_design_MPa": glue_allow,
@@ -1720,7 +1846,7 @@ class StickDetailService:
                     prev_id = sid
                     prev_end = s1
 
-            glue_mass = (member_glue / 1_000_000.0) * glue_spread / max(glue_eff, 1.0e-6)
+            glue_mass = (member_glue_physical / 1_000_000.0) * glue_spread / max(glue_eff, 1.0e-6)
 
             fs_min_global = safe_float(chk.get("FS_min"), None)
             fs_min_global_label = safety_label(fs_min_global)
@@ -1856,16 +1982,16 @@ class StickDetailService:
 
         primary_piece_mass = sum(float(r["mass_g"]) for r in stick_rows)
         installed_stick_mass = primary_piece_mass + total_splint_mass_g
-        wet_glue_mass = (total_glue_area / 1_000_000.0) * glue_spread / max(glue_eff, 1.0e-6)
+        wet_glue_mass = (total_glue_physical_area / 1_000_000.0) * glue_spread / max(glue_eff, 1.0e-6)
         cured_glue_mass = wet_glue_mass * glue_cure_solids_fraction
         evaporated_glue_water = max(0.0, wet_glue_mass - cured_glue_mass)
 
-        purchased_blank_sticks_needed = total
+        purchased_blank_sticks_needed = max(total, int(math.ceil(installed_stick_mass / max(stick_mass, 1.0e-9))))
         purchased_stick_mass = purchased_blank_sticks_needed * stick_mass
         cutting_scrap_mass = max(0.0, purchased_stick_mass - installed_stick_mass)
 
         competition_mass = installed_stick_mass + cured_glue_mass
-        assembly_procurement_mass = purchased_stick_mass + wet_glue_mass
+        assembly_procurement_mass = max(purchased_stick_mass + wet_glue_mass, competition_mass)
 
         mass_limits = resolve_mass_limits(cfg)
         limit = float(mass_limits["effective_limit_g"])
@@ -1913,7 +2039,8 @@ class StickDetailService:
             "purchased_blank_sticks_needed": purchased_blank_sticks_needed,
             "purchased_stick_mass_g": purchased_stick_mass,
             "cutting_scrap_mass_g": cutting_scrap_mass,
-            "estimated_glue_area_mm2": total_glue_area,
+            "estimated_glue_area_mm2": total_glue_physical_area,
+            "effective_glue_area_mm2": total_glue_area,
             "estimated_glue_mass_g": wet_glue_mass,
             "wet_glue_mass_g": wet_glue_mass,
             "glue_cure_solids_fraction": glue_cure_solids_fraction,

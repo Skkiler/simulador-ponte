@@ -95,20 +95,27 @@ class SectionService:
         # volume overlap.  First fill the hollow with one/two flat laminations;
         # then add symmetric outside web laminations.  Odd counts stay balanced.
         extras = n - 4
-        if extras == 1:
-            sticks.append(rec(0.0, 0.0, "flat"))
-        elif extras == 2:
-            sticks.extend([rec(0.0, -0.5 * t, "flat"), rec(0.0, 0.5 * t, "flat")])
-        elif extras == 3:
-            sticks.extend([rec(0.0, 0.0, "flat"), rec(-web_y - t, 0.0, "edge"), rec(web_y + t, 0.0, "edge")])
-        elif extras >= 4:
-            sticks.extend([rec(0.0, -0.5 * t, "flat"), rec(0.0, 0.5 * t, "flat"), rec(-web_y - t, 0.0, "edge"), rec(web_y + t, 0.0, "edge")])
-            # Additional sticks beyond eight are compact core laminations.  The
-            # planner normally caps these groups before reaching here; this is a
-            # safe fallback that avoids hidden spacing assumptions.
-            for k in range(extras - 4):
-                offset = (k + 1) * t
-                sticks.append(rec(0.0, 0.0 if k == 0 else ((-1) ** k) * min(offset, cap_z - t), "flat"))
+        # Extra sticks are placed as real exterior laminations, never inside the
+        # already occupied hollow/core.  The previous compact-core fallback put
+        # several extra caps almost on the same centroid and produced internal
+        # section interpenetrations for n>=9.
+        layer = 1
+        while extras > 0:
+            outside_top_z = cap_z + layer * t
+            outside_bottom_z = -cap_z - layer * t
+            outside_right_y = web_y + layer * t
+            outside_left_y = -web_y - layer * t
+            for item in (
+                rec(0.0, outside_top_z, "flat"),
+                rec(0.0, outside_bottom_z, "flat"),
+                rec(outside_right_y, 0.0, "edge"),
+                rec(outside_left_y, 0.0, "edge"),
+            ):
+                if extras <= 0:
+                    break
+                sticks.append(item)
+                extras -= 1
+            layer += 1
         return sticks
 
 

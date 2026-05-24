@@ -611,23 +611,57 @@ class ActiveDesignPlanner:
             tc_ratio = t_cap / c_cap
             layout_by_group = v.setdefault("section_layout_by_group", {})
             if tc_ratio >= 5.0:
-                # Modo construtivo simples: não conceder inércia de caixa
-                # sem talas/lacing reais.  Usar laminação edge/side-by-side
-                # que pode ser montada em gabarito com palitos inteiros.
+                # O preset simples não pode rebaixar banzos/montantes para
+                # laminações coplanares longas. Isso derruba o eixo fraco e
+                # ainda deixa web/banzo/diagonal disputando o mesmo volume no
+                # nó. Usamos contact_box compacto para banzos e montantes;
+                # diagonais ficam em double_stack, camada externa simples de
+                # construir e sem aparência de vista explodida.
                 simple_mode = str(p.get("design_mode", "simple_buildable_bridge")).lower() == "simple_buildable_bridge" or bool(p.get("prefer_simple_buildable_archetypes", True))
                 for g in ("top_chord", "bottom_chord"):
                     gcfg = dict(layout_by_group.get(g, {}) or {})
                     if simple_mode:
-                        gcfg.update({"layout": "stacked_edge", "spacing_y_mm": 0.0, "spacing_z_mm": 0.0})
-                    elif str(gcfg.get("layout", "stacked")).lower() in {"stacked", "single", "side_by_side"}:
-                        gcfg.update({"layout": "box", "stick_orientation": "edge", "spacing_y_mm": 12.0, "spacing_z_mm": 12.0})
+                        gcfg.update({
+                            "layout": "contact_box",
+                            "stick_orientation": "edge",
+                            "spacing_y_mm": 0.0,
+                            "spacing_z_mm": 0.0,
+                            "box_extra_stick_strategy": "balanced",
+                        })
+                    elif str(gcfg.get("layout", "stacked")).lower() in {"stacked", "stacked_edge", "single", "side_by_side"}:
+                        gcfg.update({
+                            "layout": "contact_box",
+                            "stick_orientation": "edge",
+                            "spacing_y_mm": 0.0,
+                            "spacing_z_mm": 0.0,
+                            "box_extra_stick_strategy": "balanced",
+                        })
                     layout_by_group[g] = gcfg
                 for g in ("vertical", "diagonal"):
                     gcfg = dict(layout_by_group.get(g, {}) or {})
-                    if simple_mode:
-                        gcfg.update({"layout": "side_by_side", "spacing_y_mm": 0.0, "spacing_z_mm": 0.0})
-                    elif str(gcfg.get("layout", "stacked")).lower() in {"stacked", "single"}:
-                        gcfg.update({"layout": "box", "spacing_y_mm": 10.0, "spacing_z_mm": 10.0})
+                    if simple_mode and g == "vertical":
+                        gcfg.update({
+                            "layout": "contact_box",
+                            "stick_orientation": "edge",
+                            "spacing_y_mm": 0.0,
+                            "spacing_z_mm": 0.0,
+                            "box_extra_stick_strategy": "balanced",
+                        })
+                    elif simple_mode:
+                        gcfg.update({
+                            "layout": "double_stack",
+                            "columns": 2,
+                            "spacing_y_mm": 0.0,
+                            "spacing_z_mm": 0.0,
+                        })
+                    elif str(gcfg.get("layout", "stacked")).lower() in {"stacked", "stacked_edge", "single", "side_by_side"}:
+                        gcfg.update({
+                            "layout": "contact_box",
+                            "stick_orientation": "edge",
+                            "spacing_y_mm": 0.0,
+                            "spacing_z_mm": 0.0,
+                            "box_extra_stick_strategy": "balanced",
+                        })
                     layout_by_group[g] = gcfg
 
         return self.config.normalize(v)

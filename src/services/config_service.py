@@ -487,8 +487,30 @@ class ConfigService:
                 float(detail.get("min_primary_overlap_mm", 25.0)),
             )
         detail.setdefault("min_end_margin_mm", 10.0)
-        detail.setdefault("reinforcement_length_mm", 55.0)
-        detail.setdefault("reinforcement_sticks_per_splice", 2)
+        # Talas longas e numerosas estavam resolvendo resistência de cola à
+        # custa de massa e deixando a ponte acima do limite competitivo. O
+        # default agora usa uma tala externa curta por emenda topo-a-topo; a
+        # resistência continua vindo da área efetiva no detalhamento, enquanto a
+        # massa usa somente a área física realmente instalada.
+        detail.setdefault("reinforcement_length_mm", 25.0)
+        detail.setdefault("reinforcement_sticks_per_splice", 1)
+        detail.setdefault("auto_lightweight_butt_splints", True)
+        if splice_mode_norm in {"butt_with_splints", "butt_splints", "butt_full_splints"} and bool(
+            detail.get("auto_lightweight_butt_splints", True)
+        ):
+            # Se uma configuração antiga vier com 30--55 mm e 2--4 talas por
+            # emenda, ela passa a massa competitiva de 1 kg sem ganho necessário
+            # de FS de cola. Capamos o detalhe leve por padrão; para ensaio
+            # deliberadamente pesado, basta definir auto_lightweight_butt_splints=False.
+            requested_len = safe_float(detail.get("reinforcement_length_mm"), 25.0) or 25.0
+            detail["reinforcement_length_mm"] = max(18.0, min(float(requested_len), 25.0))
+            try:
+                requested_n = int(detail.get("reinforcement_sticks_per_splice", 1))
+            except (TypeError, ValueError):
+                requested_n = 1
+            detail["reinforcement_sticks_per_splice"] = max(1, min(requested_n, 1))
+        detail.setdefault("terminal_joint_area_factor", 14.0)
+        detail.setdefault("terminal_joint_secondary_bending_factor", 1.00)
         detail.setdefault("glue_shear_strength_MPa", 3.5)
         detail.setdefault("glue_spread_g_per_m2", 160.0)
         detail.setdefault("glue_mass_efficiency", 0.65)
@@ -622,15 +644,38 @@ class ConfigService:
         detail.setdefault("min_cut_length_mm", 5.0)
         detail.setdefault("strict_cut_length", True)
         detail.setdefault("max_cut_length_mm", float(mat.get("stick_length_mm", 120.0)))
-        detail.setdefault("min_constructive_piece_length_mm", 40.0)
+        detail.setdefault("min_constructive_piece_length_mm", 20.0)
+        detail.setdefault("auto_allow_20mm_constructive_pieces", True)
+        if bool(detail.get("auto_allow_20mm_constructive_pieces", True)):
+            try:
+                requested_min_piece = safe_float(detail.get("min_constructive_piece_length_mm"), 20.0) or 20.0
+            except (TypeError, ValueError):
+                requested_min_piece = 20.0
+            detail["min_constructive_piece_length_mm"] = max(20.0, min(float(requested_min_piece), 20.0))
         detail.setdefault("joint_face_setback_enabled", True)
+        detail.setdefault("side_lap_groups_skip_axis_setback", True)
+        detail.setdefault(
+            "side_lap_no_axis_setback_groups",
+            [
+                "vertical",
+                "diagonal",
+                "top_transverse",
+                "bottom_transverse",
+                "top_bracing",
+                "bottom_bracing",
+                "cross_frame_bracing",
+                "chord_lacing",
+            ],
+        )
         detail.setdefault("joint_face_clearance_mm", 0.10)
         detail.setdefault("joint_min_setback_mm", 0.0)
-        detail.setdefault("joint_max_setback_mm", 4.0)
+        detail.setdefault("joint_max_setback_mm", 10.0)
         detail.setdefault("joint_max_setback_fraction", 0.12)
         detail.setdefault(
             "joint_setback_groups",
             [
+                "top_chord",
+                "bottom_chord",
                 "diagonal",
                 "vertical",
                 "top_transverse",
@@ -666,7 +711,7 @@ class ConfigService:
         detail.setdefault("generate_group_piece_html", False)
         detail.setdefault("visual_beveled_end_cuts", False)
         detail.setdefault("show_section_tie_lines_in_piece_view", False)
-        detail.setdefault("angled_end_cuts_enabled", False)
+        detail.setdefault("angled_end_cuts_enabled", True)
         detail.setdefault("end_cut_angle_increment_deg", 5.0)
         detail.setdefault("miter_cut_min_host_slope_deg", 4.0)
         detail.setdefault("miter_cut_max_visual_shift_fraction", 0.10)
@@ -674,16 +719,40 @@ class ConfigService:
         detail.setdefault("miter_cut_mass_reduction_enabled", True)
         detail.setdefault("miter_cut_material_loss_factor", 0.50)
         detail.setdefault("joint_face_contact_depth_mode", "stick_thickness")
-        detail.setdefault("joint_face_clearance_mm", 0.0)
-        detail.setdefault("joint_max_setback_mm", 4.0)
+        detail.setdefault("joint_face_clearance_mm", 1.0)
+        detail.setdefault("joint_max_setback_mm", 10.0)
         detail.setdefault("piece_view_mounted_connection_offset_scale", 0.0)
         detail.setdefault("piece_view_exploded_connection_offset_scale", 0.75)
         detail.setdefault("miter_cut_terminal_groups", ["top_chord", "bottom_chord", "vertical", "diagonal", "top_transverse", "bottom_transverse", "top_bracing", "bottom_bracing", "cross_frame_bracing"])
         detail.setdefault("miter_cut_host_groups", ["top_chord", "bottom_chord", "vertical", "diagonal", "top_transverse", "bottom_transverse", "support_pad", "cross_frame_bracing", "top_bracing", "bottom_bracing"])
         detail.setdefault("miter_cut_primary_host_priority", ["top_chord", "bottom_chord", "support_pad", "vertical", "diagonal", "top_transverse", "bottom_transverse", "cross_frame_bracing"])
         detail.setdefault("node_lap_visual_side_offset_enabled", True)
+        detail.setdefault("node_lap_physical_offset_enabled", True)
         detail.setdefault("node_lap_visual_side_offset_mm", 4.0)
-        detail.setdefault("node_lap_visual_side_offset_groups", ["vertical", "diagonal"])
+        detail.setdefault("node_lap_visual_side_offset_max_mm", 8.0)
+        detail.setdefault("auto_shrink_node_lap_physical_offsets", True)
+        if bool(detail.get("auto_shrink_node_lap_physical_offsets", True)):
+            _node_lap_requested = safe_float(detail.get("node_lap_visual_side_offset_mm"), 4.0) or 4.0
+            _node_lap_cap = max(0.0, safe_float(detail.get("node_lap_visual_side_offset_max_mm"), 8.0) or 8.0)
+            detail["node_lap_visual_side_offset_mm"] = min(max(0.0, float(_node_lap_requested)), float(_node_lap_cap))
+        else:
+            detail["node_lap_visual_side_offset_mm"] = max(0.0, safe_float(detail.get("node_lap_visual_side_offset_mm"), 4.0) or 4.0)
+        detail.setdefault("node_lap_layer_clearance_mm", 0.75)
+        default_node_lap_offset_groups = [
+            "vertical",
+            "diagonal",
+            "top_transverse",
+            "bottom_transverse",
+            "top_bracing",
+            "bottom_bracing",
+            "cross_frame_bracing",
+            "support_pad",
+        ]
+        existing_node_lap_offset_groups = [str(v) for v in (detail.get("node_lap_visual_side_offset_groups") or []) if str(v)]
+        if bool(detail.get("auto_expand_node_lap_physical_offset_groups", True)):
+            detail["node_lap_visual_side_offset_groups"] = list(dict.fromkeys(existing_node_lap_offset_groups + default_node_lap_offset_groups))
+        else:
+            detail.setdefault("node_lap_visual_side_offset_groups", default_node_lap_offset_groups)
         detail.setdefault("x_midpoint_gusset_overlap_mm", 20.0)
         detail.setdefault("x_midpoint_gusset_note", "Se X for usado manualmente, dividir no centro e colar com tala curta; padrão automático evita X contínuo.")
         # Contraventamentos em X podem existir, mas não no mesmo volume. O
@@ -711,7 +780,7 @@ class ConfigService:
             "x_bracing_layered_groups",
             _secondary_x_groups,
         )
-        detail.setdefault("x_bracing_layer_clearance_mm", 5.0)
+        detail.setdefault("x_bracing_layer_clearance_mm", 6.0)
         detail.setdefault("x_bracing_layered_solution_documented", True)
         detail.setdefault("x_bracing_midspan_joint_required", False)
 
@@ -805,6 +874,26 @@ class ConfigService:
 
         for key, val in defaults_layout.items():
             layout.setdefault(key, val)
+
+        if bool(detail.get("auto_balance_compression_section_layouts", True)):
+            # Configurações antigas ainda podem tentar usar stacked_edge ou
+            # side_by_side para grupos comprimidos com 3+ palitos. Isso reduz o
+            # eixo fraco e cria camadas coplanares difíceis de encaixar no nó.
+            # A normalização converte somente grupos primários para contact_box
+            # compacto, sem espaçamento laced fictício.
+            for _grp in ("top_chord", "bottom_chord", "vertical"):
+                _n = int(safe_float(cfg.get("member_sticks_by_group", {}).get(_grp), 0) or 0)
+                _gcfg = dict(layout.get(_grp, {}) or {})
+                _layout_name = str(_gcfg.get("layout", "")).strip().lower()
+                if _n >= 3 and _layout_name in {"", "stacked", "stacked_flat", "stacked_edge", "side_by_side", "double_stack"}:
+                    _gcfg.update({
+                        "layout": "contact_box",
+                        "stick_orientation": "edge",
+                        "spacing_y_mm": 0.0,
+                        "spacing_z_mm": 0.0,
+                        "box_extra_stick_strategy": "balanced",
+                    })
+                    layout[_grp] = _gcfg
 
         # Banzos trabalham axialmente, mas o banzo superior é governado por
         # flambagem/interação. Por padrão, palitos dos banzos ficam "de lado"
@@ -1903,7 +1992,7 @@ class ConfigService:
             detail.setdefault("min_node_lap_overlap_mm", 25.0)
             detail.setdefault("node_lap_overlap_mm", 35.0)
             detail.setdefault("visual_beveled_end_cuts", False)
-            detail.setdefault("angled_end_cuts_enabled", False)
+            detail.setdefault("angled_end_cuts_enabled", True)
 
         def _enforce_bridge_field_in_domain(
             bridge_key: str,

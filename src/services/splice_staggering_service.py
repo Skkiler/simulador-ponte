@@ -45,15 +45,48 @@ class SpliceStaggeringService:
             return intervals
         d = self._detail(cfg)
         min_margin = max(0.0, float(d.get("min_end_margin_mm", 10.0)))
-        min_overlap = max(1.0, float(d.get("overlap_length_mm", 30.0)) * 0.5)
         allow = bool(d.get("splice_stagger_enabled", True))
         if not allow:
             return intervals
 
         patt = self.assign_splice_stagger_pattern(cfg, {}, quadrant_id, lane_id)
         base_off = float(patt.get("stagger_offset_mm", 0.0))
-
         out = [(float(a), float(b), float(c)) for a, b, c in intervals]
+
+        splice_mode = str(d.get("splice_mode", "overlap") or "overlap").strip().lower()
+        butt_splints = splice_mode in {"butt_with_splints", "butt_splints", "butt_full_splints"}
+        if butt_splints:
+            # In butt-with-splints mode, stagger means moving the butt line, not
+            # pulling the next stick backward into a lap.  The previous
+            # implementation reused the overlap algorithm and introduced 1 mm
+            # longitudinal overlaps even with overlap_length_mm = 0; those tiny
+            # false laps then governed glue rupture and created same-lane volume
+            # interpenetration in the as-built audit.  Here every internal splice
+            # stays a single shared boundary: prev.end == next.start.
+            min_piece = max(1.0, float(d.get("min_constructive_piece_length_mm", 40.0)))
+            domain_start = float(out[0][0])
+            domain_end = float(out[-1][1])
+            if domain_end <= domain_start:
+                domain_start = 0.0
+                domain_end = max(float(member_length), max(float(b) for _a, b, _c in out))
+            for i in range(1, len(out)):
+                prev_s0, _prev_s1, _prev_cl = out[i - 1]
+                s0, s1, _cl = out[i]
+                alternating = -1.0 if (i % 2) else 1.0
+                desired = s0 + base_off * alternating
+                lo = max(prev_s0 + min_piece, domain_start + min_margin)
+                hi = min(s1 - min_piece, domain_end - min_margin)
+                if lo > hi:
+                    boundary = s0
+                else:
+                    boundary = max(lo, min(hi, desired))
+                if boundary <= prev_s0 + 1.0e-9 or boundary >= s1 - 1.0e-9:
+                    boundary = max(prev_s0 + 1.0, min(s1 - 1.0, s0))
+                out[i - 1] = (prev_s0, boundary, max(0.0, boundary - prev_s0))
+                out[i] = (boundary, s1, max(0.0, s1 - boundary))
+            return out
+
+        min_overlap = max(1.0, float(d.get("overlap_length_mm", 30.0)) * 0.5)
         for i in range(1, len(out)):
             s0, s1, cl = out[i]
             prev_s0, prev_s1, prev_cl = out[i - 1]

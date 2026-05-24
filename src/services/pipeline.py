@@ -78,7 +78,7 @@ class SimulationPipeline:
                 analysis.get("tension_only_compression_tolerance_N", 1.0e-6)
             ),
         }
-    
+
     @staticmethod
     def _evaluate_edital_criteria(cfg: Dict, metrics: Dict, detailed: Dict) -> List[Dict]:
         bridge = cfg.get("bridge", {})
@@ -124,7 +124,7 @@ class SimulationPipeline:
 
         # Build a list of edital checks.  The stick dimension reference values use
         # the updated specification (7.0 mm × 1.5 mm), replacing the legacy 8.2 mm × 2.0 mm
-        
+
         rules = cfg.get("competition_rules", {}) or {}
         enforce_stick_dims = bool(rules.get("enforce_nominal_stick_dimensions", False))
         if enforce_stick_dims:
@@ -147,7 +147,7 @@ class SimulationPipeline:
             len_rule = "configurável; deve ser > 0 mm"
             thk_rule = "configurável; deve ser > 0 mm"
             width_rule = "configurável; deve ser > 0 mm"
-        
+
         checks = [
             row("Vão livre", f"{span:.1f} mm", "obrigatório 1200 mm", abs(span - 1200.0) <= 1e-6),
             row("Apoio esquerdo", f"{left_support:.1f} mm", "máximo 100 mm", left_support <= 100.0 + 1e-6),
@@ -1581,6 +1581,16 @@ class SimulationPipeline:
                             detail_dir / "as_built_interpenetrations.csv",
                             as_built_audit.get("interpenetration_samples") or [],
                         )
+                        audit_md = detail_dir / "09_auditoria_conectividade_e_cortes.md"
+                        as_built_verdict = "FALHA" if int(as_built_audit.get("interpenetration_count", 0) or 0) > 0 else "OK"
+                        with audit_md.open("a", encoding="utf-8") as fh:
+                            fh.write(
+                                "\n## Auditoria as-built pós-render\n"
+                                f"- Veredito as-built: **{as_built_verdict}**\n"
+                                f"- Interpenetrações físicas: **{int(as_built_audit.get('interpenetration_count', 0) or 0)}**\n"
+                                f"- Peças com lacuna de conexão: **{int(as_built_audit.get('node_connection_gap_piece_count', 0) or 0)}**\n"
+                                "- Regra: qualquer interpenetração em vista montada real reprova a geometria, mesmo se a conectividade topológica estiver fechada.\n"
+                            )
                     except (OSError, TypeError, ValueError):
                         pass
                     emit_progress(0.886, "Renderizando HTML 3D peça-a-peça em posição de encaixe")
@@ -2034,6 +2044,7 @@ class SimulationPipeline:
                 "failed_restriction": failed_sync,
                 "validation_stage": "post_detail",
                 "predicted_breaking_load_kgf": final_break_sync,
+                "predicted_breaking_load_system_kgf": final_break_sync,
                 "predicted_breaking_load_proxy_kgf": s8_ref.get("predicted_breaking_load_proxy_kgf", prior_fv.get("predicted_breaking_load_proxy_kgf")),
                 "predicted_breaking_load_by_members_kgf": metrics.get("predicted_breaking_load_by_members_kgf"),
                 "predicted_breaking_load_by_supports_kgf": metrics.get("predicted_breaking_load_by_supports_kgf"),
@@ -2050,6 +2061,15 @@ class SimulationPipeline:
                 "governing_fs": metrics.get("governing_fs"),
                 "solver_regular": self._solver_is_regular(metrics.get("solver_status", "")),
                 "equilibrium_ok": bool(metrics.get("equilibrium_ok", True)),
+                # Separação explícita: o alvo nominal usa a ruptura de sistema;
+                # o requisito 80/20 usa o caso de robustez correspondente, para
+                # não mascarar a diferença entre membro, apoio e cola.
+                "hits_min_required_80kgf": bool(
+                    (safe_float(s8_ref.get("governing_strength_case_breaking_load_kgf"), None) or 0.0) >= torsion_80_20_target_sync
+                ),
+                "hits_torsion_80_20_80kgf": bool(
+                    (safe_float(s8_ref.get("governing_strength_case_breaking_load_kgf"), None) or 0.0) >= torsion_80_20_target_sync
+                ),
                 "hits_target_80kgf": bool((final_break_sync or 0.0) >= 80.0),
                 "hits_nominal_100kgf": bool((final_break_sync or 0.0) >= target_break_sync),
                 "governing_case": s8_ref.get("governing_case", prior_fv.get("governing_case")),
@@ -2146,7 +2166,23 @@ class SimulationPipeline:
                 integrity_status = "MISMATCH"
                 integrity_reasons.append(f"ruptura final difere da validação S8 em {break_delta:+.2f} kgf")
         if final_mass is not None and final_mass > effective_mass_limit_g(cfg) + 1.0e-6:
+            if integrity_status == "OK":
+                integrity_status = "CONSISTENTE_REPROVADO"
             integrity_reasons.append("relatório final acima do limite de massa")
+        final_verdict = str(opt_final.get("verdict", "") or "").strip().upper()
+        failed_restriction = str(opt_final.get("failed_restriction", "") or "").strip()
+        if final_verdict == "REPROVADA":
+            if integrity_status == "OK":
+                integrity_status = "CONSISTENTE_REPROVADO"
+            elif integrity_status == "WARN":
+                integrity_status = "WARN_REPROVADO"
+            integrity_reasons.append(
+                "validação final pós-detalhe reprovada"
+                + (f": {failed_restriction}" if failed_restriction else "")
+            )
+        elif final_verdict and final_verdict != "APROVADA" and integrity_status == "OK":
+            integrity_status = "WARN"
+            integrity_reasons.append(f"veredito final não reconhecido: {final_verdict}")
         integrity = {
             "run_id": run_id,
             "status": integrity_status,
@@ -2158,6 +2194,8 @@ class SimulationPipeline:
             },
             "optimization_final_validation": opt_final,
             "optimization_validation_stage": opt_validation_stage or None,
+            "final_verdict": final_verdict or None,
+            "failed_restriction": failed_restriction or None,
             "deltas": {
                 "break_final_minus_s8_kgf": break_delta,
                 "mass_final_minus_s8_g": mass_delta,
@@ -2178,7 +2216,7 @@ class SimulationPipeline:
             f"- Ruptura final: **{final_break if final_break is not None else '—'} kgf**\n"
             f"- Ruptura S8: **{opt_break if opt_break is not None else '—'} kgf**\n\n"
             "## Motivos / alertas\n"
-            + ("\n".join(f"- {r}" for r in integrity_reasons) if integrity_reasons else "- Nenhum alerta de divergência entre S8 e relatório final.")
+            + ("\n".join(f"- {r}" for r in integrity_reasons) if integrity_reasons else "- Nenhum alerta de divergência entre S8 e relatório final; veredito final aprovado.")
             + "\n\nArquivo bruto: `../output_integrity_report.json`.\n",
             encoding="utf-8",
         )

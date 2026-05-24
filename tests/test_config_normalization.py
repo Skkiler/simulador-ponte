@@ -87,7 +87,7 @@ def test_safe_default_detailing_avoids_unverified_miter_and_visual_offsets(base_
 
     normalized = ConfigService().normalize(cfg)
 
-    assert normalized["detail_model"]["angled_end_cuts_enabled"] is False
+    assert normalized["detail_model"]["angled_end_cuts_enabled"] is True
     assert normalized["detail_model"]["visual_beveled_end_cuts"] is False
     assert normalized["detail_model"]["piece_view_mounted_connection_offset_scale"] == 0.0
 
@@ -114,4 +114,91 @@ def test_simple_buildable_mode_defaults_to_butt_splints_not_same_axis_overlap(ba
     normalized = ConfigService().normalize(cfg)
 
     assert normalized["detail_model"]["splice_mode"] == "butt_with_splints"
-    assert normalized["detail_model"]["angled_end_cuts_enabled"] is False
+    assert normalized["detail_model"]["angled_end_cuts_enabled"] is True
+    assert normalized["detail_model"].get("node_lap_physical_offset_enabled") is True
+    assert float(normalized["detail_model"].get("node_lap_visual_side_offset_mm", 0.0)) <= 8.0
+    assert "top_transverse" in normalized["detail_model"].get("node_lap_visual_side_offset_groups", [])
+
+
+def test_legacy_simple_layouts_are_repaired_to_compact_buildable_sections(base_cfg: dict) -> None:
+    cfg = base_cfg
+    cfg["member_sticks_by_group"]["top_chord"] = 6
+    cfg["member_sticks_by_group"]["bottom_chord"] = 3
+    cfg["member_sticks_by_group"]["vertical"] = 3
+    cfg["section_layout_by_group"]["top_chord"] = {"layout": "stacked_edge"}
+    cfg["section_layout_by_group"]["bottom_chord"] = {"layout": "stacked_edge"}
+    cfg["section_layout_by_group"]["vertical"] = {"layout": "side_by_side"}
+    cfg["detail_model"]["node_lap_visual_side_offset_mm"] = 25.0
+    cfg["detail_model"]["node_lap_visual_side_offset_max_mm"] = 6.0
+
+    normalized = ConfigService().normalize(cfg)
+
+    assert normalized["analysis"]["target_min_fs"] >= 1.5
+    assert normalized["detail_model"]["node_lap_visual_side_offset_mm"] == 6.0
+    for group in ("top_chord", "bottom_chord", "vertical"):
+        layout = normalized["section_layout_by_group"][group]
+        assert layout["layout"] == "contact_box"
+        assert layout["stick_orientation"] == "edge"
+        assert layout["box_extra_stick_strategy"] == "balanced"
+
+
+def test_butt_splint_defaults_are_mass_conservative_not_visual_exploded(base_cfg: dict) -> None:
+    cfg = base_cfg
+    cfg["detail_model"].pop("reinforcement_length_mm", None)
+    cfg["detail_model"].pop("reinforcement_sticks_per_splice", None)
+    cfg["detail_model"].pop("node_lap_visual_side_offset_mm", None)
+
+    normalized = ConfigService().normalize(cfg)
+
+    assert normalized["detail_model"]["reinforcement_length_mm"] == 25.0
+    assert normalized["detail_model"]["reinforcement_sticks_per_splice"] == 1
+    assert normalized["detail_model"]["node_lap_visual_side_offset_mm"] <= 8.0
+    assert normalized["detail_model"].get("side_lap_groups_skip_axis_setback") is True
+
+
+def test_legacy_heavy_butt_splints_are_capped_for_mass(base_cfg: dict) -> None:
+    cfg = base_cfg
+    cfg["detail_model"]["splice_mode"] = "butt_with_splints"
+    cfg["detail_model"]["reinforcement_length_mm"] = 55.0
+    cfg["detail_model"]["reinforcement_sticks_per_splice"] = 4
+
+    normalized = ConfigService().normalize(cfg)
+
+    assert normalized["detail_model"]["reinforcement_length_mm"] == 25.0
+    assert normalized["detail_model"]["reinforcement_sticks_per_splice"] == 1
+
+
+def test_side_lap_groups_skip_axis_setback_by_default(base_cfg: dict) -> None:
+    normalized = ConfigService().normalize(base_cfg)
+
+    detail = normalized["detail_model"]
+    assert detail["side_lap_groups_skip_axis_setback"] is True
+    assert "vertical" in detail["side_lap_no_axis_setback_groups"]
+    assert "diagonal" in detail["side_lap_no_axis_setback_groups"]
+
+
+def test_min_constructive_piece_length_accepts_20mm(base_cfg: dict) -> None:
+    cfg = base_cfg
+    cfg["detail_model"].pop("min_constructive_piece_length_mm", None)
+
+    normalized = ConfigService().normalize(cfg)
+
+    assert normalized["detail_model"]["min_constructive_piece_length_mm"] == 20.0
+
+
+def test_explicit_legacy_40mm_piece_minimum_is_not_forced(base_cfg: dict) -> None:
+    cfg = base_cfg
+    cfg["detail_model"]["min_constructive_piece_length_mm"] = 20.0
+
+    normalized = ConfigService().normalize(cfg)
+
+    assert normalized["detail_model"]["min_constructive_piece_length_mm"] == 20.0
+
+
+def test_explicit_legacy_40mm_piece_minimum_is_capped_to_20mm(base_cfg: dict) -> None:
+    cfg = base_cfg
+    cfg["detail_model"]["min_constructive_piece_length_mm"] = 40.0
+
+    normalized = ConfigService().normalize(cfg)
+
+    assert normalized["detail_model"]["min_constructive_piece_length_mm"] == 20.0
