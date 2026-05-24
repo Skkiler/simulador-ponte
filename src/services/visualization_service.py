@@ -1275,6 +1275,8 @@ class VisualizationService:
                         "z0": min(prism["z"]),
                         "z1": max(prism["z"]),
                         "obb": self._obb_from_prism(prism),
+                        "ignore_face_lap_tolerance": bool(r.get("as_built_ignore_face_lap_tolerance", True)),
+                        "face_contact_tolerance_mm": safe_float(r.get("as_built_face_contact_tolerance_mm"), 1.6) or 0.0,
                     }
                 )
                 if not bool(r.get("node_connection_ok", True)):
@@ -1319,6 +1321,19 @@ class VisualizationService:
                                 param_overlap = min(float(a1), float(b1)) - max(float(a0), float(b0))
                                 if param_overlap <= 1.0e-6:
                                     continue
+                        if bool(a.get("ignore_face_lap_tolerance", True)) or bool(box.get("ignore_face_lap_tolerance", True)):
+                            contact_tol = max(
+                                safe_float(a.get("face_contact_tolerance_mm"), 0.0) or 0.0,
+                                safe_float(box.get("face_contact_tolerance_mm"), 0.0) or 0.0,
+                            )
+                            # Thin face-lap contact is intentional in the mounted
+                            # side-lap model.  The CAD has zero glue thickness, so
+                            # coincident faces can appear as a very thin positive
+                            # overlap.  Count only hard interpenetration, where all
+                            # three overlap dimensions exceed the contact-face
+                            # tolerance.
+                            if contact_tol > 0.0 and min(ox, oy, oz) <= contact_tol + tol:
+                                continue
                         obb_a = a.get("obb")
                         obb_b = box.get("obb")
                         if obb_a is not None and obb_b is not None and not self._obb_intersects(obb_a, obb_b, tol=tol):

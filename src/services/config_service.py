@@ -663,7 +663,6 @@ class ConfigService:
                 "bottom_transverse",
                 "top_bracing",
                 "bottom_bracing",
-                "cross_frame_bracing",
                 "chord_lacing",
             ],
         )
@@ -682,7 +681,6 @@ class ConfigService:
                 "bottom_transverse",
                 "top_bracing",
                 "bottom_bracing",
-                "cross_frame_bracing",
                 "chord_lacing",
             ],
         )
@@ -721,6 +719,7 @@ class ConfigService:
         detail.setdefault("joint_face_contact_depth_mode", "stick_thickness")
         detail.setdefault("joint_face_clearance_mm", 1.0)
         detail.setdefault("joint_max_setback_mm", 10.0)
+        detail.setdefault("joint_min_setback_by_group", {"cross_frame_bracing": 8.0})
         detail.setdefault("piece_view_mounted_connection_offset_scale", 0.0)
         detail.setdefault("piece_view_exploded_connection_offset_scale", 0.75)
         detail.setdefault("miter_cut_terminal_groups", ["top_chord", "bottom_chord", "vertical", "diagonal", "top_transverse", "bottom_transverse", "top_bracing", "bottom_bracing", "cross_frame_bracing"])
@@ -729,14 +728,84 @@ class ConfigService:
         detail.setdefault("node_lap_visual_side_offset_enabled", True)
         detail.setdefault("node_lap_physical_offset_enabled", True)
         detail.setdefault("node_lap_visual_side_offset_mm", 4.0)
-        detail.setdefault("node_lap_visual_side_offset_max_mm", 8.0)
+        detail.setdefault("node_lap_visual_side_offset_max_mm", 14.0)
+        detail.setdefault("node_lap_physical_offset_model", "contact_stack_not_exploded")
+        detail.setdefault(
+            "contact_stack_offsets_mm",
+            {
+                "vertical_y": 10.0,
+                "diagonal_y": 12.0,
+                "top_bracing_y": 14.0,
+                "bottom_bracing_y": 14.0,
+                "top_transverse_z": 4.8,
+                "bottom_transverse_z": -4.8,
+                "support_pad_z": -4.8,
+                "cross_frame_bracing_x": 0.0,
+            },
+        )
+        detail.setdefault("auto_reduce_floating_contact_stack_offsets", True)
+        if (
+            str(detail.get("node_lap_physical_offset_model", "")).strip().lower() == "contact_stack_not_exploded"
+            and bool(detail.get("auto_reduce_floating_contact_stack_offsets", True))
+        ):
+            # Estes valores representam faces de contato reais entre seções de
+            # palitos.  A versão anterior usava afastamentos grandes para fazer
+            # a auditoria passar; isso deixava diagonais/montantes flutuando e
+            # mascarava o encaixe.  Aqui capamos qualquer config antiga para uma
+            # pilha física mínima: suficiente para impedir interpenetração no
+            # auditor com tolerância fina, sem simular vista explodida.
+            stack = dict(detail.get("contact_stack_offsets_mm") or {})
+
+            def _cap_abs(key: str, value: float) -> None:
+                cur_raw = safe_float(stack.get(key), None)
+                cur = float(value) if cur_raw is None else float(cur_raw)
+                sign = -1.0 if float(cur) < 0.0 else 1.0
+                stack[key] = sign * min(abs(float(cur)), abs(float(value)))
+
+            def _set_signed_cap(key: str, value: float) -> None:
+                cur_raw = safe_float(stack.get(key), None)
+                cur = float(value) if cur_raw is None else float(cur_raw)
+                if float(value) < 0.0:
+                    stack[key] = -min(abs(float(cur)), abs(float(value)))
+                else:
+                    stack[key] = min(abs(float(cur)), abs(float(value)))
+
+            _cap_abs("vertical_y", 10.0)
+            _cap_abs("diagonal_y", 12.0)
+            _cap_abs("top_bracing_y", 14.0)
+            _cap_abs("bottom_bracing_y", 14.0)
+            _set_signed_cap("top_transverse_z", 4.8)
+            _set_signed_cap("bottom_transverse_z", -4.8)
+            _set_signed_cap("support_pad_z", -4.8)
+            _cap_abs("cross_frame_bracing_x", 0.0)
+            detail["contact_stack_offsets_mm"] = stack
+
+        detail.setdefault("auto_mountable_layer_offsets", True)
+        if bool(detail.get("auto_mountable_layer_offsets", True)):
+            detail["node_lap_visual_side_offset_mm"] = max(
+                4.0,
+                safe_float(detail.get("node_lap_visual_side_offset_mm"), 4.0) or 4.0,
+            )
+            detail["node_lap_visual_side_offset_max_mm"] = min(
+                14.0,
+                max(0.0, safe_float(detail.get("node_lap_visual_side_offset_max_mm"), 14.0) or 14.0),
+            )
         detail.setdefault("auto_shrink_node_lap_physical_offsets", True)
         if bool(detail.get("auto_shrink_node_lap_physical_offsets", True)):
             _node_lap_requested = safe_float(detail.get("node_lap_visual_side_offset_mm"), 4.0) or 4.0
-            _node_lap_cap = max(0.0, safe_float(detail.get("node_lap_visual_side_offset_max_mm"), 8.0) or 8.0)
+            _node_lap_cap = max(0.0, safe_float(detail.get("node_lap_visual_side_offset_max_mm"), 14.0) or 14.0)
             detail["node_lap_visual_side_offset_mm"] = min(max(0.0, float(_node_lap_requested)), float(_node_lap_cap))
         else:
             detail["node_lap_visual_side_offset_mm"] = max(0.0, safe_float(detail.get("node_lap_visual_side_offset_mm"), 4.0) or 4.0)
+        detail.setdefault("as_built_ignore_face_lap_tolerance", True)
+        detail.setdefault("as_built_face_contact_tolerance_mm", 1.6)
+        if str(detail.get("node_lap_physical_offset_model", "")).strip().lower() == "contact_stack_not_exploded":
+            # O modelo de contato montado deve ser auditável.  Tolerâncias altas
+            # mascaram offsets grandes como se fossem contato de cola; no contact
+            # stack aceitamos apenas sobreposição fina compatível com espessura de
+            # cola/superfície numérica, não uma camada inteira de palito.
+            _tol_req = safe_float(detail.get("as_built_face_contact_tolerance_mm"), 1.6) or 1.6
+            detail["as_built_face_contact_tolerance_mm"] = min(max(0.0, float(_tol_req)), 1.6)
         detail.setdefault("node_lap_layer_clearance_mm", 0.75)
         default_node_lap_offset_groups = [
             "vertical",
@@ -753,6 +822,16 @@ class ConfigService:
             detail["node_lap_visual_side_offset_groups"] = list(dict.fromkeys(existing_node_lap_offset_groups + default_node_lap_offset_groups))
         else:
             detail.setdefault("node_lap_visual_side_offset_groups", default_node_lap_offset_groups)
+        if str(detail.get("node_lap_physical_offset_model", "")).strip().lower() == "contact_stack_not_exploded":
+            # Cross frames do not use the no-trim side-lap exception: they must
+            # terminate at the host face. Otherwise they pass through the top
+            # chord and the model only looks valid because of a large hidden
+            # offset/tolerance.
+            detail["side_lap_no_axis_setback_groups"] = [
+                str(v)
+                for v in (detail.get("side_lap_no_axis_setback_groups") or [])
+                if str(v) != "cross_frame_bracing"
+            ]
         detail.setdefault("x_midpoint_gusset_overlap_mm", 20.0)
         detail.setdefault("x_midpoint_gusset_note", "Se X for usado manualmente, dividir no centro e colar com tala curta; padrão automático evita X contínuo.")
         # Contraventamentos em X podem existir, mas não no mesmo volume. O
@@ -1154,7 +1233,6 @@ class ConfigService:
                 "bottom_transverse",
                 "top_bracing",
                 "bottom_bracing",
-                "cross_frame_bracing",
                 "chord_lacing",
             ],
         )
@@ -1168,7 +1246,6 @@ class ConfigService:
                 "bottom_transverse",
                 "top_bracing",
                 "bottom_bracing",
-                "cross_frame_bracing",
                 "chord_lacing",
             ],
         )
@@ -1582,7 +1659,6 @@ class ConfigService:
             [
                 "top_bracing",
                 "bottom_bracing",
-                "cross_frame_bracing",
                 "chord_lacing",
                 "top_transverse",
                 "bottom_transverse",
@@ -1711,7 +1787,6 @@ class ConfigService:
             [
                 "top_bracing",
                 "bottom_bracing",
-                "cross_frame_bracing",
                 "chord_lacing",
             ],
         )

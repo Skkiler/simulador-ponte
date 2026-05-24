@@ -422,29 +422,67 @@ class StickDetailService:
         *,
         domain_start_mm: float,
         domain_end_mm: float,
+        stock_limit_mm: float,
+        min_constructive_piece_length_mm: float,
     ) -> List[Tuple[float, float, float]]:
-        """Clamp butt-splice intervals so adjacent main sticks never overlap.
+        """Create constructible butt-splice intervals without slivers or overlap.
 
-        Minimum-length repair and lane staggering may move a terminal boundary
-        backwards.  That is acceptable for a lap-splice model, but in
-        butt-with-splints it creates two real prisms in the same volume and a
-        false tiny glue overlap.  This cleanup preserves ordering and removes
-        the overlap; splints carry the continuity instead of the main sticks.
+        Earlier passes may stagger splice positions by lane.  That is useful for
+        lap joints, but in ``butt_with_splints`` the same operation can leave
+        2--18 mm remainders after stock-limit clipping.  Those remainders are not
+        real fabrication pieces and they also cause tiny main-stick overlaps.
+        For butt splices, continuity is carried by talas, so the physically sound
+        representation is a sequence of non-overlapping main sticks, each between
+        the minimum constructive length and the stock length.  We therefore
+        re-partition the usable domain evenly whenever the raw intervals contain
+        fragments.
         """
-        if not intervals:
-            return []
         lo = float(domain_start_mm)
-        hi = float(domain_end_mm)
-        cleaned: List[Tuple[float, float, float]] = []
-        prev_end = lo
-        for a, b, _c in sorted((float(a), float(b), float(c)) for a, b, c in intervals):
-            aa = max(lo, min(hi, max(a, prev_end)))
-            bb = max(lo, min(hi, b))
-            if bb <= aa + 1.0e-9:
-                continue
-            cleaned.append((aa, bb, bb - aa))
-            prev_end = bb
-        return cleaned
+        hi = max(lo, float(domain_end_mm))
+        length = hi - lo
+        if length <= 1.0e-9:
+            return []
+        stock = max(1.0, float(stock_limit_mm or 1.0))
+        min_len = max(0.0, min(float(min_constructive_piece_length_mm or 0.0), stock))
+        raw = sorted((max(lo, min(hi, float(a))), max(lo, min(hi, float(b)))) for a, b, _c in intervals)
+        raw = [(a, b) if b >= a else (b, a) for a, b in raw]
+        has_short = any((b - a) < min_len - 1.0e-9 for a, b in raw if b > a + 1.0e-9)
+        has_overlap = False
+        prev = lo
+        for a, b in raw:
+            if a < prev - 1.0e-9:
+                has_overlap = True
+                break
+            prev = max(prev, b)
+        # If nothing is wrong, only normalize ordering/length fields.
+        if raw and not has_short and not has_overlap:
+            cleaned: List[Tuple[float, float, float]] = []
+            prev_end = lo
+            for a, b in raw:
+                aa = max(lo, min(hi, max(a, prev_end)))
+                bb = max(lo, min(hi, b))
+                if bb <= aa + 1.0e-9:
+                    continue
+                cleaned.append((aa, bb, bb - aa))
+                prev_end = bb
+            if cleaned:
+                return cleaned
+
+        n = max(1, int(math.ceil(length / stock)))
+        # If the even split would create pieces smaller than min_len, reduce the
+        # number of segments.  This only happens in very short members; for normal
+        # stock splitting it preserves the <= stock constraint.
+        if min_len > 1.0e-9:
+            while n > 1 and (length / n) < min_len - 1.0e-9:
+                n -= 1
+        while n * stock < length - 1.0e-9:
+            n += 1
+        step = length / n
+        return [
+            (lo + i * step, lo + (i + 1) * step, step)
+            for i in range(n)
+            if step > 1.0e-9
+        ]
 
     @staticmethod
     def _joint_setback_groups(detail: Dict[str, Any]) -> set[str]:
@@ -498,6 +536,11 @@ class StickDetailService:
         if not bool(detail.get("joint_face_setback_enabled", True)):
             return 0.0, 0.0
         group = str(member.group)
+        if (
+            group in {"top_chord", "bottom_chord"}
+            and bool(detail.get("continuous_chord_axis_setback_disabled", True))
+        ):
+            return 0.0, 0.0
         if group not in StickDetailService._joint_setback_groups(detail):
             return 0.0, 0.0
 
@@ -529,6 +572,12 @@ class StickDetailService:
 
         clearance = max(0.0, float(detail.get("joint_face_clearance_mm", 0.50)))
         min_setback = max(0.0, float(detail.get("joint_min_setback_mm", 0.50 * max(stick_w, stick_t))))
+        group_min_raw = detail.get("joint_min_setback_by_group") or {}
+        if isinstance(group_min_raw, dict) and group in group_min_raw:
+            try:
+                min_setback = max(min_setback, float(group_min_raw.get(group) or 0.0))
+            except (TypeError, ValueError):
+                pass
         max_setback_mm = max(0.0, float(detail.get("joint_max_setback_mm", 18.0)))
         max_setback_fraction = max(0.0, min(0.45, float(detail.get("joint_max_setback_fraction", 0.18))))
         per_end_cap = min(max_setback_mm, max_setback_fraction * max(0.0, float(member_length_mm)))
@@ -840,13 +889,15 @@ class StickDetailService:
         nj: Node,
         detail: Dict[str, Any],
     ) -> Tuple[float, float, float]:
-        """Return the real assembly layer offset for terminal face-lap members.
+        """Return the mounted contact-layer offset for side/face-lap members.
 
-        The solver member remains node-to-node, but the physical stick must sit
-        on an external glue face instead of passing through the centroidal volume
-        of the host.  This offset is therefore part of the as-built geometry, not
-        merely a rendering trick.  It is deterministic by group so two generated
-        runs with the same topology keep the same jig/assembly layers.
+        This is deliberately *not* an exploded-view displacement.  The values are
+        contact-stack distances: the centroid of a member glued on the outside
+        face of another member is moved by the sum of the relevant half-envelopes
+        and a small construction allowance.  Large arbitrary offsets made the
+        bridge look buildable while disconnecting the pieces from the joint; this
+        function keeps every piece near its host face and leaves exploded views to
+        the visualization layer.
         """
         if not bool(detail.get("node_lap_visual_side_offset_enabled", True)):
             return (0.0, 0.0, 0.0)
@@ -866,41 +917,50 @@ class StickDetailService:
                 ],
             )
         }
-        group = str(member.group)
+        group = str(member.group).strip().lower()
         if group not in groups:
             return (0.0, 0.0, 0.0)
-        base = max(0.0, float(detail.get("node_lap_visual_side_offset_mm", 4.0)))
-        cap = max(base, float(detail.get("node_lap_visual_side_offset_max_mm", 8.0) or 8.0))
+        stack = detail.get("contact_stack_offsets_mm") or {}
+        if not isinstance(stack, dict):
+            stack = {}
+
+        def _stack_mm(name: str, fallback: float) -> float:
+            try:
+                return float(stack.get(name, fallback) or fallback)
+            except (TypeError, ValueError):
+                return float(fallback)
+
         y_mid = 0.5 * (float(ni.y) + float(nj.y))
         x_mid = 0.5 * (float(ni.x) + float(nj.x))
-
-        g = str(member.group).strip().lower()
-        if g in {"vertical", "diagonal", "top_bracing", "bottom_bracing"}:
+        if group in {"vertical", "diagonal", "top_bracing", "bottom_bracing"}:
             if abs(y_mid) <= 1.0e-6:
                 return (0.0, 0.0, 0.0)
-            if g == "vertical":
-                mult = 0.60
-            elif g == "diagonal":
-                # A diagonal fica em uma camada externa ao montante. A folga
-                # precisa ser maior que a espessura do palito para evitar colisão,
-                # mas ainda pequena o bastante para parecer montagem encaixada.
-                mult = 1.80 + (0.20 if int(getattr(member, "id", 0) or 0) % 2 else -0.20)
+            if group == "vertical":
+                mag = _stack_mm("vertical_y", 10.0)
+            elif group == "diagonal":
+                mag = _stack_mm("diagonal_y", 12.0)
+            elif group == "top_bracing":
+                mag = _stack_mm("top_bracing_y", 14.0)
             else:
-                mult = 1.70
-            return (0.0, math.copysign(min(cap, base * mult), y_mid), 0.0)
-        if g in {"top_transverse", "bottom_transverse"}:
-            # Transversais precisam sair do plano do banzo, mas só o bastante
-            # para representar cola em face. Valores grandes deixam a vista
-            # montada parecer explodida.
-            sign = 1.0 if g == "top_transverse" else -1.0
-            return (0.0, 0.0, sign * min(cap, base * 0.75))
-        if g == "support_pad":
-            return (0.0, 0.0, -min(cap, base * 1.70))
-        if g == "cross_frame_bracing":
-            sign = 1.0 if x_mid >= 0.5 * float(detail.get("bridge_span_reference_mm", 0.0) or 0.0) else -1.0
+                mag = _stack_mm("bottom_bracing_y", 14.0)
+            return (0.0, math.copysign(mag, y_mid), 0.0)
+        if group == "top_transverse":
+            return (0.0, 0.0, _stack_mm("top_transverse_z", 4.8))
+        if group == "bottom_transverse":
+            return (0.0, 0.0, _stack_mm("bottom_transverse_z", -4.8))
+        if group == "support_pad":
+            return (0.0, 0.0, _stack_mm("support_pad_z", -4.8))
+        if group == "cross_frame_bracing":
+            # Contraventamentos internos precisam terminar nos nós/montantes do
+            # pórtico transversal. Um offset terminal fixo em x desloca a peça
+            # inteira para fora da estação e a faz parecer flutuante. Só camadas
+            # de cruzamento em X devem ser separadas; isso já é tratado em
+            # _x_bracing_layer_offset, não neste contato terminal.
+            span_ref = float(detail.get("bridge_span_reference_mm", 0.0) or 0.0)
+            sign = 1.0 if x_mid >= 0.5 * span_ref else -1.0
             if abs(x_mid) <= 1.0e-6:
                 sign = 1.0
-            return (sign * min(cap, base * 1.20), 0.0, 0.0)
+            return (math.copysign(_stack_mm("cross_frame_bracing_x", 0.0), sign), 0.0, 0.0)
         return (0.0, 0.0, 0.0)
 
     @staticmethod
@@ -1490,6 +1550,8 @@ class StickDetailService:
                         lane_intervals,
                         domain_start_mm=joint_start_setback,
                         domain_end_mm=max(joint_start_setback, L - joint_end_setback),
+                        stock_limit_mm=max_cut_length_mm,
+                        min_constructive_piece_length_mm=min_constructive_piece_length_mm,
                     )
                 prev_id = None
                 prev_end = None
@@ -1633,6 +1695,8 @@ class StickDetailService:
                             "physical_face_lap_offset_x_mm": physical_face_lap_offset[0],
                             "physical_face_lap_offset_y_mm": physical_face_lap_offset[1],
                             "physical_face_lap_offset_z_mm": physical_face_lap_offset[2],
+                            "as_built_face_contact_tolerance_mm": float(detail.get("as_built_face_contact_tolerance_mm", 1.6) or 0.0),
+                            "as_built_ignore_face_lap_tolerance": bool(detail.get("as_built_ignore_face_lap_tolerance", True)),
                             "x_bracing_layer": x_layer.get("layer"),
                             "x_bracing_plane": x_layer.get("plane"),
                             "x_bracing_crossing_handling": x_layer.get("handling"),

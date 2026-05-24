@@ -152,7 +152,7 @@ def test_butt_splint_defaults_are_mass_conservative_not_visual_exploded(base_cfg
 
     assert normalized["detail_model"]["reinforcement_length_mm"] == 25.0
     assert normalized["detail_model"]["reinforcement_sticks_per_splice"] == 1
-    assert normalized["detail_model"]["node_lap_visual_side_offset_mm"] <= 8.0
+    assert normalized["detail_model"]["node_lap_visual_side_offset_mm"] >= 4.0
     assert normalized["detail_model"].get("side_lap_groups_skip_axis_setback") is True
 
 
@@ -202,3 +202,74 @@ def test_explicit_legacy_40mm_piece_minimum_is_capped_to_20mm(base_cfg: dict) ->
     normalized = ConfigService().normalize(cfg)
 
     assert normalized["detail_model"]["min_constructive_piece_length_mm"] == 20.0
+
+
+def test_as_built_face_lap_tolerance_defaults_to_mountable_contact(base_cfg: dict) -> None:
+    normalized = ConfigService().normalize(base_cfg)
+
+    detail = normalized["detail_model"]
+    assert detail["as_built_ignore_face_lap_tolerance"] is True
+    assert 0.0 < detail["as_built_face_contact_tolerance_mm"] <= 1.6
+    assert detail["auto_mountable_layer_offsets"] is True
+    assert detail["node_lap_visual_side_offset_mm"] >= 4.0
+    assert detail["node_lap_visual_side_offset_max_mm"] <= 24.0
+
+
+def test_contact_stack_offsets_are_not_exploded_by_default(base_cfg: dict) -> None:
+    normalized = ConfigService().normalize(base_cfg)
+
+    detail = normalized["detail_model"]
+    assert detail["node_lap_physical_offset_model"] == "contact_stack_not_exploded"
+    stack = detail["contact_stack_offsets_mm"]
+    assert stack["vertical_y"] == 10.0
+    assert stack["diagonal_y"] == 12.0
+    assert stack["top_transverse_z"] == 4.8
+    assert stack["cross_frame_bracing_x"] == 0.0
+    assert detail["node_lap_visual_side_offset_max_mm"] <= 24.0
+
+
+def test_contact_stack_caps_face_contact_tolerance(base_cfg: dict) -> None:
+    cfg = base_cfg
+    cfg["detail_model"]["node_lap_physical_offset_model"] = "contact_stack_not_exploded"
+    cfg["detail_model"]["as_built_face_contact_tolerance_mm"] = 4.5
+
+    normalized = ConfigService().normalize(cfg)
+
+    assert normalized["detail_model"]["as_built_face_contact_tolerance_mm"] == 1.6
+
+
+def test_cross_frame_uses_trim_not_fake_offset_by_default(base_cfg: dict) -> None:
+    normalized = ConfigService().normalize(base_cfg)
+
+    detail = normalized["detail_model"]
+    assert "cross_frame_bracing" not in detail["side_lap_no_axis_setback_groups"]
+    assert detail["joint_min_setback_by_group"]["cross_frame_bracing"] >= 8.0
+    assert detail["contact_stack_offsets_mm"]["cross_frame_bracing_x"] == 0.0
+
+
+def test_contact_stack_offsets_are_mounting_not_exploded(base_cfg: dict) -> None:
+    cfg = base_cfg
+    cfg["detail_model"]["node_lap_physical_offset_model"] = "contact_stack_not_exploded"
+    cfg["detail_model"]["contact_stack_offsets_mm"] = {
+        "vertical_y": 11.5,
+        "diagonal_y": 21.5,
+        "top_bracing_y": 25.5,
+        "bottom_bracing_y": 25.5,
+        "top_transverse_z": 6.0,
+        "bottom_transverse_z": -6.0,
+        "support_pad_z": -5.0,
+        "cross_frame_bracing_x": 10.0,
+    }
+
+    normalized = ConfigService().normalize(cfg)
+    stack = normalized["detail_model"]["contact_stack_offsets_mm"]
+
+    assert stack["vertical_y"] == 10.0
+    assert stack["diagonal_y"] == 12.0
+    assert stack["top_bracing_y"] == 14.0
+    assert stack["bottom_bracing_y"] == 14.0
+    assert stack["top_transverse_z"] == 4.8
+    assert stack["bottom_transverse_z"] == -4.8
+    assert stack["support_pad_z"] == -4.8
+    assert stack["cross_frame_bracing_x"] == 0.0
+    assert normalized["detail_model"]["node_lap_visual_side_offset_max_mm"] <= 14.0

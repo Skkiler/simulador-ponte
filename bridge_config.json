@@ -340,14 +340,14 @@
     "node_lap_visual_side_offset_enabled": true,
     "node_lap_visual_side_offset_mm": 4.0,
     "node_lap_visual_side_offset_groups": [
-      "vertical",
-      "diagonal",
-      "top_transverse",
-      "bottom_transverse",
-      "top_bracing",
       "bottom_bracing",
+      "bottom_transverse",
       "cross_frame_bracing",
-      "support_pad"
+      "diagonal",
+      "support_pad",
+      "top_bracing",
+      "top_transverse",
+      "vertical"
     ],
     "node_lap_groups": [
       "diagonal",
@@ -435,7 +435,7 @@
     "node_lap_physical_offset_enabled": true,
     "node_lap_layer_clearance_mm": 0.75,
     "auto_expand_node_lap_physical_offset_groups": true,
-    "node_lap_visual_side_offset_max_mm": 8.0,
+    "node_lap_visual_side_offset_max_mm": 14.0,
     "auto_shrink_node_lap_physical_offsets": true,
     "auto_balance_compression_section_layouts": true,
     "side_lap_groups_skip_axis_setback": true,
@@ -446,10 +446,27 @@
       "bottom_transverse",
       "top_bracing",
       "bottom_bracing",
-      "cross_frame_bracing",
       "chord_lacing"
     ],
-    "auto_lightweight_butt_splints": true
+    "auto_lightweight_butt_splints": true,
+    "as_built_face_contact_tolerance_mm": 1.6,
+    "as_built_ignore_face_lap_tolerance": true,
+    "auto_mountable_layer_offsets": true,
+    "node_lap_physical_offset_model": "contact_stack_not_exploded",
+    "contact_stack_offsets_mm": {
+      "vertical_y": 10.0,
+      "diagonal_y": 12.0,
+      "top_bracing_y": 14.0,
+      "bottom_bracing_y": 14.0,
+      "top_transverse_z": 4.8,
+      "bottom_transverse_z": -4.8,
+      "support_pad_z": -4.8,
+      "cross_frame_bracing_x": 4.0
+    },
+    "joint_min_setback_by_group": {
+      "cross_frame_bracing": 8.0
+    },
+    "auto_reduce_floating_contact_stack_offsets": true
   },
   "section_layout_by_group": {
     "bottom_chord": {
