@@ -139,6 +139,9 @@ class ConnectionPlanner:
             keys.update(mp.keys())
         if not keys:
             keys = {"single_lap", "single_lap_tala", "double_lap", "double_lap_reinforced"}
+        if bool(detail.get("physical_connection_policy_enabled", False)):
+            prohibited = {"butt_plain", "edge_bond_plain", "side_by_side_plain"}
+            keys = {k for k in keys if str(k) not in prohibited}
         return {k: k for k in sorted(keys)}
 
     def assign_member_joint_plan(
@@ -231,6 +234,8 @@ class ConnectionPlanner:
 
             if state == "compression" and model == "butt_plain":
                 model = "double_lap"
+            if bool(detail.get("physical_connection_policy_enabled", False)) and model == "butt_plain":
+                model = "double_lap_reinforced"
 
             area_factor, bend_factor = self._joint_properties(model)
             required_overlap = self._required_overlap_mm(

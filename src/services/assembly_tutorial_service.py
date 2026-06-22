@@ -87,7 +87,7 @@ class AssemblyTutorialService:
             ("Colar diagonais", ["diagonal"]),
             ("Montar segunda lateral igual", ["bottom_chord", "top_chord", "vertical", "diagonal"]),
             ("Unir laterais com transversais", ["bottom_transverse", "top_transverse", "support_pad"]),
-            ("Aplicar travamentos superior/inferior", ["cross_frame_bracing", "top_bracing", "bottom_bracing", "chord_lacing"]),
+            ("Instalar zig-zag interno e conferir travessas dos banzos", ["cross_frame_bracing", "top_bracing", "bottom_bracing", "chord_lacing"]),
             ("Montar deck/plataforma de carga", ["top_transverse", "support_pad"]),
             ("Cura e inspeção final", []),
         ]
@@ -128,19 +128,19 @@ class AssemblyTutorialService:
             if idx == 1:
                 instruction = "Traçar o vão e as estações dos painéis no gabarito plano; marcar posição dos apoios e dos nós para repetição das duas laterais."
             elif idx == 2:
-                instruction = "Montar o banzo inferior com palitos inteiros/sobrepostos e emendas desencontradas; manter overlap mínimo e alinhamento longitudinal."
+                instruction = "Montar primeiro a alma em pé do banzo inferior T com 14 palitos por lateral, em cadeia sobreposta face-a-face de 20 mm; alternar as faces das sobreposições conforme `bottom_chord_continuity_plan.csv`. Depois instalar a mesa superior com sobreposições face-a-face igualmente de 20 mm, iniciadas 50 mm fora das juntas da alma para impedir coincidência de emendas."
             elif idx == 3:
-                instruction = "Montar o banzo superior em gabarito, respeitando perfil escolhido e orientação dos palitos."
+                instruction = "Montar o banzo superior como seção sanduíche fechada de oito palitos: quatro lâminas centrais em pé coladas face-a-face, duas capas fechando o núcleo e duas capas externas contínuas que unem os grupos longitudinalmente. Usar a primeira lâmina do núcleo como guia dos cortes em grau indicados no plano de cortes. Não substituir as capas externas por contato por aresta ou por uma caixa vazia não colada."
             elif idx == 4:
-                instruction = "Colar montantes entre banzos com esquadro, sem desalinhamento torsional."
+                instruction = "Colar os montantes centrados sobre a mesa superior do T inferior, com esquadro. Nos montantes construídos nas estações x=0 mm e x=1300 mm, montar o sanduíche de seis palitos: quatro lâminas centrais face-a-face e uma capa em cada lado. Nas extremidades que encontram segmentos inclinados do banzo superior, executar os cortes listados em `miter_cut_instructions.csv`."
             elif idx == 5:
-                instruction = "Colar diagonais no padrão Pratt/Warren sem cruzamento lateral no mesmo plano."
+                instruction = "Colar as diagonais laterais no padrão Pratt entre os montantes, convergindo nos nós. As extremidades superior e inferior devem receber os cortes terminais indicados em `miter_cut_instructions.csv`, para assentamento no montante/banzo sem pontas atravessando a junta; manter a face da diagonal dentro da largura da mesa do T ou na camada externa mínima prevista."
             elif idx == 6:
                 instruction = "Repetir a lateral oposta com as mesmas peças e mesmas regras de emenda."
             elif idx == 7:
                 instruction = "Unir as duas laterais com transversais para travar largura e geometria global."
             elif idx == 8:
-                instruction = "Aplicar travamentos superior/inferior, com X apenas em camadas/documentação física."
+                instruction = "Instalar os diafragmas diagonais transversais internos apenas nas estações indicadas no plano e, em seguida, o zig-zag espacial longitudinal entre montantes consecutivos das duas laterais, alternando direita–esquerda e esquerda–direita. Cada diagonal interna deverá receber corte terminal nas duas pontas e ser colada na face do montante especificada no plano de cortes; as duas famílias ocupam camadas de contato opostas. Nos planos dos banzos, não instalar zig-zag: manter travessas transversais simples; no topo, usar as travessas reforçadas somente nas estações que recebem carga."
             elif idx == 9:
                 instruction = "Montar mesa/plataforma de carga e verificar distribuição conforme modelo de aplicação."
             else:
@@ -230,6 +230,7 @@ class AssemblyTutorialService:
             }
             if start_required:
                 item["start_angle_deg"] = r.get("miter_cut_start_angle_deg")
+                item["start_shop_reference_angle_deg"] = r.get("miter_cut_start_shop_reference_angle_deg", r.get("miter_cut_start_angle_deg"))
                 item["start_position"] = r.get("miter_cut_start_position", "ponta inicial") or "ponta inicial"
                 item["start_host"] = r.get("miter_cut_start_host_group")
                 item["start_relation"] = r.get("miter_cut_start_relation")
@@ -237,6 +238,7 @@ class AssemblyTutorialService:
                 item["start_trim_axis"] = r.get("miter_cut_start_trim_axis")
             if end_required:
                 item["end_angle_deg"] = r.get("miter_cut_end_angle_deg")
+                item["end_shop_reference_angle_deg"] = r.get("miter_cut_end_shop_reference_angle_deg", r.get("miter_cut_end_angle_deg"))
                 item["end_position"] = r.get("miter_cut_end_position", "ponta final") or "ponta final"
                 item["end_host"] = r.get("miter_cut_end_host_group")
                 item["end_relation"] = r.get("miter_cut_end_relation")
@@ -264,12 +266,14 @@ class AssemblyTutorialService:
         md_lines = [
             "# Manual de montagem",
             "",
-            "Este roteiro assume montagem em gabarito plano, colagem por sobreposição de faces e cura completa antes de retirar as laterais do gabarito.",
+            "Este roteiro assume montagem em gabarito plano, ligações resistentes somente por faces coladas ou por talas face-a-face, e cura completa antes de retirar as laterais do gabarito.",
             "",
             "## Regras gerais",
             "- Usar somente palitos nas dimensões configuradas e cortes em múltiplos de 5 mm.",
             "- Corte em ângulo só é permitido na ponta real da peça, quando o CSV marcar `miter_cut_required=true`.",
-            "- Emendas internas entre pedaços do mesmo membro devem permanecer retas e sobrepostas, não em diagonal.",
+            "- Proibida emenda ponta-a-ponta sem duas talas coladas face-a-face; proibido creditar ligação apenas por contato lateral estreito.",
+            "- O banzo superior deve seguir a seção sanduíche fechada exportada, com núcleo e capas colados por face; não montar caixa vazia sustentada apenas por contato estreito.",
+            "- Emendas internas entre pedaços do mesmo membro devem permanecer retas e sobrepostas, ou fixadas pelas talas face-a-face previstas; não em diagonal.",
             "- Nos X, usar apenas uma das soluções documentadas: preferir Warren/Pratt sem cruzamento; se X for mantido manualmente, dividir no centro e colar com tala curta indicada no CSV.",
             "",
         ]
@@ -299,18 +303,18 @@ class AssemblyTutorialService:
             md_lines.append("")
             md_lines.append("Use esta tabela junto ao `stick_pieces.csv`. O corte é sempre na ponta indicada, nunca no meio da peça nem em emenda sobreposta.")
             md_lines.append("")
-            md_lines.append("| Peça | Grupo | Compr. [mm] | Corte inicial | Corte final | Host |")
+            md_lines.append("| Peça | Grupo | Compr. [mm] | Corte inicial — CAD / gabarito | Corte final — CAD / gabarito | Host |")
             md_lines.append("|---|---|---:|---|---|---|")
             for item in miter_cut_instructions[:80]:
                 start_txt = "—"
                 end_txt = "—"
                 hosts = []
                 if item.get("start_angle_deg") is not None:
-                    start_txt = f"{item.get('start_angle_deg')}° ({item.get('start_position')}, eixo {item.get('start_trim_axis')}, skew {item.get('start_skew_sign')})"
+                    start_txt = f"{item.get('start_angle_deg')}° / {item.get('start_shop_reference_angle_deg')}° ({item.get('start_position')}, eixo {item.get('start_trim_axis')}, skew {item.get('start_skew_sign')})"
                     if item.get("start_host"):
                         hosts.append(str(item.get("start_host")))
                 if item.get("end_angle_deg") is not None:
-                    end_txt = f"{item.get('end_angle_deg')}° ({item.get('end_position')}, eixo {item.get('end_trim_axis')}, skew {item.get('end_skew_sign')})"
+                    end_txt = f"{item.get('end_angle_deg')}° / {item.get('end_shop_reference_angle_deg')}° ({item.get('end_position')}, eixo {item.get('end_trim_axis')}, skew {item.get('end_skew_sign')})"
                     if item.get("end_host"):
                         hosts.append(str(item.get("end_host")))
                 md_lines.append(

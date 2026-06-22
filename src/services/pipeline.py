@@ -25,6 +25,7 @@ from src.services.planner_debug_logger import PlannerDebugLogger
 from src.services.quarter_model_service import QuarterModelService
 from src.services.connection_planner import ConnectionPlanner
 from src.services.assembly_tutorial_service import AssemblyTutorialService
+from src.services.piece_inspection_service import PieceInspectionService
 from src.solvers.frame3dd_adapter import Frame3DDAdapter
 from src.solvers.linear_truss_solver import LinearTrussSolver
 
@@ -385,11 +386,19 @@ class SimulationPipeline:
         log_callback: Callable[[str], None] | None = None,
     ) -> Dict:
         input_cfg = self.config_service.normalize(cfg)
+        analysis0 = input_cfg.get("analysis", {}) or {}
+        cleaned_dirs: List[str] = []
+        if bool(analysis0.get("clean_output_root_before_run", True)):
+            resolved_output = self.output_root.resolve()
+            resolved_cwd = Path.cwd().resolve()
+            if resolved_output in {Path("/").resolve(), resolved_cwd} or str(resolved_output) in {"", "."}:
+                raise ValueError(f"Diretório de output inseguro para limpeza integral: {resolved_output}")
+            if self.output_root.exists():
+                shutil.rmtree(self.output_root, ignore_errors=True)
+            cleaned_dirs.append("<output_root_full_reset>")
         self.output_root.mkdir(parents=True, exist_ok=True)
         run_started_at = datetime.now(timezone.utc).isoformat()
         run_id = run_started_at.replace(":", "").replace("+", "Z")
-        analysis0 = input_cfg.get("analysis", {}) or {}
-        cleaned_dirs: List[str] = []
         if bool(analysis0.get("clean_output_dirs_before_run", True)):
             for rel in analysis0.get("output_dirs_to_clean_before_run", []) or []:
                 # Defensive: clean only direct children of output_root.
@@ -409,6 +418,7 @@ class SimulationPipeline:
                     "run_id": run_id,
                     "started_at_utc": run_started_at,
                     "cleaned_output_dirs": cleaned_dirs,
+                    "clean_output_root_before_run": bool(analysis0.get("clean_output_root_before_run", True)),
                     "clean_output_dirs_before_run": bool(analysis0.get("clean_output_dirs_before_run", True)),
                 },
                 indent=2,
@@ -1549,11 +1559,8 @@ class SimulationPipeline:
                 pieces = (detailed or {}).get("stick_pieces", []) or []
                 detail_cfg = cfg.get("detail_model", {}) or {}
                 max_piece_html = max(50, int(detail_cfg.get("max_piece_prism_html_pieces", 600)))
-                generate_group_html = bool(detail_cfg.get("generate_group_piece_html", False))
                 if pieces:
-                    prism_html = plot_dir / "02_geometria_3d_prismas_reais_completo.html"
-                    legacy_prism_html = plot_dir / "17_modelo_peca_a_peca_prismas_reais.html"
-                    exploded_prism_html = plot_dir / "18_modelo_peca_a_peca_explodido.html"
+                    prism_html = plot_dir / "02_montagem_3d_prismas_reais_interativa.html"
                     emit_progress(0.882, f"Pré-calculando malhas 3D peça-a-peça ({min(len(pieces), max_piece_html)}/{len(pieces)} peças)")
                     color_by = str(detail_cfg.get("piece_view_color_by", "assembly_unit"))
                     mounted_scale = float(detail_cfg.get("piece_view_mounted_connection_offset_scale", 0.0))
@@ -1564,12 +1571,94 @@ class SimulationPipeline:
                         color_by=color_by,
                         connection_offset_scale=mounted_scale,
                     )
+
+                    # A tolerância de face-lap é apropriada para laminações
+                    # coladas no próprio perfil, mas não pode mascarar uma
+                    # diagonal atravessando o corpo de um montante. As duas
+                    # interfaces que formam os nós reais são auditadas também
+                    # sem tolerância volumétrica: contato de face é permitido;
+                    # sobreposição positiva entre prismas é falha.
+                    critical_interface_pairs = [
+                        ("diagonal", "vertical"),
+                        ("cross_frame_bracing", "vertical"),
+                    ]
+                    critical_interface_samples = []
+                    critical_interface_summary = []
+                    piece_by_stick_id = {str(piece.get("stick_id")): piece for piece in pieces}
+
+                    def _permitted_terminal_face_lap(sample):
+                        if {str(sample.get("group_a")), str(sample.get("group_b"))} != {"cross_frame_bracing", "vertical"}:
+                            return False
+                        brace_sid = sample.get("stick_a") if str(sample.get("group_a")) == "cross_frame_bracing" else sample.get("stick_b")
+                        brace = piece_by_stick_id.get(str(brace_sid), {})
+                        start_ok = (
+                            bool(brace.get("miter_cut_start_required", False))
+                            and str(brace.get("miter_cut_start_host_group", "")) == "vertical"
+                            and str(brace.get("connection_start_mode", "")) == "face_lap_to_host"
+                        )
+                        end_ok = (
+                            bool(brace.get("miter_cut_end_required", False))
+                            and str(brace.get("miter_cut_end_host_group", "")) == "vertical"
+                            and str(brace.get("connection_end_mode", "")) == "face_lap_to_host"
+                        )
+                        t = float(cfg.get("material", {}).get("stick_thickness_mm", 1.5) or 1.5)
+                        min_overlap = min(float(sample.get("overlap_x_mm", 1e9)), float(sample.get("overlap_y_mm", 1e9)), float(sample.get("overlap_z_mm", 1e9)))
+                        return (start_ok or end_ok) and min_overlap <= t + 0.05
+
+                    for group_a, group_b in critical_interface_pairs:
+                        strict_subset = []
+                        for raw_piece in pieces:
+                            if str(raw_piece.get("member_group")) not in {group_a, group_b}:
+                                continue
+                            strict_piece = dict(raw_piece)
+                            strict_piece["as_built_ignore_face_lap_tolerance"] = False
+                            strict_piece["as_built_face_contact_tolerance_mm"] = 0.0
+                            strict_subset.append(strict_piece)
+                        pair_samples = []
+                        if strict_subset:
+                            strict_batches = self.viz.prepare_stick_piece_mesh_batches(
+                                strict_subset,
+                                max_pieces=max(len(strict_subset), max_piece_html),
+                                color_by="member_group",
+                                connection_offset_scale=mounted_scale,
+                            )
+                            pair_key = {group_a, group_b}
+                            pair_samples = [
+                                sample for sample in (strict_batches.get("as_built_interpenetration_samples") or [])
+                                if {str(sample.get("group_a")), str(sample.get("group_b"))} == pair_key
+                                and not _permitted_terminal_face_lap(sample)
+                            ]
+                            critical_interface_samples.extend(pair_samples)
+                        critical_interface_summary.append({
+                            "interface": f"{group_a}--{group_b}",
+                            "strict_interpenetration_count": len(pair_samples),
+                            "verdict": "FALHA" if pair_samples else "OK",
+                        })
+
+                    base_samples = [
+                        sample for sample in (prism_batches.get("as_built_interpenetration_samples") or [])
+                        if not _permitted_terminal_face_lap(sample)
+                    ]
+                    merged_samples = list(base_samples)
+                    merged_keys = {
+                        (sample.get("stick_a"), sample.get("stick_b"))
+                        for sample in merged_samples
+                    }
+                    for sample in critical_interface_samples:
+                        key = (sample.get("stick_a"), sample.get("stick_b"))
+                        reverse = (sample.get("stick_b"), sample.get("stick_a"))
+                        if key not in merged_keys and reverse not in merged_keys:
+                            merged_samples.append(sample)
+                            merged_keys.add(key)
                     as_built_audit = {
                         "mode": "as_built" if abs(float(mounted_scale)) < 1.0e-9 else "mounted_with_offset",
                         "connection_offset_scale": float(mounted_scale),
-                        "interpenetration_count": int(prism_batches.get("as_built_interpenetration_count", 0) or 0),
+                        "general_interpenetration_count": int(prism_batches.get("as_built_interpenetration_count", 0) or 0),
+                        "critical_interface_strict_checks": critical_interface_summary,
+                        "critical_interface_interpenetration_count": len(critical_interface_samples),
+                        "interpenetration_count": len(merged_samples),
                         "node_connection_gap_piece_count": int(prism_batches.get("as_built_gap_piece_count", 0) or 0),
-                        "interpenetration_samples": list(prism_batches.get("as_built_interpenetration_samples") or []),
+                        "interpenetration_samples": merged_samples,
                     }
                     detailed["as_built_audit"] = as_built_audit
                     try:
@@ -1581,6 +1670,10 @@ class SimulationPipeline:
                             detail_dir / "as_built_interpenetrations.csv",
                             as_built_audit.get("interpenetration_samples") or [],
                         )
+                        GeometryService.write_csv(
+                            detail_dir / "critical_interface_geometry_checks.csv",
+                            as_built_audit.get("critical_interface_strict_checks") or [],
+                        )
                         audit_md = detail_dir / "09_auditoria_conectividade_e_cortes.md"
                         as_built_verdict = "FALHA" if int(as_built_audit.get("interpenetration_count", 0) or 0) > 0 else "OK"
                         with audit_md.open("a", encoding="utf-8") as fh:
@@ -1589,80 +1682,679 @@ class SimulationPipeline:
                                 f"- Veredito as-built: **{as_built_verdict}**\n"
                                 f"- Interpenetrações físicas: **{int(as_built_audit.get('interpenetration_count', 0) or 0)}**\n"
                                 f"- Peças com lacuna de conexão: **{int(as_built_audit.get('node_connection_gap_piece_count', 0) or 0)}**\n"
+                                f"- Penetrações estritas diagonal lateral--montante: **{int((as_built_audit.get('critical_interface_strict_checks') or [{}])[0].get('strict_interpenetration_count', 0) or 0)}**\n"
+                                f"- Penetrações estritas diagonal interna--montante: **{int((as_built_audit.get('critical_interface_strict_checks') or [{}, {}])[1].get('strict_interpenetration_count', 0) or 0)}**\n"
                                 "- Regra: qualquer interpenetração em vista montada real reprova a geometria, mesmo se a conectividade topológica estiver fechada.\n"
                             )
                     except (OSError, TypeError, ValueError):
                         pass
-                    emit_progress(0.886, "Renderizando HTML 3D peça-a-peça em posição de encaixe")
-                    fig_prisms = self.viz.plotly_stick_pieces(
-                        pieces,
+                    # Catálogo por membro estrutural: qualquer lâmina/tala
+                    # clicada identifica o montante, banzo ou diagonal completo.
+                    # O palito individual permanece listado no painel do membro.
+                    rupture_preview = estimate_rupture_load(
+                        cfg,
+                        member_checks,
+                        support_checks,
+                        detailed,
+                        float(cfg.get("bridge", {}).get("load_total_kgf", 0.0) or 0.0),
+                    )
+                    bridge_inspection = {
+                        "summary": PieceInspectionService.bridge_summary_rows(
+                            cfg,
+                            pieces,
+                            detailed.get("summary", {}) or {},
+                            rupture_preview,
+                            as_built_audit,
+                            result.status,
+                            support_checks,
+                        ),
+                        "cut_table": PieceInspectionService.cut_quantity_rows(pieces),
+                    }
+                    inspection_catalog = {}
+                    member_ids = sorted(
+                        {str(piece.get("member_id", "")) for piece in pieces if str(piece.get("member_id", ""))},
+                        key=lambda value: int(safe_float(value, 0) or 0),
+                    )
+                    for member_id in member_ids:
+                        info = PieceInspectionService.inspect_member(
+                            member_id,
+                            pieces,
+                            detailed.get("glue_joints", []) or [],
+                            member_checks,
+                        )
+                        if info is None:
+                            continue
+                        inspection_catalog[member_id] = {
+                            "summary": PieceInspectionService.member_summary_rows(info),
+                            "cut_table": PieceInspectionService.cut_quantity_rows(info.member_pieces),
+                            "pieces": PieceInspectionService.member_piece_rows(info),
+                            "cuts": info.cuts,
+                            "overlaps": info.overlaps,
+                        }
+                    (detail_dir / "bridge_inspection_overview.json").write_text(
+                        json.dumps(bridge_inspection, indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                    GeometryService.write_csv(detail_dir / "bridge_cut_quantity_table.csv", bridge_inspection["cut_table"])
+                    GeometryService.write_csv(
+                        detail_dir / "member_cut_quantity_table.csv",
+                        [
+                            {"member_id": member_id, **cut_row}
+                            for member_id, record in inspection_catalog.items()
+                            for cut_row in record.get("cut_table", [])
+                        ],
+                    )
+                    (detail_dir / "piece_inspection_catalog.json").write_text(
+                        json.dumps(inspection_catalog, indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+
+                    # Propaga ao próprio prisma o mesmo status exibido na ficha
+                    # do membro. Assim, tooltip e tabela nunca divergem e não
+                    # existe palito visível sem estado informado.
+                    status_by_stick_id: Dict[str, str] = {}
+                    for record in inspection_catalog.values():
+                        for piece_row in (record.get("pieces") or []):
+                            sid = str(piece_row.get("palito") or "")
+                            status = str(piece_row.get("status") or "").strip()
+                            if sid:
+                                status_by_stick_id[sid] = status or "detalhado para montagem — sem FS isolado aplicável"
+                    visual_pieces = []
+                    for raw_piece in pieces:
+                        display_piece = dict(raw_piece)
+                        sid = str(display_piece.get("stick_id") or "")
+                        display_piece["inspection_status"] = status_by_stick_id.get(
+                            sid, "detalhado para montagem — sem FS isolado aplicável"
+                        )
+                        visual_pieces.append(display_piece)
+                    status_audit = {
+                        "piece_count": len(visual_pieces),
+                        "piece_status_count": len(status_by_stick_id),
+                        "missing_status_stick_ids": [
+                            str(piece.get("stick_id") or "")
+                            for piece in visual_pieces
+                            if not str(piece.get("inspection_status") or "").strip()
+                        ],
+                        "hover_payload_status_required": True,
+                        "hover_payload_missing_status_stick_ids": [
+                            str(piece.get("stick_id") or "")
+                            for piece in visual_pieces
+                            if not str(piece.get("inspection_status") or "").strip()
+                        ],
+                    }
+                    (detail_dir / "piece_status_audit.json").write_text(
+                        json.dumps(status_audit, indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+
+                    emit_progress(0.886, "Renderizando HTML de montagem 3D com seleção Ctrl+clique por membro")
+                    mounted_view_batches = self.viz.prepare_stick_piece_mesh_batches(
+                        visual_pieces,
                         max_pieces=max_piece_html,
-                        render_mode="prismas reais",
-                        precomputed_mesh_batches=prism_batches,
                         color_by=color_by,
+                        batch_by="piece",
                         connection_offset_scale=mounted_scale,
+                        section_explode_scale=1.0,
                     )
-                    fig_prisms.write_html(prism_html)
-                    # Alias de compatibilidade para relatórios antigos.
-                    fig_prisms.write_html(legacy_prism_html)
-                    emit_progress(0.888, "Renderizando HTML 3D peça-a-peça em vista explodida")
-                    exploded_batches = self.viz.prepare_stick_piece_mesh_batches(
-                        pieces,
+                    # A explosão separa as lâminas da seção, mas não move
+                    # emendas/juntas individualmente. Deslocar cada segmento
+                    # por conexão distorcia membros longos na vista, embora a
+                    # geometria montada permanecesse correta.
+                    exploded_view_batches = self.viz.prepare_stick_piece_mesh_batches(
+                        visual_pieces,
                         max_pieces=max_piece_html,
                         color_by=color_by,
-                        connection_offset_scale=exploded_scale,
+                        batch_by="piece",
+                        connection_offset_scale=mounted_scale,
+                        section_explode_scale=7.0,
+                        longitudinal_piece_explode_gap_mm=14.0,
                     )
-                    self.viz.plotly_stick_pieces(
-                        pieces,
+                    visual_dimension_audit = {
+                        "mounted": {
+                            "dimension_error_count": int(mounted_view_batches.get("visual_dimension_error_count", 0) or 0),
+                            "max_axis_length_error_mm": float(mounted_view_batches.get("visual_max_axis_length_error_mm", 0.0) or 0.0),
+                            "max_rigid_translation_error_mm": float(mounted_view_batches.get("visual_max_rigid_translation_error_mm", 0.0) or 0.0),
+                        },
+                        "exploded_target": {
+                            "dimension_error_count": int(exploded_view_batches.get("visual_dimension_error_count", 0) or 0),
+                            "max_axis_length_error_mm": float(exploded_view_batches.get("visual_max_axis_length_error_mm", 0.0) or 0.0),
+                            "max_rigid_translation_error_mm": float(exploded_view_batches.get("visual_max_rigid_translation_error_mm", 0.0) or 0.0),
+                            "connection_offset_scale": float(mounted_scale),
+                            "section_explode_scale": 7.0,
+                            "longitudinal_piece_explode_gap_mm": 14.0,
+                            "longitudinal_explosion_strategy": str(exploded_view_batches.get("visual_longitudinal_explosion_strategy") or "transverse_segment_fan_rigid_translation"),
+                            "max_segment_axial_translation_mm": float(exploded_view_batches.get("visual_max_segment_axial_translation_mm", 0.0) or 0.0),
+                            "segment_axial_translation_error_count": int(exploded_view_batches.get("visual_segment_axial_translation_error_count", 0) or 0),
+                            "interpretation": "vista visual; laminas e segmentos consecutivos sao afastados transversalmente por translacao rigida, sem aumentar a extensao axial do membro",
+                        },
+                    }
+                    (detail_dir / "visualization_dimension_audit.json").write_text(
+                        json.dumps(visual_dimension_audit, indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                    assembly_fig = self.viz.plotly_stick_pieces(
+                        visual_pieces,
                         max_pieces=max_piece_html,
-                        render_mode="prismas reais",
-                        precomputed_mesh_batches=exploded_batches,
                         color_by=color_by,
-                        connection_offset_scale=exploded_scale,
-                    ).write_html(exploded_prism_html)
-                    group_files = []
-                    if generate_group_html:
-                        group_dir = plot_dir / "subconjuntos_html"
-                        group_dir.mkdir(parents=True, exist_ok=True)
-                        preferred_groups = [
-                            "top_chord",
-                            "bottom_chord",
-                            "vertical",
-                            "diagonal",
-                            "top_transverse",
-                            "bottom_transverse",
-                            "top_bracing",
-                            "bottom_bracing",
-                            "cross_frame_bracing",
-                            "support_pad",
-                        ]
-                        for group_name in preferred_groups:
-                            subset = [r for r in pieces if str(r.get("member_group")) == group_name]
-                            if not subset:
-                                continue
-                            safe_name = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in group_name)
-                            path = group_dir / f"{safe_name}_peca_a_peca.html"
-                            subset_max = min(max_piece_html, 600)
-                            subset_batches = self.viz.prepare_stick_piece_mesh_batches(
-                                subset,
-                                max_pieces=subset_max,
-                                color_by=color_by,
-                                connection_offset_scale=mounted_scale,
-                            )
-                            self.viz.plotly_stick_pieces(
-                                subset,
-                                max_pieces=subset_max,
-                                render_mode="prismas reais",
-                                precomputed_mesh_batches=subset_batches,
-                                color_by=color_by,
-                                connection_offset_scale=mounted_scale,
-                            ).write_html(path)
-                            group_files.append(str(path))
+                        batch_by="piece",
+                        precomputed_mesh_batches=mounted_view_batches,
+                        connection_offset_scale=mounted_scale,
+                        section_explode_scale=1.0,
+                        uirevision_key="standalone_assembly_camera",
+                        height_px=1020,
+                    )
+                    # O estado explodido reutiliza a ordem de traços da vista
+                    # montada. Não é necessário construir uma segunda Figure
+                    # Plotly completa apenas para extrair coordenadas: isso
+                    # duplicava meshes, tooltips e facecolors em memória.
+                    exploded_batches = exploded_view_batches.get("batches", {}) or {}
+                    exploded_edges_by_member: Dict[str, Dict[str, List[Any]]] = {}
+                    for _batch_key, batch in sorted(exploded_batches.items(), key=lambda item: item[0]):
+                        mid = str(batch.get("member_id") or "")
+                        if not mid or not batch.get("edge_x"):
+                            continue
+                        edge = exploded_edges_by_member.setdefault(mid, {"x": [], "y": [], "z": []})
+                        edge["x"].extend(batch.get("edge_x", []))
+                        edge["y"].extend(batch.get("edge_y", []))
+                        edge["z"].extend(batch.get("edge_z", []))
+                    exploded_trace_coords = []
+                    for trace in assembly_fig.data:
+                        meta = dict(getattr(trace, "meta", {}) or {})
+                        kind = str(meta.get("trace_kind") or "")
+                        if kind == "mesh":
+                            batch = exploded_batches.get(str(meta.get("stick_id") or ""), {})
+                            exploded_trace_coords.append({
+                                "x": list(batch.get("x", []) or []),
+                                "y": list(batch.get("y", []) or []),
+                                "z": list(batch.get("z", []) or []),
+                            })
+                        elif kind == "edge":
+                            edge = exploded_edges_by_member.get(str(meta.get("member_id") or ""), {})
+                            exploded_trace_coords.append({
+                                "x": list(edge.get("x", []) or []),
+                                "y": list(edge.get("y", []) or []),
+                                "z": list(edge.get("z", []) or []),
+                            })
+                        else:
+                            exploded_trace_coords.append({
+                                "x": list(getattr(trace, "x", []) or []),
+                                "y": list(getattr(trace, "y", []) or []),
+                                "z": list(getattr(trace, "z", []) or []),
+                            })
+                    catalog_json = json.dumps(inspection_catalog, ensure_ascii=False).replace("</", "<\\/")
+                    bridge_inspection_json = json.dumps(bridge_inspection, ensure_ascii=False).replace("</", "<\\/")
+                    exploded_json = json.dumps(exploded_trace_coords, ensure_ascii=False).replace("</", "<\\/")
+                    post_script = r"""
+(function() {
+  const chart = document.getElementById('{plot_id}');
+  const catalog = __CATALOG__;
+  const bridgeRecord = __BRIDGE_INSPECTION__;
+  const explodedCoords = __EXPLODED__;
+  const mountedCoords = chart.data.map(trace => ({
+    x: Array.from(trace.x || []), y: Array.from(trace.y || []), z: Array.from(trace.z || [])
+  }));
+  const baseOpacity = chart.data.map(trace => trace.opacity === undefined ? 1.0 : trace.opacity);
+  const allIndices = chart.data.map((_, i) => i);
+  // Estado incremental: botões de inspeção alteram somente traços cujo
+  // visible/opacity realmente muda. Isto evita restyle global dos mais de
+  // mil traços a cada clique.
+  const traceVisible = chart.data.map(trace => trace.visible !== false);
+  const traceOpacity = baseOpacity.slice();
+  let viewportKey = 'assembly';
+  let updateSerial = Promise.resolve();
+  let requestedRevision = 0;
+  const memberIndices = {};
+  const memberMeshIndices = {};
+  chart.data.forEach((trace, i) => {
+    const mid = String((trace.meta && trace.meta.member_id) || '');
+    if (!mid) return;
+    (memberIndices[mid] ||= []).push(i);
+    if (trace.meta && trace.meta.trace_kind === 'mesh') (memberMeshIndices[mid] ||= []).push(i);
+  });
+  let selectedMember = null;
+  let selectedStick = null;
+  let highlightMode = false;
+  let isolateMode = false;
+  let explodeMode = false;
+  let explodedMember = null;
+  let applyQueued = false;
+
+  document.documentElement.style.background = '#0e1117';
+  document.body.style.margin = '0';
+  document.body.style.background = '#0e1117';
+  document.body.style.color = '#f3f4f6';
+
+  // Painel abaixo do gráfico: jamais sobrepõe a cena 3D em telas estreitas.
+  const host = chart.parentElement;
+  host.style.display = 'flex';
+  host.style.flexDirection = 'column';
+  host.style.gap = '12px';
+  host.style.background = '#0e1117';
+  host.style.color = '#f3f4f6';
+  host.style.padding = '10px';
+  host.style.width = '100%';
+  host.style.boxSizing = 'border-box';
+  chart.style.position = 'relative';
+  chart.style.width = '100%';
+  chart.style.height = '920px';
+  chart.style.minHeight = '920px';
+  chart.style.flex = '0 0 920px';
+
+  const side = document.createElement('section');
+  side.id = 'assembly-member-details';
+  side.style.cssText = 'position:relative;display:block;width:100%;max-height:620px;box-sizing:border-box;background:#171d26;border:1px solid #303945;border-radius:10px;padding:14px;overflow:auto;font:13px Arial,sans-serif;color:#f3f4f6';
+  host.appendChild(side);
+  const esc = value => String(value === null || value === undefined ? '—' : value)
+    .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+  const memberOf = trace => String((trace.meta && trace.meta.member_id) || '');
+
+  const toolbar = document.createElement('div');
+  toolbar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px';
+  side.appendChild(toolbar);
+  function button(text, action, title='') {
+    const b = document.createElement('button');
+    b.textContent = text; b.title = title;
+    b.style.cssText = 'background:#273242;color:#f3f4f6;border:1px solid #485568;border-radius:6px;padding:7px 10px;cursor:pointer';
+    b.onclick = action; toolbar.appendChild(b); return b;
+  }
+  const msg = document.createElement('div');
+  msg.style.cssText = 'padding:8px;margin-bottom:10px;background:#202a37;border-radius:6px;color:#d3dbe5';
+  side.appendChild(msg);
+  const hoverCard = document.createElement('div');
+  hoverCard.id = 'assembly-hover-piece-status';
+  hoverCard.style.cssText = 'padding:10px;margin-bottom:10px;background:#111827;border:1px solid #354254;border-radius:6px;color:#e5e7eb;line-height:1.45';
+  hoverCard.innerHTML = '<b>Sob o cursor:</b> passe o mouse sobre um palito ou tala para ver status, comprimento e cortes.';
+  side.appendChild(hoverCard);
+  const pointerTooltip = document.createElement('div');
+  pointerTooltip.id = 'assembly-piece-pointer-tooltip';
+  pointerTooltip.style.cssText = 'position:fixed;display:none;pointer-events:none;z-index:99999;max-width:390px;padding:9px 11px;background:#202a37;border:1px solid #fff6d6;border-radius:6px;color:#fff6d6;font:12px Arial,sans-serif;line-height:1.42;box-shadow:0 6px 22px rgba(0,0,0,.42)';
+  document.body.appendChild(pointerTooltip);
+  let lastPointer = {x: 18, y: 18};
+  chart.addEventListener('pointermove', event => { lastPointer = {x: event.clientX, y: event.clientY}; }, true);
+  const pieceLookup = {};
+  Object.entries(catalog).forEach(([memberId, record]) => {
+    (record.pieces || []).forEach(piece => { pieceLookup[String(piece.palito || '')] = Object.assign({memberId: memberId}, piece); });
+  });
+  const picker = document.createElement('select');
+  picker.style.cssText = 'width:100%;max-width:720px;background:#10151c;color:#fff;border:1px solid #485568;border-radius:6px;padding:7px;margin-bottom:10px';
+  picker.innerHTML = '<option value="">Selecionar pelo memorial…</option>' + Object.keys(catalog)
+    .sort((a,b) => Number(a)-Number(b))
+    .map(id => `<option value="${esc(id)}">M${esc(id)} — ${esc((catalog[id].summary[0] || {}).valor || '')}</option>`).join('');
+  side.appendChild(picker);
+  const content = document.createElement('div');
+  content.style.cssText = 'width:100%;overflow-x:auto';
+  side.appendChild(content);
+
+  function table(title, rows) {
+    if (!rows || !rows.length) return '';
+    let html = `<h3 style="margin:14px 0 6px;color:#8bd5ff">${esc(title)}</h3><table style="width:100%;border-collapse:collapse">`;
+    rows.forEach(row => {
+      const values = Object.entries(row);
+      html += '<tr>';
+      if (values.length === 2 && row.item !== undefined) {
+        html += `<th style="text-align:left;border-bottom:1px solid #303945;padding:5px;color:#a8b3c3;white-space:nowrap">${esc(row.item)}</th><td style="border-bottom:1px solid #303945;padding:5px">${esc(row.valor)}</td>`;
+      } else {
+        html += `<td colspan="2" style="border-bottom:1px solid #303945;padding:6px">${values.map(([k,v]) => `<b>${esc(k)}:</b> ${esc(v)}`).join('<br>')}</td>`;
+      }
+      html += '</tr>';
+    });
+    return html + '</table>';
+  }
+
+  function cutTable(title, rows) {
+    if (!rows || !rows.length) return '';
+    let html = `<h3 style="margin:14px 0 6px;color:#8bd5ff">${esc(title)}</h3><table style="width:min(440px,100%);border-collapse:collapse">` +
+      '<tr><th style="text-align:left;border-bottom:1px solid #526173;padding:5px;color:#a8b3c3">Tamanho do palito</th><th style="text-align:right;border-bottom:1px solid #526173;padding:5px;color:#a8b3c3">Quantidade</th></tr>';
+    rows.forEach(row => {
+      html += `<tr><td style="border-bottom:1px solid #303945;padding:5px">${esc(row['tamanho do palito'])}</td><td style="text-align:right;border-bottom:1px solid #303945;padding:5px">${esc(row.quantidade)}</td></tr>`;
+    });
+    return html + '</table>';
+  }
+
+  function renderCard() {
+    if (!selectedMember || !catalog[selectedMember]) {
+      content.innerHTML = '<h2 style="margin:0 0 6px">Ponte completa — status e preparação</h2><p style="color:#a8b3c3">Nenhum membro selecionado. Os valores abaixo provêm do mesmo detalhamento utilizado para massa, resistência e auditoria geométrica.</p>' +
+        table('Status da ponte total', bridgeRecord.summary) +
+        cutTable('Tabela de cortes da ponte total', bridgeRecord.cut_table);
+      return;
+    }
+    const record = catalog[selectedMember];
+    content.innerHTML = `<h2 style="margin:0 0 4px;color:#fff">Membro M${esc(selectedMember)}</h2><p style="color:#a8b3c3">Clique originado em: ${esc(selectedStick || 'seleção pelo memorial')}</p>` +
+      table('Resumo do membro', record.summary) + cutTable('Tabela de cortes do membro', record.cut_table) +
+      table('Palitos e talas', record.pieces) + table('Cortes angulares', record.cuts) + table('Juntas / sobreposições', record.overlaps);
+  }
+
+  function coordsFor(indices, coords) {
+    return {
+      x: indices.map(i => coords[i].x),
+      y: indices.map(i => coords[i].y),
+      z: indices.map(i => coords[i].z),
+    };
+  }
+
+  function finiteCoord(value) {
+    return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
+  }
+
+  function memberBounds(indices, coords) {
+    const all = {x: [], y: [], z: []};
+    indices.forEach(i => {
+      ['x','y','z'].forEach(axis => (coords[i][axis] || []).forEach(value => {
+        if (finiteCoord(value)) all[axis].push(Number(value));
+      }));
+    });
+    if (!all.x.length || !all.y.length || !all.z.length) return null;
+    const center = {};
+    const span = {};
+    ['x','y','z'].forEach(axis => {
+      const lo = Math.min(...all[axis]);
+      const hi = Math.max(...all[axis]);
+      center[axis] = 0.5 * (lo + hi);
+      span[axis] = Math.max(hi - lo, axis === 'z' ? 18 : 14);
+    });
+    return {all, center, span};
+  }
+
+  function centeredCoords(moveIndices, boundsIndices, coords) {
+    const bounds = memberBounds(boundsIndices, coords);
+    if (!bounds) return {payload: coordsFor(moveIndices, coords), bounds: null};
+    const payload = {x: [], y: [], z: []};
+    moveIndices.forEach(i => {
+      payload.x.push((coords[i].x || []).map(v => finiteCoord(v) ? Number(v) - bounds.center.x : v));
+      payload.y.push((coords[i].y || []).map(v => finiteCoord(v) ? Number(v) - bounds.center.y : v));
+      payload.z.push((coords[i].z || []).map(v => finiteCoord(v) ? Number(v) - bounds.center.z : v));
+    });
+    return {payload, bounds};
+  }
+
+  function localRanges(bounds) {
+    if (!bounds) return null;
+    // Caixa cúbica em milímetros: um milímetro ocupa a mesma escala visual
+    // em x, y e z. Isto impede que um montante longo seja alongado ou que um
+    // banzo seja visualmente amassado ao entrar na inspeção local.
+    const largest = Math.max(bounds.span.x, bounds.span.y, bounds.span.z, 20);
+    const half = 0.5 * largest + Math.max(10, largest * 0.18);
+    return {x: [-half, half], y: [-half, half], z: [-half, half]};
+  }
+
+  let positionedMember = null;
+  let positionedLocally = false;
+  let positionedExploded = false;
+
+  function restorePositionedMember() {
+    if (!positionedMember) return Promise.resolve();
+    const indices = memberIndices[positionedMember] || [];
+    positionedMember = null;
+    positionedLocally = false;
+    positionedExploded = false;
+    return indices.length ? Plotly.restyle(chart, coordsFor(indices, mountedCoords), indices) : Promise.resolve();
+  }
+
+  function restyleChanged(nextVisible, nextOpacity) {
+    const indices = []; const visible = []; const opacity = [];
+    allIndices.forEach(i => {
+      const v = !!nextVisible[i];
+      const o = Number(nextOpacity[i]);
+      if (traceVisible[i] !== v || Math.abs(traceOpacity[i] - o) > 1.0e-9) {
+        indices.push(i); visible.push(v); opacity.push(o);
+        traceVisible[i] = v; traceOpacity[i] = o;
+      }
+    });
+    return indices.length ? Plotly.restyle(chart, {visible: visible, opacity: opacity}, indices) : Promise.resolve();
+  }
+
+  function relayoutViewport(key, update) {
+    if (viewportKey === key) return Promise.resolve();
+    viewportKey = key;
+    return Plotly.relayout(chart, update);
+  }
+
+  function focusMember(memberId, useExploded=false, localInspection=false) {
+    const indices = memberIndices[String(memberId || '')] || [];
+    const meshIndices = memberMeshIndices[String(memberId || '')] || indices;
+    if (!indices.length || !meshIndices.length) return Promise.resolve();
+    const coords = useExploded ? explodedCoords : mountedCoords;
+    // O enquadramento deriva somente das faces físicas; arestas contêm null
+    // separadores e não podem participar do cálculo da caixa envolvente.
+    const bounds = memberBounds(meshIndices, coords);
+    if (!bounds) return Promise.resolve();
+    if (localInspection) {
+      const ranges = localRanges(bounds);
+      return relayoutViewport(`local:${memberId}:${useExploded ? 'exploded' : 'mounted'}`, {
+        'scene.xaxis.autorange': false,
+        'scene.yaxis.autorange': false,
+        'scene.zaxis.autorange': false,
+        'scene.xaxis.range': ranges.x,
+        'scene.yaxis.range': ranges.y,
+        'scene.zaxis.range': ranges.z,
+        'scene.aspectmode': 'cube',
+        'scene.camera': {eye:{x:1.65,y:-1.45,z:0.90}, up:{x:0,y:0,z:1}, projection:{type:'orthographic'}}
+      });
+    }
+    const range = axis => {
+      const lo = Math.min(...bounds.all[axis]); const hi = Math.max(...bounds.all[axis]);
+      const margin = Math.max(8, Math.max(hi - lo, 14) * 0.22);
+      return [lo - margin, hi + margin];
+    };
+    return relayoutViewport(`focus:${memberId}:${useExploded ? 'exploded' : 'mounted'}`, {
+      'scene.xaxis.autorange': false,
+      'scene.yaxis.autorange': false,
+      'scene.zaxis.autorange': false,
+      'scene.xaxis.range': range('x'),
+      'scene.yaxis.range': range('y'),
+      'scene.zaxis.range': range('z'),
+      'scene.aspectmode': 'data',
+      'scene.camera': {eye:{x:1.65,y:-1.45,z:0.90}, up:{x:0,y:0,z:1}, projection:{type:'orthographic'}}
+    });
+  }
+
+  function restoreAssemblyViewport(force=false) {
+    if (force) viewportKey = '';
+    return relayoutViewport('assembly', {
+      'scene.xaxis.autorange': true,
+      'scene.yaxis.autorange': true,
+      'scene.zaxis.autorange': true,
+      'scene.aspectmode': 'data',
+      'scene.camera': {eye:{x:1.70,y:-1.45,z:0.90}, up:{x:0,y:0,z:1}, projection:{type:'orthographic'}}
+    });
+  }
+
+  function showWholeAssembly() {
+    const visible = allIndices.map(() => true);
+    return restorePositionedMember().then(() => restyleChanged(visible, baseOpacity)).then(() => restoreAssemblyViewport(true));
+  }
+
+  function updateVisualState() {
+    applyQueued = false;
+    const targetIndices = selectedMember ? (memberIndices[selectedMember] || []) : [];
+    const targetMeshIndices = selectedMember ? (memberMeshIndices[selectedMember] || targetIndices) : [];
+    const targetSet = new Set(targetIndices);
+    const localInspection = !!selectedMember && (isolateMode || explodeMode);
+    const useExploded = !!selectedMember && explodeMode;
+
+    let coordinateUpdate = Promise.resolve();
+    if (positionedMember && (positionedMember !== selectedMember || !localInspection || positionedExploded !== useExploded)) {
+      coordinateUpdate = restorePositionedMember().then(() => {
+        // Ao voltar da inspeção local para Destaque, a peça retorna à ponte
+        // montada e a câmera também precisa retornar à escala global. Manter
+        // a janela cúbica local com coordenadas globais criava a falsa
+        // impressão de prisma amassado/esticado ou fora do campo de visão.
+        if (!localInspection) return restoreAssemblyViewport();
+        return Promise.resolve();
+      });
+    }
+    if (localInspection && selectedMember && targetIndices.length) {
+      coordinateUpdate = Promise.resolve(coordinateUpdate).then(() => {
+        const source = useExploded ? explodedCoords : mountedCoords;
+        const local = centeredCoords(targetIndices, targetMeshIndices, source);
+        positionedMember = selectedMember;
+        positionedLocally = true;
+        positionedExploded = useExploded;
+        return Plotly.restyle(chart, local.payload, targetIndices);
+      });
+    } else if (selectedMember && useExploded && targetIndices.length) {
+      coordinateUpdate = Promise.resolve(coordinateUpdate).then(() => Plotly.restyle(chart, coordsFor(targetIndices, explodedCoords), targetIndices));
+      positionedMember = selectedMember;
+      positionedLocally = false;
+      positionedExploded = true;
+    }
+
+    const hasSelectionMode = !!selectedMember && (highlightMode || isolateMode || explodeMode);
+    const hideContext = localInspection;
+    const visible = allIndices.map(i => hideContext ? targetSet.has(i) : true);
+    const opacity = allIndices.map(i => {
+      if (!hasSelectionMode) return baseOpacity[i];
+      return targetSet.has(i) ? 1.0 : (hideContext ? 0.0 : 0.06);
+    });
+    const label = !selectedMember || !hasSelectionMode ? 'Posição de encaixe'
+      : (isolateMode && explodeMode ? 'Membro isolado e explodido — inspeção local'
+      : (explodeMode ? 'Alvo explodido — inspeção local'
+      : (isolateMode ? 'Membro isolado — inspeção local' : 'Membro destacado')));
+    const revision = requestedRevision;
+    return Promise.resolve(coordinateUpdate)
+      .then(() => revision === requestedRevision ? restyleChanged(visible, opacity) : Promise.resolve())
+      .then(() => {
+        if (revision !== requestedRevision) return Promise.resolve();
+        if (selectedMember && localInspection) return focusMember(selectedMember, useExploded, true);
+        return Promise.resolve();
+      })
+      .then(() => {
+        if (revision !== requestedRevision) return Promise.resolve();
+        msg.innerHTML = selectedMember ? `<b>M${esc(selectedMember)}</b> selecionado — modo: ${esc(label)}` : 'Ponte completa — selecione um membro para inspecionar sua montagem.';
+        return Plotly.relayout(chart, {title: `Montagem 3D — ${label}`});
+      });
+  }
+
+  function scheduleVisualState() {
+    requestedRevision += 1;
+    if (applyQueued) return;
+    applyQueued = true;
+    window.requestAnimationFrame(() => {
+      applyQueued = false;
+      updateSerial = updateSerial.then(() => updateVisualState()).then(() => {
+        if (requestedRevision > 0 && !applyQueued) {
+          // Não enfileira atualizações redundantes: uma nova solicitação será
+          // agendada apenas pelo próximo evento de usuário.
+        }
+      });
+    });
+  }
+
+  function selectMember(memberId, stickId='') {
+    selectedMember = String(memberId || '');
+    selectedStick = String(stickId || '');
+    picker.value = selectedMember;
+    highlightMode = true;
+    renderCard();
+    scheduleVisualState();
+  }
+  button('Montada', () => { highlightMode=false; isolateMode=false; explodeMode=false; selectedMember=null; selectedStick=null; picker.value=''; renderCard(); showWholeAssembly(); });
+  button('Destacar', () => { highlightMode=true; isolateMode=false; explodeMode=false; scheduleVisualState(); }, 'Mantém contexto atenuado e enquadra o membro na posição montada');
+  button('Isolar', () => { highlightMode=true; isolateMode=!isolateMode; scheduleVisualState(); }, 'Vista local centralizada; translação visual rígida sem deformação');
+  button('Explodir alvo', () => { highlightMode=true; explodeMode=!explodeMode; scheduleVisualState(); }, 'Vista local das lâminas separadas; preserva comprimento e orientação');
+  button('Enquadrar alvo', () => { if (selectedMember) { highlightMode=true; isolateMode=true; scheduleVisualState(); } }, 'Abre o membro em inspeção local isotrópica, sem deformação');
+  button('Conjunto inteiro', () => { highlightMode=false; isolateMode=false; explodeMode=false; showWholeAssembly(); }, 'Restaurar enquadramento geral');
+  button('Limpar', () => { selectedMember=null; selectedStick=null; picker.value=''; highlightMode=false; isolateMode=false; explodeMode=false; renderCard(); showWholeAssembly(); });
+  button('Isométrica', () => Plotly.relayout(chart, {'scene.camera': {eye:{x:1.60,y:-1.35,z:0.88}, up:{x:0,y:0,z:1}}}));
+  button('Lateral', () => Plotly.relayout(chart, {'scene.camera': {eye:{x:0,y:-2.15,z:0.25}, up:{x:0,y:0,z:1}}}));
+  button('Superior', () => Plotly.relayout(chart, {'scene.camera': {eye:{x:0.05,y:0.05,z:2.35}, up:{x:0,y:1,z:0}}}));
+  picker.onchange = () => { if (picker.value) selectMember(picker.value); };
+
+  // O listener apenas identifica o membro. A atualização da cena é agendada
+  // e incremental; o clique não reconstrói todos os prismas da ponte.
+  let ctrlHeld = false;
+  let pointerHadModifier = false;
+  const updateCtrl = event => { ctrlHeld = !!(event.ctrlKey || event.metaKey || event.key === 'Control' || event.key === 'Meta'); };
+  window.addEventListener('keydown', updateCtrl, true);
+  window.addEventListener('keyup', event => {
+    if (event.key === 'Control' || event.key === 'Meta') ctrlHeld = false;
+    else updateCtrl(event);
+  }, true);
+  window.addEventListener('blur', () => { ctrlHeld = false; pointerHadModifier = false; }, true);
+  chart.addEventListener('pointerdown', event => { pointerHadModifier = !!(event.ctrlKey || event.metaKey || ctrlHeld); }, true);
+  function resolvedPieceForTrace(trace, payload) {
+    const sid = String((trace && trace.meta && trace.meta.stick_id) || '');
+    const fromCatalog = pieceLookup[sid];
+    if (fromCatalog) return fromCatalog;
+    return {
+      palito: sid || String((payload || [])[0] || 'peça visível'),
+      memberId: String((trace && trace.meta && trace.meta.member_id) || (payload || [])[1] || '—'),
+      status: String((payload || [])[4] || 'detalhado para montagem — sem FS isolado aplicável'),
+      corte_mm: String((payload || [])[5] || '—'),
+      instalado_mm: String((payload || [])[6] || '—'),
+      'papel na seção': String((payload || [])[9] || '—'),
+    };
+  }
+  function tooltipHtml(piece) {
+    return `<b>${esc(piece.palito || 'peça visível')}</b> · M${esc(piece.memberId || '—')}<br>` +
+      `<b>Status:</b> ${esc(piece.status || 'detalhado para montagem — sem FS isolado aplicável')}<br>` +
+      `<b>Corte:</b> ${esc(piece.corte_mm || '—')} mm · <b>Instalado:</b> ${esc(piece.instalado_mm || '—')} mm<br>` +
+      `<b>Papel:</b> ${esc(piece['papel na seção'] || '—')}`;
+  }
+  chart.on('plotly_hover', event => {
+    const point = event && event.points && event.points[0];
+    const trace = point && point.data;
+    if (!trace || !trace.meta || trace.meta.trace_kind !== 'mesh') return;
+    const payload = Array.isArray(point.customdata) ? point.customdata : [];
+    const piece = resolvedPieceForTrace(trace, payload);
+    const html = tooltipHtml(piece);
+    hoverCard.innerHTML = `<b>Sob o cursor</b><br>${html}`;
+    pointerTooltip.innerHTML = html;
+    pointerTooltip.style.left = `${Math.min(window.innerWidth - 405, lastPointer.x + 14)}px`;
+    pointerTooltip.style.top = `${Math.max(8, lastPointer.y + 14)}px`;
+    pointerTooltip.style.display = 'block';
+  });
+  chart.on('plotly_unhover', () => {
+    pointerTooltip.style.display = 'none';
+    if (!selectedMember) hoverCard.innerHTML = '<b>Sob o cursor:</b> passe o mouse sobre um palito ou tala para ver status, comprimento e cortes. O painel inferior permanece no resumo da ponte completa.';
+  });
+  chart.on('plotly_click', event => {
+    const raw = (event && event.event) || {};
+    const modified = !!(ctrlHeld || pointerHadModifier || raw.ctrlKey || raw.metaKey);
+    pointerHadModifier = false;
+    if (!modified) {
+      msg.innerHTML = 'Seleção protegida: mantenha <b>Ctrl</b> pressionado e clique sobre o membro.';
+      return;
+    }
+    const point = event && event.points && event.points[0];
+    const custom = point && point.customdata;
+    const stickId = Array.isArray(custom) ? custom[0] : String((point && point.data && point.data.meta && point.data.meta.stick_id) || '');
+    const memberFromCustom = Array.isArray(custom) ? custom[1] : '';
+    const memberFromTrace = point && point.data && point.data.meta ? point.data.meta.member_id : '';
+    const memberId = memberFromCustom || memberFromTrace;
+    if (memberId) selectMember(memberId, stickId || 'prisma selecionado');
+    else msg.innerHTML = 'O ponto clicado não corresponde a um membro selecionável.';
+  });
+  window.__ASSEMBLY_CTRL_CLICK_READY__ = true;
+  window.__ASSEMBLY_INCREMENTAL_RENDER__ = true;
+  window.__ASSEMBLY_PIECE_TRACE_HOVER__ = true;
+  window.__ASSEMBLY_LOCAL_INSPECTION_FOCUS__ = true;
+  window.__ASSEMBLY_NULL_SEPARATOR_BOUNDS_FIX__ = true;
+  window.__ASSEMBLY_HOVER_STATUS_CARD__ = true;
+  window.__ASSEMBLY_LITERAL_PIECE_TOOLTIP__ = true;
+  window.__ASSEMBLY_TRANSVERSE_SEGMENT_FAN__ = true;
+  window.__ASSEMBLY_HOVER_FROM_PRISM_TRACE_META__ = true;
+  window.__ASSEMBLY_ISOTROPIC_LOCAL_FOCUS__ = true;
+  window.__ASSEMBLY_RESTORE_GLOBAL_VIEW_ON_HIGHLIGHT__ = true;
+  renderCard(); scheduleVisualState();
+  window.setTimeout(() => Plotly.Plots.resize(chart), 0);
+})();
+"""
+                    post_script = post_script.replace("__CATALOG__", catalog_json).replace("__BRIDGE_INSPECTION__", bridge_inspection_json).replace("__EXPLODED__", exploded_json)
+                    assembly_fig.write_html(
+                        prism_html,
+                        div_id="assembly-prism-inspector",
+                        post_script=post_script,
+                        config={
+                            "responsive": True,
+                            "scrollZoom": True,
+                            "displaylogo": False,
+                            "modeBarButtonsToRemove": ["orbitRotation", "pan3d", "zoom3d"],
+                            "modeBarButtonsToAdd": ["tableRotation", "resetCameraLastSave3d"],
+                        },
+                    )
                     detailed["piece_view_files"] = {
-                        "real_prisms_all_html": str(prism_html),
-                        "legacy_real_prisms_all_html": str(legacy_prism_html),
-                        "exploded_real_prisms_all_html": str(exploded_prism_html),
-                        "group_html": group_files,
+                        "interactive_real_prisms_html": str(prism_html),
                         "orthographic_overview_png": str(plot_dir / "16_vistas_cad_peca_a_peca.png"),
                         "piece_html_sampled_count": min(len(pieces), max_piece_html),
                         "piece_html_total_count": len(pieces),
@@ -2313,6 +3005,10 @@ class SimulationPipeline:
             "details/cutting_list.csv",
             "details/stick_pieces.csv",
             "details/glue_joints.csv",
+            "details/piece_inspection_catalog.json",
+            "details/bridge_inspection_overview.json",
+            "details/bridge_cut_quantity_table.csv",
+            "details/member_cut_quantity_table.csv",
             "details/assembly_tutorial.md",
             "details/assembly_steps.csv",
             "final_report/04_plano_pecas_por_medida.csv",
@@ -2321,10 +3017,8 @@ class SimulationPipeline:
             "final_report/06_sequencia_montagem.csv",
             "final_report/load_contact_assessment.csv",
             "plots/01_geometria_3d_fs_uso.html",
-            "plots/geometria_3d_interativa.html",
-            "plots/02_geometria_3d_prismas_reais_completo.html",
+            "plots/02_montagem_3d_prismas_reais_interativa.html",
             "plots/16_vistas_cad_peca_a_peca.png",
-            "plots/17_modelo_peca_a_peca_prismas_reais.html",
         ]
 
         with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:

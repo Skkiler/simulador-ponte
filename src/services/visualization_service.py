@@ -84,10 +84,6 @@ class VisualizationService:
         fig_fs.write_html(p_fs)
         paths.append(p_fs)
 
-        # Alias histórico usado por partes antigas do relatório.
-        legacy = out / "geometria_3d_interativa.html"
-        fig_fs.write_html(legacy)
-        paths.append(legacy)
         return paths
 
     def plot_geometry_3d(self, nodes, members, supports, loads, path):
@@ -418,6 +414,7 @@ class VisualizationService:
         member_checks: List[Dict] | None = None,
         selected_member_ids: Iterable[int] | None = None,
         highlight_selected: bool = True,
+        uirevision_key: str = "load_fs_geometry",
     ) -> go.Figure:
         """
         Gera visualização 3D interativa.
@@ -778,13 +775,32 @@ class VisualizationService:
             },
         }
 
+        axis_style = {
+            "backgroundcolor": "#0e1117",
+            "gridcolor": "rgba(148,163,184,0.18)",
+            "zerolinecolor": "rgba(148,163,184,0.30)",
+            "linecolor": "rgba(148,163,184,0.35)",
+            "tickfont": {"color": "#cbd5e1"},
+            "title": {"font": {"color": "#e2e8f0"}},
+        }
+        for axis_name in ("xaxis", "yaxis", "zaxis"):
+            scene[axis_name].update(axis_style)
+        scene["bgcolor"] = "#0e1117"
+
         if aspectratio is not None:
             scene["aspectratio"] = aspectratio
 
+        scene["dragmode"] = "turntable"
+        scene["uirevision"] = str(uirevision_key)
         fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="#0e1117",
+            plot_bgcolor="#0e1117",
+            font={"color": "#e5e7eb"},
             scene=scene,
+            uirevision=str(uirevision_key),
             margin={"l": 0, "r": 0, "t": 40, "b": 0},
-            height=650,
+            height=780,
             legend={
                 "orientation": "h",
                 "yanchor": "bottom",
@@ -1057,7 +1073,13 @@ class VisualizationService:
         max_pieces: int = 1500,
         lane_offset_mm: float = 5.0,
         color_by: str = "assembly_unit",
+        batch_by: str = "group",
         connection_offset_scale: float = 0.0,
+        section_explode_scale: float = 1.0,
+        longitudinal_piece_explode_gap_mm: float = 0.0,
+        focused_member_id: str | int | None = None,
+        focused_connection_offset_scale: float | None = None,
+        focused_section_explode_scale: float | None = None,
     ) -> Dict[str, Any]:
         """Pré-calcula prismas reais antes de montar o Plotly.
 
@@ -1066,6 +1088,12 @@ class VisualizationService:
         em poucos Mesh3d por grupo estrutural, mantendo cor e hover por peça por
         meio de facecolor/text.  Isso reduz o tempo de renderização sem voltar a
         representar a ponte como grupos sólidos.
+
+        ``section_explode_scale`` afasta globalmente lâminas de uma seção
+        composta. Para inspeção de montagem, ``focused_member_id`` permite
+        aplicar uma explosão extrema somente ao membro selecionado, mantendo o
+        restante da ponte montado como contexto. Todos os deslocamentos são
+        somente visuais; a auditoria as-built permanece sempre na escala 1.0.
         """
         rows = list(stick_pieces or [])
         if member_id is not None:
@@ -1077,6 +1105,7 @@ class VisualizationService:
             "top_chord": "#d62728",
             "vertical": "#2ca02c",
             "diagonal": "#ff7f0e",
+            "diagonal_splint": "#f2b54b",
             "top_bracing": "#9467bd",
             "bottom_bracing": "#17becf",
             "cross_frame_bracing": "#bcbd22",
@@ -1104,6 +1133,7 @@ class VisualizationService:
             for r in rows
         )
         color_by_norm = str(color_by or "assembly_unit").strip().lower()
+        batch_by_norm = str(batch_by or "group").strip().lower()
 
         def _row_color_key(row: Dict[str, Any]) -> str:
             group_name = str(row.get("member_group", "sem_grupo"))
@@ -1126,6 +1156,100 @@ class VisualizationService:
         bounds = {"x": [], "y": [], "z": []}
         as_built_boxes: List[Dict[str, Any]] = []
         as_built_gap_piece_count = 0
+        visual_dimension_error_samples: List[Dict[str, Any]] = []
+        visual_max_axis_length_error_mm = 0.0
+        visual_max_rigid_translation_error_mm = 0.0
+        visual_max_segment_axial_translation_mm = 0.0
+        visual_segment_axial_translation_samples: List[Dict[str, Any]] = []
+
+        # Na inspeção explodida, segmentos consecutivos da mesma linha não
+        # podem ser afastados ao longo do próprio eixo: isso altera o vão
+        # aparente de um montante vertical e o faz parecer artificialmente
+        # alongado. Em vez disso, os segmentos são abertos em leque por uma
+        # translação transversal rígida, mantendo a extensão axial original e
+        # revelando as sobreposições/juntas sem deformar o membro.
+        longitudinal_shift_by_stick_id: Dict[str, tuple[float, float, float]] = {}
+        try:
+            segment_fan_spacing_mm = max(0.0, float(longitudinal_piece_explode_gap_mm or 0.0))
+        except (TypeError, ValueError):
+            segment_fan_spacing_mm = 0.0
+
+        def _normalized_transverse_axis(raw: Dict[str, Any], unit: tuple[float, float, float]) -> tuple[float, float, float]:
+            candidates = [
+                (
+                    safe_float(raw.get("section_axis_z_x"), None),
+                    safe_float(raw.get("section_axis_z_y"), None),
+                    safe_float(raw.get("section_axis_z_z"), None),
+                ),
+                (
+                    safe_float(raw.get("section_axis_y_x"), None),
+                    safe_float(raw.get("section_axis_y_y"), None),
+                    safe_float(raw.get("section_axis_y_z"), None),
+                ),
+            ]
+            for candidate in candidates:
+                if any(value is None for value in candidate):
+                    continue
+                vec = tuple(float(value) for value in candidate)
+                dot = sum(vec[i] * unit[i] for i in range(3))
+                transverse = tuple(vec[i] - dot * unit[i] for i in range(3))
+                length = math.sqrt(sum(value * value for value in transverse))
+                if length > 1.0e-9:
+                    return tuple(value / length for value in transverse)
+            reference = (0.0, 0.0, 1.0)
+            if abs(sum(reference[i] * unit[i] for i in range(3))) > 0.92:
+                reference = (0.0, 1.0, 0.0)
+            transverse = (
+                unit[1] * reference[2] - unit[2] * reference[1],
+                unit[2] * reference[0] - unit[0] * reference[2],
+                unit[0] * reference[1] - unit[1] * reference[0],
+            )
+            length = math.sqrt(sum(value * value for value in transverse))
+            return tuple(value / length for value in transverse) if length > 1.0e-9 else (1.0, 0.0, 0.0)
+
+        if segment_fan_spacing_mm > 0.0:
+            line_rows: Dict[tuple[str, int], List[Dict[str, Any]]] = {}
+            for raw in rows:
+                sid = str(raw.get("stick_id") or "")
+                group_name = str(raw.get("member_group") or "")
+                if sid.startswith("TALA-") or group_name.endswith("_splint"):
+                    continue
+                line_key = (str(raw.get("member_id") or ""), int(safe_float(raw.get("lane"), 1) or 1))
+                line_rows.setdefault(line_key, []).append(raw)
+            for same_line in line_rows.values():
+                if len(same_line) <= 1:
+                    continue
+                first = same_line[0]
+                p0 = (safe_float(first.get("x0_mm"), 0.0) or 0.0, safe_float(first.get("y0_mm"), 0.0) or 0.0, safe_float(first.get("z0_mm"), 0.0) or 0.0)
+                p1 = (safe_float(first.get("x1_mm"), 0.0) or 0.0, safe_float(first.get("y1_mm"), 0.0) or 0.0, safe_float(first.get("z1_mm"), 0.0) or 0.0)
+                axis = (p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
+                axis_length = math.sqrt(sum(value * value for value in axis))
+                if axis_length <= 1.0e-9:
+                    continue
+                unit = tuple(value / axis_length for value in axis)
+                fan_axis = _normalized_transverse_axis(first, unit)
+                indexed: List[tuple[float, float, Dict[str, Any]]] = []
+                for raw in same_line:
+                    a = (safe_float(raw.get("x0_mm"), 0.0) or 0.0, safe_float(raw.get("y0_mm"), 0.0) or 0.0, safe_float(raw.get("z0_mm"), 0.0) or 0.0)
+                    b = (safe_float(raw.get("x1_mm"), 0.0) or 0.0, safe_float(raw.get("y1_mm"), 0.0) or 0.0, safe_float(raw.get("z1_mm"), 0.0) or 0.0)
+                    sa = sum(a[i] * unit[i] for i in range(3))
+                    sb = sum(b[i] * unit[i] for i in range(3))
+                    indexed.append((*sorted((sa, sb)), raw))
+                indexed.sort(key=lambda item: (item[0], item[1], str(item[2].get("stick_id") or "")))
+                middle = 0.5 * (len(indexed) - 1)
+                for index, (_, _, raw) in enumerate(indexed):
+                    delta = (float(index) - middle) * segment_fan_spacing_mm
+                    sid = str(raw.get("stick_id") or "")
+                    shift = tuple(delta * fan_axis[i] for i in range(3))
+                    longitudinal_shift_by_stick_id[sid] = shift
+                    axial_translation = abs(sum(shift[i] * unit[i] for i in range(3)))
+                    visual_max_segment_axial_translation_mm = max(visual_max_segment_axial_translation_mm, axial_translation)
+                    if axial_translation > 1.0e-8:
+                        visual_segment_axial_translation_samples.append({
+                            "stick_id": sid,
+                            "member_id": str(raw.get("member_id") or ""),
+                            "axial_translation_mm": axial_translation,
+                        })
 
         for r in rows:
             group = str(r.get("member_group", "sem_grupo"))
@@ -1137,19 +1261,77 @@ class VisualizationService:
             else:
                 off_y = (lane - 1) * lane_offset_mm
                 off_z = (0.35 * lane_offset_mm) * ((pidx % 2) - 0.5)
+            is_focused_member = (
+                focused_member_id is not None
+                and str(r.get("member_id")) == str(focused_member_id)
+            )
+            selected_connection_scale = (
+                focused_connection_offset_scale
+                if is_focused_member and focused_connection_offset_scale is not None
+                else connection_offset_scale
+            )
             try:
-                offset_scale = float(connection_offset_scale)
+                offset_scale = float(selected_connection_scale)
             except (TypeError, ValueError):
                 offset_scale = 0.0
             vx = offset_scale * (safe_float(r.get("visual_connection_offset_x_mm"), 0.0) or 0.0)
             vy = offset_scale * (safe_float(r.get("visual_connection_offset_y_mm"), 0.0) or 0.0)
             vz = offset_scale * (safe_float(r.get("visual_connection_offset_z_mm"), 0.0) or 0.0)
-            x0 = (safe_float(r.get("x0_mm"), 0.0) or 0.0) + vx
-            y0 = (safe_float(r.get("y0_mm"), 0.0) or 0.0) + off_y + vy
-            z0 = (safe_float(r.get("z0_mm"), 0.0) or 0.0) + off_z + vz
-            x1 = (safe_float(r.get("x1_mm"), 0.0) or 0.0) + vx
-            y1 = (safe_float(r.get("y1_mm"), 0.0) or 0.0) + off_y + vy
-            z1 = (safe_float(r.get("z1_mm"), 0.0) or 0.0) + off_z + vz
+            selected_explode_scale = (
+                focused_section_explode_scale
+                if is_focused_member and focused_section_explode_scale is not None
+                else section_explode_scale
+            )
+            try:
+                explode_scale = max(1.0, float(selected_explode_scale or 1.0))
+            except (TypeError, ValueError):
+                explode_scale = 1.0
+            if explode_scale > 1.0:
+                factor = explode_scale - 1.0
+                vx += factor * (safe_float(r.get("section_global_offset_x_mm"), 0.0) or 0.0)
+                vy += factor * (safe_float(r.get("section_global_offset_y_mm"), 0.0) or 0.0)
+                vz += factor * (safe_float(r.get("section_global_offset_z_mm"), 0.0) or 0.0)
+            axial_shift = longitudinal_shift_by_stick_id.get(str(r.get("stick_id") or ""), (0.0, 0.0, 0.0))
+            vx += float(axial_shift[0])
+            vy += float(axial_shift[1])
+            vz += float(axial_shift[2])
+            raw_x0 = safe_float(r.get("x0_mm"), 0.0) or 0.0
+            raw_y0 = safe_float(r.get("y0_mm"), 0.0) or 0.0
+            raw_z0 = safe_float(r.get("z0_mm"), 0.0) or 0.0
+            raw_x1 = safe_float(r.get("x1_mm"), 0.0) or 0.0
+            raw_y1 = safe_float(r.get("y1_mm"), 0.0) or 0.0
+            raw_z1 = safe_float(r.get("z1_mm"), 0.0) or 0.0
+            x0 = raw_x0 + vx
+            y0 = raw_y0 + off_y + vy
+            z0 = raw_z0 + off_z + vz
+            x1 = raw_x1 + vx
+            y1 = raw_y1 + off_y + vy
+            z1 = raw_z1 + off_z + vz
+
+            # A vista explodida só pode transladar um prisma rígido; jamais
+            # pode alongar, inclinar ou deformar o palito. Registra-se a
+            # invariância dimensional para auditoria do HTML exportado.
+            original_axis_length = math.sqrt(
+                (raw_x1 - raw_x0) ** 2 + (raw_y1 - raw_y0) ** 2 + (raw_z1 - raw_z0) ** 2
+            )
+            rendered_axis_length = math.sqrt(
+                (x1 - x0) ** 2 + (y1 - y0) ** 2 + (z1 - z0) ** 2
+            )
+            axis_length_error = abs(rendered_axis_length - original_axis_length)
+            rigid_translation_error = max(
+                abs((x1 - raw_x1) - (x0 - raw_x0)),
+                abs((y1 - raw_y1) - (y0 - raw_y0)),
+                abs((z1 - raw_z1) - (z0 - raw_z0)),
+            )
+            visual_max_axis_length_error_mm = max(visual_max_axis_length_error_mm, axis_length_error)
+            visual_max_rigid_translation_error_mm = max(visual_max_rigid_translation_error_mm, rigid_translation_error)
+            if axis_length_error > 1.0e-8 or rigid_translation_error > 1.0e-8:
+                visual_dimension_error_samples.append({
+                    "stick_id": str(r.get("stick_id", "")),
+                    "member_id": str(r.get("member_id", "")),
+                    "axis_length_error_mm": axis_length_error,
+                    "rigid_translation_error_mm": rigid_translation_error,
+                })
             try:
                 nominal_wmm = float(r.get("width_mm"))
                 nominal_tmm = float(r.get("thickness_mm"))
@@ -1204,20 +1386,27 @@ class VisualizationService:
                 f"Membro {r.get('member_id', '?')} — {group}",
                 f"Linha {lane}, peça {pidx}",
                 f"Unidade: {assembly_key}",
-                f"Corte {safe_float(r.get('cut_length_mm'), 0.0) or 0.0:.1f} mm",
-                f"Comprimento instalado {safe_float(r.get('installed_length_mm'), 0.0) or 0.0:.1f} mm",
+                f"Comprimento para corte {safe_float(r.get('shop_cut_length_mm', r.get('cut_length_mm')), 0.0) or 0.0:.2f} mm",
+                f"Comprimento instalado {safe_float(r.get('installed_length_mm'), 0.0) or 0.0:.2f} mm",
+                f"Dimensões do membro montado L×B×H = {safe_float(r.get('assembled_member_length_mm', r.get('fabrication_axis_length_mm')), 0.0) or 0.0:.2f}×{safe_float(r.get('assembled_member_width_mm'), 0.0) or 0.0:.2f}×{safe_float(r.get('assembled_member_thickness_mm'), 0.0) or 0.0:.2f} mm",
+                f"Modelo longitudinal: {str(r.get('longitudinal_splice_model') or '—')}",
                 f"Perda por corte em grau {safe_float(r.get('miter_cut_material_loss_length_mm'), 0.0) or 0.0:.2f} mm",
                 f"N peça {safe_float(r.get('N_piece_N'), 0.0) or 0.0:.2f} N",
                 f"Blank nominal {nominal_wmm:.1f}×{nominal_tmm:.1f} mm",
                 f"Render/orientação {wmm:.1f}×{tmm:.1f} mm — {stick_orientation}",
+                f"Status: {str(r.get('inspection_status') or 'detalhado para montagem — status não aplicável')}",
                 f"Junta início: {r.get('connection_start_mode', 'axis_centroid')}",
                 f"Junta fim: {r.get('connection_end_mode', 'axis_centroid')}",
             ]
             if bool(r.get("miter_cut_required", False)):
                 label_parts.append(
-                    f"Corte em grau: {safe_float(r.get('miter_cut_start_angle_deg'), 90.0) or 90.0:.0f}°/{safe_float(r.get('miter_cut_end_angle_deg'), 90.0) or 90.0:.0f}° "
+                    f"Corte CAD interno: {safe_float(r.get('miter_cut_start_angle_deg'), 90.0) or 90.0:.0f}°/{safe_float(r.get('miter_cut_end_angle_deg'), 90.0) or 90.0:.0f}° "
                     f"(skew {safe_float(r.get('miter_cut_start_skew_sign'), 1.0) or 1.0:.0f}/{safe_float(r.get('miter_cut_end_skew_sign'), 1.0) or 1.0:.0f}; "
                     f"eixo {r.get('miter_cut_start_trim_axis', '') or '-'}/{r.get('miter_cut_end_trim_axis', '') or '-'})"
+                )
+                label_parts.append(
+                    f"Ângulo de gabarito: {safe_float(r.get('miter_cut_start_shop_reference_angle_deg'), 90.0) or 90.0:.0f}°/"
+                    f"{safe_float(r.get('miter_cut_end_shop_reference_angle_deg'), 90.0) or 90.0:.0f}°"
                 )
                 if r.get("miter_cut_start_host_group") or r.get("miter_cut_end_host_group"):
                     label_parts.append(
@@ -1229,10 +1418,26 @@ class VisualizationService:
                 label_parts.append(f"Posição seção local y/z = {sy:.1f}/{sz:.1f} mm")
             label = "<br>".join(label_parts)
 
-            batch = batches.setdefault(group, {
+            if batch_by_norm in {"piece", "stick", "stick_id"}:
+                # Um Mesh3d por palito físico é deliberado no visor de
+                # montagem: o evento de hover/click precisa identificar a
+                # lâmina exata sem depender do mapeamento de faces internas de
+                # um mesh agregado. A auditoria/calculadora continua usando o
+                # conjunto original de peças, sem alterar geometria ou massa.
+                batch_key = str(r.get("stick_id") or assembly_key)
+            elif batch_by_norm in {"member", "member_id"}:
+                batch_key = f"M{r.get('member_id')}|{group}"
+            else:
+                batch_key = group
+            batch = batches.setdefault(batch_key, {
+                "member_id": str(r.get("member_id", "")) if batch_by_norm in {"member", "member_id", "piece", "stick", "stick_id"} else "",
+                "stick_id": str(r.get("stick_id", "")) if batch_by_norm in {"piece", "stick", "stick_id"} else "",
+                "member_group": group,
                 "x": [], "y": [], "z": [], "i": [], "j": [], "k": [],
-                "text": [], "facecolor": [], "edge_x": [], "edge_y": [], "edge_z": [],
+                "text": [], "vertex_customdata": [], "facecolor": [], "edge_x": [], "edge_y": [], "edge_z": [],
                 "hover_x": [], "hover_y": [], "hover_z": [], "hover_text": [],
+                "piece_hover_literal": "", "piece_color": color,
+                "select_x": [], "select_y": [], "select_z": [], "select_text": [], "select_customdata": [],
             })
             base_idx = len(batch["x"])
             batch["x"].extend(prism["x"])
@@ -1241,13 +1446,48 @@ class VisualizationService:
             batch["i"].extend([base_idx + int(v) for v in prism["i"]])
             batch["j"].extend([base_idx + int(v) for v in prism["j"]])
             batch["k"].extend([base_idx + int(v) for v in prism["k"]])
-            batch["text"].extend([label] * len(prism["x"]))
-            batch["facecolor"].extend([color] * len(prism["i"]))
+            status_text = str(r.get("inspection_status") or "detalhado para montagem — sem FS isolado aplicável")
+            piece_role = str(r.get("sandwich_lane_role") or r.get("structural_lane_role") or r.get("solid_laminate_role") or "—")
+            start_cut = safe_float(r.get("miter_cut_start_shop_reference_angle_deg"), None)
+            end_cut = safe_float(r.get("miter_cut_end_shop_reference_angle_deg"), None)
+            cut_text = (
+                f"{float(start_cut):.1f}° / {float(end_cut):.1f}°"
+                if start_cut is not None or end_cut is not None
+                else "90.0° / 90.0°"
+            )
+            piece_hover_data = [
+                str(r.get("stick_id", "")),
+                str(r.get("member_id", "")),
+                group,
+                assembly_key,
+                status_text,
+                f"{safe_float(r.get('shop_cut_length_mm', r.get('cut_length_mm')), 0.0) or 0.0:.2f}",
+                f"{safe_float(r.get('installed_length_mm'), 0.0) or 0.0:.2f}",
+                str(lane),
+                str(pidx),
+                piece_role,
+                cut_text,
+                f"{safe_float(r.get('assembled_member_length_mm', r.get('fabrication_axis_length_mm')), 0.0) or 0.0:.2f}",
+                f"{safe_float(r.get('assembled_member_width_mm'), 0.0) or 0.0:.2f}",
+                f"{safe_float(r.get('assembled_member_thickness_mm'), 0.0) or 0.0:.2f}",
+                str(r.get("longitudinal_splice_model") or "—"),
+            ]
+            if batch_by_norm in {"piece", "stick", "stick_id"}:
+                # No visor interativo o Mesh3d já corresponde a um único
+                # palito. Repetir status/cortes/customdata em cada um dos oito
+                # vértices multiplicava o JSON e a carga do WebGL sem ganho de
+                # identificação. O hover literal é armazenado uma única vez;
+                # clique/seleção usam apenas stick_id/member_id do meta.
+                batch["piece_hover_literal"] = label
+                batch["piece_color"] = color
+            else:
+                batch["text"].extend([label] * len(prism["x"]))
+                batch["vertex_customdata"].extend([piece_hover_data] * len(prism["x"]))
+                batch["facecolor"].extend([color] * len(prism["i"]))
             batch["hover_x"].append(0.5 * (x0 + x1))
             batch["hover_y"].append(0.5 * (y0 + y1))
             batch["hover_z"].append(0.5 * (z0 + z1))
             batch["hover_text"].append(label)
-
             # Arestas reais do prisma.  Não desenhamos diagonais internas dos
             # triângulos da malha; isso evita a falsa impressão de que um palito
             # foi repartido em mais peças do que existe no CSV.
@@ -1277,6 +1517,8 @@ class VisualizationService:
                         "obb": self._obb_from_prism(prism),
                         "ignore_face_lap_tolerance": bool(r.get("as_built_ignore_face_lap_tolerance", True)),
                         "face_contact_tolerance_mm": safe_float(r.get("as_built_face_contact_tolerance_mm"), 1.6) or 0.0,
+                        "splice_face_overlap_layer_offset_mm": safe_float(r.get("splice_face_overlap_layer_offset_mm"), 0.0) or 0.0,
+                        "splice_face_overlap_layer_model": str(r.get("splice_face_overlap_layer_model", "") or ""),
                     }
                 )
                 if not bool(r.get("node_connection_ok", True)):
@@ -1320,6 +1562,20 @@ class VisualizationService:
                             if None not in (a0, a1, b0, b1):
                                 param_overlap = min(float(a1), float(b1)) - max(float(a0), float(b0))
                                 if param_overlap <= 1.0e-6:
+                                    continue
+                                # Peças adjacentes da mesma lâmina são
+                                # deliberadamente sobrepostas face-a-face. Se
+                                # o detalhamento as moveu para camadas físicas
+                                # alternadas, o contato no trecho de overlap é
+                                # junta permitida, não colisão de componentes.
+                                la = safe_float(a.get("splice_face_overlap_layer_offset_mm"), 0.0) or 0.0
+                                lb = safe_float(box.get("splice_face_overlap_layer_offset_mm"), 0.0) or 0.0
+                                ma = str(a.get("splice_face_overlap_layer_model", "") or "")
+                                mb = str(box.get("splice_face_overlap_layer_model", "") or "")
+                                if (
+                                    "alternating_face_to_face_lap" in {ma, mb}
+                                    and abs(la - lb) > 1.0e-9
+                                ):
                                     continue
                         if bool(a.get("ignore_face_lap_tolerance", True)) or bool(box.get("ignore_face_lap_tolerance", True)):
                             contact_tol = max(
@@ -1367,6 +1623,15 @@ class VisualizationService:
             "as_built_interpenetration_count": len(as_built_interpenetration_samples),
             "as_built_interpenetration_samples": as_built_interpenetration_samples,
             "as_built_gap_piece_count": int(as_built_gap_piece_count),
+            "visual_dimension_error_count": len(visual_dimension_error_samples),
+            "visual_dimension_error_samples": visual_dimension_error_samples[:50],
+            "visual_max_axis_length_error_mm": float(visual_max_axis_length_error_mm),
+            "visual_max_rigid_translation_error_mm": float(visual_max_rigid_translation_error_mm),
+            "visual_longitudinal_explosion_strategy": "transverse_segment_fan_rigid_translation" if segment_fan_spacing_mm > 0.0 else "none",
+            "visual_segment_fan_spacing_mm": float(segment_fan_spacing_mm),
+            "visual_max_segment_axial_translation_mm": float(visual_max_segment_axial_translation_mm),
+            "visual_segment_axial_translation_error_count": len(visual_segment_axial_translation_samples),
+            "visual_segment_axial_translation_samples": visual_segment_axial_translation_samples[:50],
         }
 
     def plotly_stick_pieces(
@@ -1378,7 +1643,17 @@ class VisualizationService:
         render_mode: str = "prismas reais",
         precomputed_mesh_batches: Dict[str, Any] | None = None,
         color_by: str = "assembly_unit",
+        batch_by: str = "group",
         connection_offset_scale: float = 0.0,
+        section_explode_scale: float = 1.0,
+        longitudinal_piece_explode_gap_mm: float = 0.0,
+        selected_stick_id: str | None = None,
+        selected_member_id: str | int | None = None,
+        focused_member_id: str | int | None = None,
+        focused_connection_offset_scale: float | None = None,
+        focused_section_explode_scale: float | None = None,
+        uirevision_key: str = "real_prism_assembly",
+        height_px: int = 1020,
     ):
         data = precomputed_mesh_batches or self.prepare_stick_piece_mesh_batches(
             stick_pieces,
@@ -1386,7 +1661,13 @@ class VisualizationService:
             max_pieces=max_pieces,
             lane_offset_mm=lane_offset_mm,
             color_by=color_by,
+            batch_by=batch_by,
             connection_offset_scale=connection_offset_scale,
+            section_explode_scale=section_explode_scale,
+            longitudinal_piece_explode_gap_mm=longitudinal_piece_explode_gap_mm,
+            focused_member_id=focused_member_id,
+            focused_connection_offset_scale=focused_connection_offset_scale,
+            focused_section_explode_scale=focused_section_explode_scale,
         )
         rows = list(data.get("rows", []) or [])
         fig = go.Figure()
@@ -1395,7 +1676,24 @@ class VisualizationService:
             return fig
 
         batches = data.get("batches", {}) or {}
-        for group, batch in sorted(batches.items(), key=lambda kv: kv[0]):
+        legend_groups_seen: set[str] = set()
+        # O hover confiável exige mesh individual por palito; já as arestas
+        # são apenas guias visuais e podem ser agregadas por membro para
+        # reduzir a carga WebGL e manter a interação fluida.
+        deferred_member_edges: dict[str, dict[str, Any]] = {}
+        for batch_key, batch in sorted(batches.items(), key=lambda kv: kv[0]):
+            group = str(batch.get("member_group") or batch_key)
+            batch_member_id = str(batch.get("member_id") or "")
+            trace_name = f"M{batch_member_id} — {group}" if batch_member_id else group
+            show_group_legend = group not in legend_groups_seen
+            legend_groups_seen.add(group)
+            trace_meta = {
+                "member_id": batch_member_id,
+                "stick_id": str(batch.get("stick_id") or ""),
+                "member_group": group,
+                "trace_kind": "mesh",
+            }
+            is_piece_trace = bool(trace_meta["stick_id"])
             fig.add_trace(
                 go.Mesh3d(
                     x=batch.get("x", []),
@@ -1404,49 +1702,110 @@ class VisualizationService:
                     i=batch.get("i", []),
                     j=batch.get("j", []),
                     k=batch.get("k", []),
-                    text=batch.get("text", []),
-                    hovertemplate="%{text}<extra></extra>",
-                    name=str(group),
+                    text=([] if is_piece_trace else batch.get("text", [])),
+                    customdata=([] if is_piece_trace else batch.get("vertex_customdata", [])),
+                    meta={**trace_meta, "hover_piece_text": str(batch.get("piece_hover_literal") or ((batch.get("text") or ["Peça sem dados de inspeção"])[0]))},
+                    # Em modo peça, cada mesh já identifica um palito. O
+                    # tooltip literal existe uma única vez por traço; não é
+                    # replicado por vértice. Isso mantém hover confiável e
+                    # reduz significativamente o HTML transferido ao visor.
+                    hovertemplate=(
+                        (str(batch.get("piece_hover_literal") or "Peça sem dados de inspeção") +
+                         "<br><b>Ctrl + clique para selecionar este membro</b><extra></extra>")
+                        if is_piece_trace else
+                        "<b>Palito %{customdata[0]}</b><br>"
+                        "Membro M%{customdata[1]} — %{customdata[2]}<br>"
+                        "Status: %{customdata[4]}<br>"
+                        "Comprimento de corte: %{customdata[5]} mm<br>"
+                        "Comprimento instalado: %{customdata[6]} mm<br>"
+                        "Linha / segmento: %{customdata[7]} / %{customdata[8]}<br>"
+                        "Papel na seção: %{customdata[9]}<br>"
+                        "Cortes de gabarito (início/fim): %{customdata[10]}<br>"
+                        "Membro montado L×B×H: %{customdata[11]} × %{customdata[12]} × %{customdata[13]} mm<br>"
+                        "Modelo longitudinal: %{customdata[14]}<br>"
+                        "<b>Ctrl + clique para selecionar M%{customdata[1]}</b>"
+                        "<extra></extra>"
+                    ),
+                    name=trace_name,
+                    legendgroup=group,
                     opacity=1.0,
-                    facecolor=batch.get("facecolor", []),
+                    # Quando cada prisma usa uma cor única, omitir facecolor
+                    # permite ao Plotly pintar as faces por ``color``. Uma lista
+                    # vazia substitui a pintura e torna o prisma invisível.
+                    color=(batch.get("piece_color") if is_piece_trace else None),
+                    facecolor=(None if is_piece_trace else batch.get("facecolor", [])),
                     flatshading=True,
                     lighting={"ambient": 0.85, "diffuse": 0.55, "roughness": 1.0, "specular": 0.05},
                     showscale=False,
-                    showlegend=True,
+                    showlegend=show_group_legend,
                 )
             )
             if batch.get("edge_x"):
-                fig.add_trace(
-                    go.Scatter3d(
-                        x=batch.get("edge_x", []),
-                        y=batch.get("edge_y", []),
-                        z=batch.get("edge_z", []),
-                        mode="lines",
-                        line={"width": 1.15, "color": "rgba(0,0,0,0.42)"},
-                        name=f"arestas reais — {group}",
-                        hoverinfo="skip",
-                        showlegend=False,
+                if is_piece_trace and batch_member_id:
+                    edge = deferred_member_edges.setdefault(batch_member_id, {
+                        "member_id": batch_member_id,
+                        "member_group": group,
+                        "x": [], "y": [], "z": [],
+                    })
+                    edge["x"].extend(batch.get("edge_x", []))
+                    edge["y"].extend(batch.get("edge_y", []))
+                    edge["z"].extend(batch.get("edge_z", []))
+                else:
+                    fig.add_trace(
+                        go.Scatter3d(
+                            x=batch.get("edge_x", []),
+                            y=batch.get("edge_y", []),
+                            z=batch.get("edge_z", []),
+                            mode="lines",
+                            line={"width": 4.25, "color": "rgba(255,246,214,1.0)"},
+                            name=f"arestas reais — {trace_name}",
+                            meta={"member_id": batch_member_id, "member_group": group, "trace_kind": "edge"},
+                            hoverinfo="skip",
+                            showlegend=False,
+                        )
                     )
+            # A seleção é capturada diretamente no prisma visível (Mesh3d).
+            # Marcadores auxiliares invisíveis foram removidos porque o WebGL
+            # podia rasterizá-los como pontos brancos no plano da ponte.
+
+        for member_id, edge in sorted(deferred_member_edges.items(), key=lambda item: int(safe_float(item[0], 0) or 0)):
+            fig.add_trace(
+                go.Scatter3d(
+                    x=edge["x"], y=edge["y"], z=edge["z"],
+                    mode="lines",
+                    line={"width": 4.25, "color": "rgba(255,246,214,1.0)"},
+                    name=f"arestas reais — M{member_id}",
+                    meta={"member_id": member_id, "member_group": edge["member_group"], "trace_kind": "edge"},
+                    hoverinfo="skip",
+                    showlegend=False,
                 )
-            # Mesh3d nem sempre dispara hover no centro da face. Estes marcadores
-            # quase invisíveis ficam no centro geométrico de cada peça física e
-            # garantem que a auditoria mostre dados ao passar o mouse.
-            if batch.get("hover_x"):
+            )
+
+        # Realça o membro selecionado inteiro, preservando o palito que
+        # originou o clique somente como informação auxiliar de auditoria.
+        highlight_member_id = selected_member_id
+        if highlight_member_id is None and selected_stick_id:
+            selected_row = next((row for row in rows if str(row.get("stick_id")) == str(selected_stick_id)), None)
+            highlight_member_id = selected_row.get("member_id") if selected_row is not None else None
+        if highlight_member_id is not None:
+            selected_rows = [row for row in rows if str(row.get("member_id")) == str(highlight_member_id)]
+            if selected_rows:
+                hx: list[float | None] = []
+                hy: list[float | None] = []
+                hz: list[float | None] = []
+                for row in selected_rows:
+                    hx.extend([safe_float(row.get("x0_mm"), 0.0), safe_float(row.get("x1_mm"), 0.0), None])
+                    hy.extend([safe_float(row.get("y0_mm"), 0.0), safe_float(row.get("y1_mm"), 0.0), None])
+                    hz.extend([safe_float(row.get("z0_mm"), 0.0), safe_float(row.get("z1_mm"), 0.0), None])
                 fig.add_trace(
                     go.Scatter3d(
-                        x=batch.get("hover_x", []),
-                        y=batch.get("hover_y", []),
-                        z=batch.get("hover_z", []),
-                        mode="markers",
-                        # Marcadores de hover devem existir para capturar o mouse,
-                        # mas não podem aparecer como "pontos brancos" de montagem.
-                        # Usar cor quase transparente e tamanho mínimo mantém o
-                        # hover peça-a-peça sem poluir a leitura geométrica.
-                        marker={"size": 2, "color": "rgba(0,0,0,0.001)"},
-                        text=batch.get("hover_text", []),
-                        hovertemplate="%{text}<extra></extra>",
-                        name=f"dados das peças — {group}",
-                        showlegend=False,
+                        x=hx, y=hy, z=hz,
+                        mode="lines+markers",
+                        line={"width": 12, "color": "#00d4ff"},
+                        marker={"size": 4, "color": "#00d4ff"},
+                        name=f"membro selecionado — M{highlight_member_id}",
+                        hovertemplate=f"<b>Membro M{highlight_member_id}</b><extra></extra>",
+                        showlegend=True,
                     )
                 )
 
@@ -1462,24 +1821,126 @@ class VisualizationService:
         x_span = max(max(xs_all) - min(xs_all), 1.0)
         y_span = max(max(ys_all) - min(ys_all), 1.0)
         z_span = max(max(zs_all) - min(zs_all), 1.0)
+        exploded = (
+            abs(float(connection_offset_scale or 0.0)) > 1.0e-9
+            or float(section_explode_scale or 1.0) > 1.0
+            or focused_member_id is not None and (
+                abs(float(focused_connection_offset_scale or 0.0)) > 1.0e-9
+                or float(focused_section_explode_scale or 1.0) > 1.0
+            )
+        )
+        dark_axis = {
+            "backgroundcolor": "#0e1117",
+            "gridcolor": "rgba(148,163,184,0.18)",
+            "zerolinecolor": "rgba(148,163,184,0.30)",
+            "linecolor": "rgba(148,163,184,0.35)",
+            "tickfont": {"color": "#cbd5e1"},
+            "title": {"font": {"color": "#e2e8f0"}},
+        }
         fig.update_layout(
             title=(
-                "Modelo peça‑a‑peça — posição de encaixe"
-                if abs(float(connection_offset_scale or 0.0)) < 1.0e-9
-                else "Modelo peça‑a‑peça — vista explodida/auditável"
+                "Modelo peça‑a‑peça — vista explodida/auditável"
+                if exploded
+                else "Modelo peça‑a‑peça — posição de encaixe"
             ),
+            template="plotly_dark",
+            paper_bgcolor="#0e1117",
+            plot_bgcolor="#0e1117",
+            font={"color": "#e5e7eb"},
             scene={
-                "xaxis": {"title": "x [mm]"},
-                "yaxis": {"title": "y [mm]"},
-                "zaxis": {"title": "z [mm]"},
-                "aspectmode": "manual",
-                "aspectratio": {
-                    "x": 1.0,
-                    "y": y_span / x_span,
-                    "z": z_span / x_span,
+                "bgcolor": "#0e1117",
+                "xaxis": {"title": "x [mm]", **dark_axis},
+                "yaxis": {"title": "y [mm]", **dark_axis},
+                "zaxis": {"title": "z [mm]", **dark_axis},
+                # Visor de fabricação: escala geométrica verdadeira. O modo
+                # manual anterior ampliava artificialmente eixos curtos e, em
+                # perspectiva, fazia montantes longos parecerem lâminas
+                # inclinadas/interpenetrantes na explosão.
+                "aspectmode": "data",
+                "camera": {
+                    "eye": {"x": 1.70, "y": -1.45, "z": 0.90},
+                    "projection": {"type": "orthographic"},
                 },
+                "dragmode": "turntable",
+                "uirevision": str(uirevision_key),
             },
-            height=650,
+            uirevision=str(uirevision_key),
+            clickmode="event+select",
+            height=int(height_px),
             margin={"l": 0, "r": 0, "t": 45, "b": 0},
         )
         return fig
+
+
+    def plotly_stick_pieces_mounted_exploded(
+        self,
+        stick_pieces,
+        *,
+        max_pieces: int = 1500,
+        color_by: str = "member_group",
+        mounted_connection_offset_scale: float = 0.0,
+        exploded_connection_offset_scale: float = 0.60,
+        exploded_section_scale: float = 2.0,
+        uirevision_key: str = "standalone_assembly_camera",
+    ) -> go.Figure:
+        """HTML único com botões para alternar montagem e explosão.
+
+        Os dois estados utilizam o mesmo contêiner Plotly e a mesma câmera,
+        evitando recarregar um HTML diferente apenas para auditar encaixes.
+        """
+        mounted = self.plotly_stick_pieces(
+            stick_pieces,
+            max_pieces=max_pieces,
+            color_by=color_by,
+            connection_offset_scale=mounted_connection_offset_scale,
+            section_explode_scale=1.0,
+            uirevision_key=uirevision_key,
+        )
+        exploded = self.plotly_stick_pieces(
+            stick_pieces,
+            max_pieces=max_pieces,
+            color_by=color_by,
+            connection_offset_scale=exploded_connection_offset_scale,
+            section_explode_scale=exploded_section_scale,
+            uirevision_key=uirevision_key,
+        )
+        combined = go.Figure()
+        for trace in mounted.data:
+            combined.add_trace(trace)
+        n_mounted = len(mounted.data)
+        for trace in exploded.data:
+            trace.visible = False
+            combined.add_trace(trace)
+        n_exploded = len(exploded.data)
+        combined.update_layout(mounted.layout)
+        combined.update_layout(
+            title="Modelo peça-a-peça — posição de encaixe",
+            uirevision=str(uirevision_key),
+            updatemenus=[
+                {
+                    "type": "buttons",
+                    "direction": "right",
+                    "x": 0.01,
+                    "y": 1.10,
+                    "buttons": [
+                        {
+                            "label": "Montada",
+                            "method": "update",
+                            "args": [
+                                {"visible": [True] * n_mounted + [False] * n_exploded},
+                                {"title": "Modelo peça-a-peça — posição de encaixe"},
+                            ],
+                        },
+                        {
+                            "label": "Explodida",
+                            "method": "update",
+                            "args": [
+                                {"visible": [False] * n_mounted + [True] * n_exploded},
+                                {"title": "Modelo peça-a-peça — vista explodida/auditável"},
+                            ],
+                        },
+                    ],
+                }
+            ],
+        )
+        return combined

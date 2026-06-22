@@ -12,6 +12,10 @@ def test_chord_truss_legacy_migrates_with_warning(base_cfg: dict) -> None:
     cfg["bridge"].pop("top_chord_truss_type", None)
     cfg["bridge"].pop("bottom_chord_truss_type", None)
     cfg["bridge"]["legacy_chord_truss_lacing_enabled"] = False
+    # O teste de migração legada desativa o domínio construtivo fixo do projeto atual.
+    cfg["detail_model"]["simple_chord_transverse_only_enabled"] = False
+    cfg["planner"]["consider_top_chord_trusses"] = ["Warren"]
+    cfg["planner"]["consider_bottom_chord_trusses"] = ["Warren"]
 
     normalized = ConfigService().normalize(cfg)
     assert normalized["bridge"]["top_chord_truss_type"] == "Warren"

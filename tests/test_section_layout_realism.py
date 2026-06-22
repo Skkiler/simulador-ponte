@@ -165,3 +165,46 @@ def test_simple_layout_aliases_expose_buildability_flags() -> None:
     )
     assert sec_box["layout"] == "contact_box"
     assert sec_box["section_buildable"] is True
+
+
+def test_upper_tee_bottom_chord_is_buildable_and_stiff_in_vertical_plane() -> None:
+    sec_t = SectionService.composite_section(
+        2,
+        MAT,
+        {"layout": "tee_top", "stick_orientation": "mixed"},
+    )
+    sec_flat = SectionService.composite_section(
+        1,
+        MAT,
+        {"layout": "single", "stick_orientation": "flat"},
+    )
+
+    assert sec_t["layout"] == "tee_top"
+    assert sec_t["stick_orientations"] == ["edge", "flat"]
+    assert sec_t["centroid_z_mm"] > 0.0
+    assert sec_t["no_internal_overlap"] is True
+    assert sec_t["section_connection_model"] == "upper_T_continuous_web_flange_contact"
+    assert sec_t["Iy"] > 50.0 * sec_flat["Iy"]
+
+
+def test_closed_sandwich_eight_sticks_has_face_contact_without_internal_overlap() -> None:
+    sec = SectionService.composite_section(
+        8,
+        MAT,
+        {"layout": "closed_sandwich_4core_2caps_2covers", "joint_quality": "face_laminated"},
+    )
+    assert sec["layout"] == "closed_sandwich_4core_2caps_2covers"
+    assert sec["section_connection_model"] == "closed_face_sandwich_core_caps_external_covers"
+    assert sec["no_internal_overlap"] is True
+    assert sec["stick_roles"].count("nucleo_central") == 4
+    assert "capa_externa_superior_1" in sec["stick_roles"]
+    assert "capa_externa_inferior_1" in sec["stick_roles"]
+    assert sec["Iy"] > SectionService.composite_section(8, MAT, {"layout": "solid_face_laminated_edge", "stick_orientation": "edge"})["Iy"]
+
+
+def test_closed_sandwich_six_sticks_models_built_post_core_and_caps() -> None:
+    sec = SectionService.composite_section(6, MAT, {"layout": "closed_sandwich_4core_2caps"})
+    assert sec["layout"] == "closed_sandwich_4core_2caps"
+    assert sec["no_internal_overlap"] is True
+    assert len(sec["stick_positions_yz"]) == 6
+    assert sec["stick_roles"].count("nucleo_central") == 4

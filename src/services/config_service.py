@@ -336,6 +336,10 @@ class ConfigService:
         bridge.setdefault("include_top_x_bracing", False)
         bridge.setdefault("include_bottom_x_bracing", False)
         bridge.setdefault("include_cross_frame_bracing", True)
+        bridge.setdefault("top_chord_exclude_support_overhang_panels", False)
+        bridge.setdefault("vertical_exclude_support_overhang_stations", False)
+        bridge.setdefault("top_transverse_exclude_support_overhang_stations", False)
+        bridge.setdefault("side_diagonal_exclude_support_overhang_panels", False)
 
         bridge["load_total_N"] = float(bridge["load_total_kgf"]) * 9.80665
 
@@ -509,7 +513,13 @@ class ConfigService:
             except (TypeError, ValueError):
                 requested_n = 1
             detail["reinforcement_sticks_per_splice"] = max(1, min(requested_n, 1))
-        detail.setdefault("terminal_joint_area_factor", 14.0)
+        # A força terminal já é distribuída por lâmina. Multiplicar a área
+        # efetiva por todas as lâminas novamente infla artificialmente a
+        # resistência da cola. Por padrão, somente a face física explicitamente
+        # detalhada pode contribuir; uma ligação de duas faces deve ser
+        # modelada e liberada deliberadamente pelo cap.
+        detail.setdefault("terminal_joint_area_factor", 1.0)
+        detail.setdefault("terminal_joint_area_factor_physical_cap", 1.0)
         detail.setdefault("terminal_joint_secondary_bending_factor", 1.00)
         detail.setdefault("glue_shear_strength_MPa", 3.5)
         detail.setdefault("glue_spread_g_per_m2", 160.0)
@@ -807,6 +817,11 @@ class ConfigService:
             _tol_req = safe_float(detail.get("as_built_face_contact_tolerance_mm"), 1.6) or 1.6
             detail["as_built_face_contact_tolerance_mm"] = min(max(0.0, float(_tol_req)), 1.6)
         detail.setdefault("node_lap_layer_clearance_mm", 0.75)
+        # Contraventamento longitudinal interno: o eixo termina na face
+        # externa do montante somada à meia espessura do palito colado
+        # (3,50 + 0,75 = 4,25 mm para o lote nominal). O deslocamento é
+        # aplicado com sinais opostos nos dois terminais; nunca constante.
+        detail.setdefault("internal_cross_frame_longitudinal_terminal_face_x_mm", 4.25)
         default_node_lap_offset_groups = [
             "vertical",
             "diagonal",
@@ -823,15 +838,15 @@ class ConfigService:
         else:
             detail.setdefault("node_lap_visual_side_offset_groups", default_node_lap_offset_groups)
         if str(detail.get("node_lap_physical_offset_model", "")).strip().lower() == "contact_stack_not_exploded":
-            # Cross frames do not use the no-trim side-lap exception: they must
-            # terminate at the host face. Otherwise they pass through the top
-            # chord and the model only looks valid because of a large hidden
-            # offset/tolerance.
-            detail["side_lap_no_axis_setback_groups"] = [
-                str(v)
-                for v in (detail.get("side_lap_no_axis_setback_groups") or [])
-                if str(v) != "cross_frame_bracing"
-            ]
+            # O contraventamento interno é colado na face do montante. Recuar
+            # a barra ao longo de seu eixo cria exatamente a lacuna física que
+            # a montagem não pode possuir. A separação entre a família
+            # transversal e o zig-zag longitudinal é feita nas faces opostas em
+            # x do montante; portanto a barra deve alcançar a face hospedeira.
+            no_setback = [str(v) for v in (detail.get("side_lap_no_axis_setback_groups") or [])]
+            if "cross_frame_bracing" not in no_setback:
+                no_setback.append("cross_frame_bracing")
+            detail["side_lap_no_axis_setback_groups"] = no_setback
         detail.setdefault("x_midpoint_gusset_overlap_mm", 20.0)
         detail.setdefault("x_midpoint_gusset_note", "Se X for usado manualmente, dividir no centro e colar com tala curta; padrão automático evita X contínuo.")
         # Contraventamentos em X podem existir, mas não no mesmo volume. O
@@ -1195,6 +1210,7 @@ class ConfigService:
         # Limpa diretórios de saída antes de cada execução para impedir que
         # arquivos de runs antigos (especialmente optimization/final_validation)
         # sejam confundidos com o resultado atual.
+        analysis.setdefault("clean_output_root_before_run", True)
         analysis.setdefault("clean_output_dirs_before_run", True)
         analysis.setdefault(
             "output_dirs_to_clean_before_run",
@@ -1968,6 +1984,209 @@ class ConfigService:
         # antigos, aliases legados ou mutações intermediárias.
         self.enforce_user_design_domain(cfg, add_warning=add_compat_warning)
 
+        # Domínio físico solicitado: os banzos recebem apenas travessas simples;
+        # o zig-zag pertence ao plano transversal interno formado entre os
+        # montantes das duas laterais. Este bloqueio é reaplicado após cada
+        # mutação/normalização para o otimizador não recriar diagonais nos
+        # planos dos banzos nem substituir o contraventamento interno alternado.
+        if bool(detail.get("simple_chord_transverse_only_enabled", False)):
+            bridge = cfg.setdefault("bridge", {})
+            bridge["include_top_x_bracing"] = False
+            bridge["include_bottom_x_bracing"] = False
+            bridge["top_chord_truss_type"] = "none"
+            bridge["bottom_chord_truss_type"] = "none"
+            cfg.setdefault("member_sizing", {})["enable_plane_bracing_efficiency_mutation"] = False
+        if bool(detail.get("internal_cross_frame_zigzag_enabled", False)):
+            bridge = cfg.setdefault("bridge", {})
+            bridge["include_cross_frame_bracing"] = True
+            bridge["internal_truss_type"] = "Warren_symmetric"
+            bridge["cross_frame_truss_type"] = "Warren_symmetric"
+            cfg.setdefault("planner", {})["consider_internal_trusses"] = ["Warren_symmetric"]
+
+        # Travessas laterais dos banzos em um único palito: uma barra de
+        # estoque de 120 mm não pode unir eixos separados por 150 mm. O modo
+        # solicitado reduz explicitamente a largura modelada ao vão fabricável
+        # informado, em vez de desenhar uma peça impossível ou duas pontas sem
+        # tala. A largura original permanece registrada para auditoria.
+        if bool(detail.get("single_piece_chord_transverse_ties_enabled", False)):
+            bridge = cfg.setdefault("bridge", {})
+            max_span = max(1.0, float(detail.get("single_piece_chord_transverse_max_centerline_span_mm", 115.0) or 115.0))
+            current_width = float(bridge.get("width_mm", max_span) or max_span)
+            detail.setdefault("original_bridge_width_before_single_piece_ties_mm", current_width)
+            if current_width > max_span + 1.0e-9:
+                bridge["width_mm"] = max_span
+                add_compat_warning(
+                    f"bridge.width_mm reduzido de {current_width:.1f} para {max_span:.1f} mm: "
+                    "travessas direita-esquerda solicitadas em um único palito."
+                )
+            detail["loaded_top_transverse_reinforcement_enabled"] = False
+
+        # Restrição construtiva opcional do projeto: banzo inferior em T superior
+        # contínuo.  A alma é o tirante; a mesa assenta montantes e diagonais.
+        # O bloqueio impede que a otimização retire a mesa ou recrie uma seção I
+        # incompatível com a sapata e com o plano de juntas desencontradas.
+        # Regra construtiva do protótipo atual: vigas primárias compostas não
+        # podem usar caixa oca nem contato lateral estreito como ligação
+        # resistente. O bloco maciço é formado exclusivamente por laminação de
+        # faces largas; a verificação permanece conservadora até ensaio do lote.
+        if bool(detail.get("solid_face_laminated_primary_members_enabled", False)):
+            layouts = cfg.setdefault("section_layout_by_group", {})
+            top_orientation = str(detail.get("top_chord_solid_laminate_orientation", "flat")).strip().lower()
+            top_is_flat = top_orientation not in {"edge", "em_pe", "em_pé", "vertical"}
+            if bool(detail.get("top_chord_closed_sandwich_enabled", False)):
+                layouts["top_chord"] = {
+                    "layout": "closed_sandwich_4core_2caps_2covers",
+                    "stick_orientation": "mixed",
+                    "joint_quality": "face_laminated",
+                    "spacing_y_mm": 0.0,
+                    "spacing_z_mm": 0.0,
+                }
+                cfg.setdefault("member_sticks_by_group", {})["top_chord"] = 8
+            else:
+                layouts["top_chord"] = {
+                    "layout": "solid_face_laminated_flat" if top_is_flat else "solid_face_laminated_edge",
+                    "stick_orientation": "flat" if top_is_flat else "edge",
+                    "joint_quality": "face_laminated",
+                    "spacing_y_mm": 0.0,
+                    "spacing_z_mm": 0.0,
+                }
+            layouts["vertical"] = {
+                "layout": "solid_face_laminated_edge",
+                "stick_orientation": "edge",
+                "joint_quality": "face_laminated",
+                "spacing_y_mm": 0.0,
+                "spacing_z_mm": 0.0,
+            }
+            for transverse_group in ("top_transverse", "bottom_transverse"):
+                layouts[transverse_group] = {
+                    "layout": "solid_face_laminated_flat",
+                    "stick_orientation": "flat",
+                    "joint_quality": "face_laminated",
+                    "spacing_y_mm": 0.0,
+                    "spacing_z_mm": 0.0,
+                }
+            detail["auto_balance_compression_section_layouts"] = False
+            detail["simple_even_box_section_groups"] = []
+            if bool(detail.get("forbid_hollow_structural_sections", True)):
+                prohibited = {"box", "contact_box", "simple_box_with_real_spacers", "legacy_spaced_box"}
+                for group, group_layout in list(layouts.items()):
+                    # O banzo inferior é substituído abaixo pela seção T
+                    # obrigatória; candidatos legados podem ainda chegar aqui
+                    # como contact_box durante a normalização do funil.
+                    if str(group) == "bottom_chord" and bool(detail.get("bottom_chord_tee_profile_enabled", False)):
+                        continue
+                    if str(group_layout.get("layout", "")).strip().lower() in prohibited:
+                        orientation = str(group_layout.get("stick_orientation", "edge")).strip().lower()
+                        is_flat = orientation in {"flat", "horizontal", "deitado"}
+                        layouts[str(group)] = {
+                            "layout": "solid_face_laminated_flat" if is_flat else "solid_face_laminated_edge",
+                            "stick_orientation": "flat" if is_flat else "edge",
+                            "joint_quality": "face_laminated",
+                            "spacing_y_mm": 0.0,
+                            "spacing_z_mm": 0.0,
+                        }
+                        add_compat_warning(
+                            f"section_layout_by_group.{group} migrado de seção oca para laminação maciça face-a-face."
+                        )
+
+        # Conexões estruturais devem transferir esforço por área de face.
+        # Ponta-a-ponta só permanece admitida quando estabilizada por tala
+        # face-a-face com comprimento de ancoragem em ambos os lados da emenda.
+        if bool(detail.get("physical_connection_policy_enabled", False)):
+            detail["forbid_plain_butt_connections"] = True
+            detail["require_face_splints_for_butt_connections"] = True
+            detail["minimum_face_splints_per_butt_joint"] = max(1, int(detail.get("minimum_face_splints_per_butt_joint", 1)))
+            if str(detail.get("splice_mode", "butt_with_splints")).strip().lower() in {"butt", "butt_plain", "plain_butt"}:
+                detail["splice_mode"] = "butt_with_splints"
+            detail["reinforcement_sticks_per_splice"] = max(
+                int(detail.get("reinforcement_sticks_per_splice", 1)),
+                int(detail["minimum_face_splints_per_butt_joint"]),
+            )
+            # As diagonais laterais são montadas com segmentos adjacentes e
+            # uma tala face-a-face longa, centrada na emenda; não há overlap
+            # axial oculto entre os palitos principais no CAD.
+            group_modes = detail.setdefault("splice_mode_by_group", {})
+            group_modes.setdefault("diagonal", "butt_with_splints")
+            group_splints = detail.setdefault("splints_per_splice_by_group", {})
+            group_splints["diagonal"] = max(
+                int(group_splints.get("diagonal", detail["minimum_face_splints_per_butt_joint"])),
+                int(detail["minimum_face_splints_per_butt_joint"]),
+            )
+            detail.setdefault("splint_length_mm_by_group", {}).setdefault("diagonal", 25.0)
+            # Em um membro laminado, dois segmentos consecutivos da mesma
+            # linha não podem ocupar o mesmo volume. Continuidade é obtida por
+            # juntas desencontradas, ponteadas pelas lâminas vizinhas coladas
+            # face-a-face; peças de uma única linha usam tala explícita.
+            detail.setdefault("forbid_same_lane_axial_interpenetration", True)
+            detail.setdefault(
+                "nonoverlap_staggered_laminate_groups",
+                ["top_chord", "vertical", "top_transverse", "bottom_transverse", "support_pad"],
+            )
+            detail.setdefault("laminated_butt_bridge_overlap_mm", 20.0)
+            detail.setdefault("laminated_butt_joint_stagger_mm", 25.0)
+            detail.setdefault("same_lane_interpenetration_audit_enabled", True)
+            detail.setdefault("solid_face_laminated_continuous_glue_mass_enabled", True)
+            detail.setdefault("top_chord_transition_cover_relief_enabled", False)
+            detail.setdefault("top_chord_transition_cover_relief_mm", 4.0)
+            detail.setdefault("top_chord_transition_cover_relief_lane_roles", ["capa_externa_inferior_1"])
+            detail.setdefault("render_physical_face_splints_enabled", True)
+            visible_groups = [str(v) for v in detail.get("render_physical_splints_by_group", [])]
+            if "diagonal" not in visible_groups:
+                visible_groups.append("diagonal")
+            detail["render_physical_splints_by_group"] = visible_groups
+            detail.setdefault("top_chord_seated_above_vertical_enabled", True)
+            detail.setdefault("top_chord_centroid_seat_raise_mm", 6.5)
+            detail.setdefault("top_chord_transition_miter_reverse_side_enabled", True)
+            detail.setdefault("top_chord_outer_transition_single_receiving_cut_enabled", True)
+            detail.setdefault("vertical_trim_to_top_chord_underside_enabled", True)
+            detail.setdefault(
+                "vertical_top_chord_underside_trim_mm",
+                float(detail.get("top_chord_centroid_seat_raise_mm", 6.5) or 6.5),
+            )
+            detail.setdefault("miter_cut_primary_host_priority_by_member_group", {}).setdefault(
+                "vertical", ["top_chord", "bottom_chord", "diagonal"]
+            )
+
+        if bool(detail.get("bottom_chord_tee_profile_enabled", False)):
+            cfg.setdefault("section_layout_by_group", {})["bottom_chord"] = {
+                "layout": "tee_top",
+                "stick_orientation": "mixed",
+                "joint_quality": "normal",
+                "spacing_y_mm": 0.0,
+                "spacing_z_mm": 0.0,
+            }
+            cfg.setdefault("member_sticks_by_group", {})["bottom_chord"] = 2
+            local = cfg.setdefault("planner", {}).setdefault("local_sizing", {})
+            local.setdefault("min_sticks_primary_member_by_group", {})["bottom_chord"] = 2
+            analysis = cfg.setdefault("analysis", {})
+            analysis.setdefault("planner_min_sticks_per_group_by_group", {})["bottom_chord"] = 2
+            if bool(detail.get("bottom_chord_tee_lock_two_stick_section", True)):
+                analysis.setdefault("planner_max_sticks_per_group_by_group", {})["bottom_chord"] = 2
+                cfg.setdefault("member_sizing", {})["enable_bottom_chord_tension_donor_trim"] = False
+            detail.setdefault("bottom_chord_continuous_tee_fabrication_enabled", True)
+            detail.setdefault("bottom_chord_tee_flange_phase_mm", 50.0)
+            detail.setdefault("bottom_chord_tee_web_splice_mode", "face_overlap")
+            detail.setdefault("bottom_chord_tee_web_overlap_mm", 20.0)
+            detail.setdefault("bottom_chord_tee_web_piece_count_per_side", 14)
+            detail.setdefault("bottom_chord_tee_web_alternate_face_layers_enabled", True)
+            detail.setdefault("bottom_chord_tee_web_layer_offset_y_mm", 0.5 * float(cfg.get("material", {}).get("stick_thickness_mm", 1.5)))
+            detail.setdefault("bottom_chord_tee_web_splints_per_splice", 0)
+            detail.setdefault("bottom_chord_tee_web_overlap_reinforcement_enabled", True)
+            detail.setdefault("bottom_chord_tee_web_overlap_reinforcement_length_mm", 25.0)
+            detail.setdefault("bottom_chord_tee_web_overlap_target_fs", float(cfg.get("analysis", {}).get("acceptance_min_glue_fs", 1.5)))
+            detail.setdefault("bottom_chord_tee_flange_splice_mode", "face_overlap")
+            detail.setdefault("bottom_chord_tee_flange_overlap_mm", 20.0)
+            detail.setdefault("bottom_chord_tee_flange_splints_per_splice", 0)
+            detail.setdefault("bottom_chord_tee_flange_overlap_reinforcement_enabled", True)
+            detail.setdefault("bottom_chord_tee_flange_overlap_reinforcement_length_mm", 20.0)
+            detail.setdefault("bottom_chord_tee_flange_overlap_target_fs", float(cfg.get("analysis", {}).get("acceptance_min_glue_fs", 1.5)))
+            detail.setdefault("bottom_chord_tee_reinforcement_length_mm", 50.0)
+            if bool(detail.get("vertical_seated_on_bottom_flange_enabled", True)):
+                stack_offsets = detail.setdefault("contact_stack_offsets_mm", {})
+                stack_offsets["vertical_y"] = 0.0
+                stack_offsets.setdefault("diagonal_y", 1.5)
+                no_setback = [str(v) for v in detail.get("side_lap_no_axis_setback_groups", [])]
+                detail["side_lap_no_axis_setback_groups"] = [v for v in no_setback if v != "vertical"]
 
         self._validate_normalized(cfg)
         return cfg
@@ -2062,7 +2281,10 @@ class ConfigService:
         planner.setdefault("design_mode", "simple_buildable_bridge")
         planner.setdefault("prefer_simple_buildable_archetypes", True)
         if planner.get("design_mode") == "simple_buildable_bridge" or planner.get("prefer_simple_buildable_archetypes", True):
-            if str(detail.get("splice_mode", "overlap")).strip().lower() == "overlap":
+            if (
+                str(detail.get("splice_mode", "overlap")).strip().lower() == "overlap"
+                and not bool(detail.get("physical_connection_policy_enabled", False))
+            ):
                 detail["splice_mode"] = "butt_with_splints"
             detail.setdefault("min_node_lap_overlap_mm", 25.0)
             detail.setdefault("node_lap_overlap_mm", 35.0)
@@ -2225,6 +2447,86 @@ class ConfigService:
         if mass_limit_g is not None:
             cfg.setdefault("material", {})["mass_limit_g"] = mass_limit_g
 
+        return self.normalize(cfg)
+
+    def from_fixed_design_inputs(
+        self,
+        base: Dict[str, Any],
+        *,
+        target_load_kgf: float,
+        target_breaking_load_kgf: float,
+        max_bridge_mass_g: float,
+        target_bridge_mass_g: float | None,
+        E_MPa: float,
+        stick_length_mm: float,
+        stick_width_mm: float,
+        stick_thickness_mm: float,
+        stick_mass_g: float,
+        tension_capacity_per_stick_kgf: float,
+        compression_capacity_one_stick_kgf: float,
+        compression_capacity_two_sticks_kgf: float,
+        glue_shear_strength_MPa: float,
+        overlap_length_mm: float,
+        target_min_fs: float,
+        run_frame3dd: bool = True,
+        generate_piece_views: bool = True,
+    ) -> Dict[str, Any]:
+        """Executa um projeto congelado sem redesenhar a malha estrutural.
+
+        Esta via preserva bridge/topologia/member_sticks_by_id exatamente como
+        validados. Ela existe porque os overrides por ``member_id`` somente são
+        válidos para a enumeração de membros da geometria que os originou.
+        """
+        cfg = copy.deepcopy(base)
+        bridge = cfg.setdefault("bridge", {})
+        mat = cfg.setdefault("material", {})
+        detail = cfg.setdefault("detail_model", {})
+        analysis = cfg.setdefault("analysis", {})
+        planner = cfg.setdefault("planner", {})
+
+        bridge["load_total_kgf"] = float(target_load_kgf)
+        mat.update(
+            {
+                "E_MPa": float(E_MPa),
+                "stick_length_mm": float(stick_length_mm),
+                "stick_width_mm": float(stick_width_mm),
+                "stick_thickness_mm": float(stick_thickness_mm),
+                "stick_mass_g": float(stick_mass_g),
+                "mass_limit_g": float(max_bridge_mass_g),
+                "tension_capacity_per_stick_kgf": float(tension_capacity_per_stick_kgf),
+                "compression_capacity_one_stick_kgf": float(compression_capacity_one_stick_kgf),
+                "compression_capacity_two_sticks_kgf": float(compression_capacity_two_sticks_kgf),
+            }
+        )
+        detail["glue_shear_strength_MPa"] = float(glue_shear_strength_MPa)
+        if overlap_length_mm is not None and not bool(detail.get("auto_splice_overlap_enabled", True)):
+            detail["overlap_length_mm"] = float(overlap_length_mm)
+
+        target_mass = (
+            float(target_bridge_mass_g)
+            if target_bridge_mass_g is not None
+            else float(max_bridge_mass_g) * 0.85
+        )
+        planner.update(
+            {
+                "target_load_kgf": float(target_load_kgf),
+                "target_breaking_load_kgf": float(target_breaking_load_kgf),
+                "max_bridge_mass_g": float(max_bridge_mass_g),
+                "target_bridge_mass_g": float(target_mass),
+                "user_design_domain_locked": True,
+            }
+        )
+        analysis.update(
+            {
+                "target_min_fs": float(target_min_fs),
+                "acceptance_min_design_breaking_load_kgf": float(target_breaking_load_kgf),
+                "use_target_min_fs_as_hard_acceptance": False,
+                "optimize_variants": False,
+                "active_planner_enabled": False,
+                "run_frame3dd_if_available": bool(run_frame3dd),
+            }
+        )
+        detail["generate_piece_views"] = bool(generate_piece_views)
         return self.normalize(cfg)
 
     def from_planner_inputs(

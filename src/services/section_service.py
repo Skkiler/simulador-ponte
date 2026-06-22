@@ -120,6 +120,95 @@ class SectionService:
 
 
     @staticmethod
+    def _top_tee_sticks(
+        n: int,
+        stick_width_mm: float,
+        stick_thickness_mm: float,
+    ) -> List[Dict[str, float | str]]:
+        """Return a buildable upper-T bottom-chord section.
+
+        The web is oriented on edge and remains the primary tension path.  The
+        upper flange is flat so verticals and side-truss diagonals can be seated
+        on a real glue table.  Additional sticks grow symmetrically, avoiding
+        volume overlap and preserving an upper-face connection surface.
+        """
+        n = max(1, int(n))
+        b = float(stick_width_mm)
+        t = float(stick_thickness_mm)
+
+        def rec(y: float, z: float, orient: str) -> Dict[str, float | str]:
+            if orient == "edge":
+                return {"y": y, "z": z, "ydim": t, "zdim": b, "orientation": "edge"}
+            return {"y": y, "z": z, "ydim": b, "zdim": t, "orientation": "flat"}
+
+        if n == 1:
+            return [rec(0.0, 0.0, "edge")]
+
+        # A seção de projeto usa duas lâminas: alma em pé e mesa superior.
+        # Para n>2, reforços crescem alternadamente na mesa e na alma sem
+        # invalidar o perfil T; o projeto travado normalmente mantém n=2.
+        n_flange = max(1, (n + 1) // 2)
+        n_web = max(1, n - n_flange)
+        flange_z = 0.5 * (b + t)
+        sticks: List[Dict[str, float | str]] = []
+        for k in range(n_web):
+            y = (k - 0.5 * (n_web - 1)) * t
+            sticks.append(rec(y, 0.0, "edge"))
+        for k in range(n_flange):
+            y = (k - 0.5 * (n_flange - 1)) * b
+            sticks.append(rec(y, flange_z, "flat"))
+        return sticks
+
+
+    @staticmethod
+    def _closed_sandwich_sticks(
+        n: int,
+        stick_width_mm: float,
+        stick_thickness_mm: float,
+    ) -> List[Dict[str, float | str]]:
+        """Seção sanduíche fechada por contato de faces largas.
+
+        A fabricação representada é a informada para o protótipo: quatro
+        palitos centrais em pé, colados face a face, duas capas horizontais
+        fechando o núcleo e, para n=8, duas lâminas externas contínuas que
+        unem longitudinalmente os subconjuntos do banzo superior. Nenhuma
+        rigidez de caixa vazia ou contato por aresta é creditada.
+        """
+        n = max(1, int(n))
+        if n < 6 or n % 2 != 0:
+            raise ValueError(
+                "A seção sanduíche fechada exige 6 palitos mínimos e pares "
+                "externos simétricos adicionais (n par)."
+            )
+        b = float(stick_width_mm)
+        t = float(stick_thickness_mm)
+
+        def rec(y: float, z: float, orient: str, role: str) -> Dict[str, float | str]:
+            if orient == "edge":
+                return {"y": y, "z": z, "ydim": t, "zdim": b, "orientation": "edge", "role": role}
+            return {"y": y, "z": z, "ydim": b, "zdim": t, "orientation": "flat", "role": role}
+
+        # Núcleo maciço: quatro almas em pé com faces largas coladas entre si.
+        sticks: List[Dict[str, float | str]] = [
+            rec((k - 1.5) * t, 0.0, "edge", "nucleo_central") for k in range(4)
+        ]
+        cap_z = 0.5 * b + 0.5 * t
+        sticks.extend([
+            rec(0.0, -cap_z, "flat", "capa_interna_inferior"),
+            rec(0.0, cap_z, "flat", "capa_interna_superior"),
+        ])
+        # Pares externos: colados face a face sobre as capas existentes. Em
+        # n=8 representam os palitos que unem continuamente os grupos.
+        additional_pairs = (n - 6) // 2
+        for layer in range(1, additional_pairs + 1):
+            z = cap_z + layer * t
+            sticks.extend([
+                rec(0.0, -z, "flat", f"capa_externa_inferior_{layer}"),
+                rec(0.0, z, "flat", f"capa_externa_superior_{layer}"),
+            ])
+        return sticks
+
+    @staticmethod
     def rectangular_section(width_mm: float, thickness_mm: float) -> Dict[str, float]:
         b = float(width_mm)
         h = float(thickness_mm)
@@ -176,8 +265,18 @@ class SectionService:
             "laminated_rectangular": "stacked",
             "stacked_flat": "stacked",
             "stacked_edge": "stacked",
+            "solid_face_laminated_edge": "solid_face_laminated",
+            "solid_face_laminated_flat": "solid_face_laminated",
+            "face_laminated_solid": "solid_face_laminated",
+            "closed_sandwich_4core_2caps": "closed_sandwich",
+            "closed_sandwich_4core_2caps_2covers": "closed_sandwich",
+            "closed_face_sandwich_6": "closed_sandwich",
+            "closed_face_sandwich_8": "closed_sandwich",
             "contact_box": "box",
             "simple_box_with_real_spacers": "box",
+            "top_tee": "tee_top",
+            "t_upper": "tee_top",
+            "tee": "tee_top",
         }
         layout = layout_aliases.get(requested_layout, requested_layout)
         orientation_raw = str(
@@ -199,9 +298,9 @@ class SectionService:
             "vertical",
         }
         stick_orientation = "edge" if orientation_raw in edge_orientations else "flat"
-        if requested_layout == "stacked_edge":
+        if requested_layout in {"stacked_edge", "solid_face_laminated_edge"}:
             stick_orientation = "edge"
-        elif requested_layout == "stacked_flat":
+        elif requested_layout in {"stacked_flat", "solid_face_laminated_flat"}:
             stick_orientation = "flat"
 
         b = float(material["stick_width_mm"])
@@ -225,6 +324,16 @@ class SectionService:
         elif layout == "side_by_side":
             start = -0.5 * (n - 1) * stick_y_mm
             positions = [(start + k * stick_y_mm, 0.0) for k in range(n)]
+        elif layout == "solid_face_laminated":
+            # Laminação maciça: a única superfície de união creditada é a face
+            # larga de cada palito. Para palitos em pé, as faces se encontram
+            # empilhando na direção y; para palitos deitados, na direção z.
+            if stick_orientation == "edge":
+                start = -0.5 * (n - 1) * stick_y_mm
+                positions = [(start + k * stick_y_mm, 0.0) for k in range(n)]
+            else:
+                start = -0.5 * (n - 1) * stick_z_mm
+                positions = [(0.0, start + k * stick_z_mm) for k in range(n)]
         elif layout == "double_stack":
             cols = max(1, int(layout_cfg.get("columns", 2)))
             rows = int(math.ceil(n / cols))
@@ -236,6 +345,12 @@ class SectionService:
                 c = idx % cols
                 r = idx // cols
                 positions.append((y0 + c * sy, z0 + r * sz))
+        elif layout == "tee_top":
+            stick_defs = cls._top_tee_sticks(n, b, t)
+            positions = [(float(v["y"]), float(v["z"])) for v in stick_defs]
+        elif layout == "closed_sandwich":
+            stick_defs = cls._closed_sandwich_sticks(n, b, t)
+            positions = [(float(v["y"]), float(v["z"])) for v in stick_defs]
         elif layout == "box":
             stick_defs = cls._contact_box_sticks(
                 n,
@@ -330,9 +445,20 @@ class SectionService:
             effective_layout = "legacy_spaced_box"
         elif layout == "box":
             effective_layout = "contact_box"
+        if layout == "tee_top":
+            effective_layout = "tee_top"
+        elif layout == "closed_sandwich":
+            effective_layout = "closed_sandwich_4core_2caps" if n == 6 else "closed_sandwich_4core_2caps_2covers"
+        elif layout == "solid_face_laminated":
+            effective_layout = "solid_face_laminated_edge" if stick_orientation == "edge" else "solid_face_laminated_flat"
         section_connection_model = {
             "single": "single_stick",
+            "tee_top": "upper_T_continuous_web_flange_contact",
             "laminated2": "face_to_face_lamination",
+            "solid_face_laminated_edge": "solid_face_to_face_lamination_edge",
+            "solid_face_laminated_flat": "solid_face_to_face_lamination_flat",
+            "closed_sandwich_4core_2caps": "closed_face_sandwich_core_caps",
+            "closed_sandwich_4core_2caps_2covers": "closed_face_sandwich_core_caps_external_covers",
             "tee3": "mixed_T_contact_lamination",
             "contact_box": "four_side_contact_box_with_face_side_glue",
             "legacy_spaced_box": "legacy_spaced_box_not_recommended",
@@ -393,6 +519,7 @@ class SectionService:
             "stick_width_y_mm_by_lane": ydims,
             "stick_height_z_mm_by_lane": zdims,
             "stick_positions_yz": positions,
+            "stick_roles": [str(v.get("role", "lamina")) for v in stick_defs],
             "requested_box_extra_stick_strategy": box_strategy if layout == "box" else "",
             "laced_box_demoted_to_contact": bool(layout == "box" and box_strategy in {"spaced", "spaced_box", "laced", "laced_box"} and effective_layout == "contact_box"),
             "buckling_I_critical_mm4": min(Iy, Iz),

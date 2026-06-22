@@ -10,7 +10,7 @@
     "left_support_overhang_mm": 100.0,
     "right_support_overhang_mm": 100.0,
     "panel_mm": 120.0,
-    "width_mm": 150.0,
+    "width_mm": 115.0,
     "end_height_mm": 96.04166666666667,
     "center_height_mm": 272.5,
     "plateau_start_mm": 400.0,
@@ -40,9 +40,9 @@
     "unilateral_supports": true,
     "truss_type": "Pratt_symmetric",
     "top_profile": "parker_plateau",
-    "internal_truss_type": "Pratt_symmetric",
-    "top_chord_truss_type": "Warren_symmetric",
-    "bottom_chord_truss_type": "Warren_symmetric",
+    "internal_truss_type": "Warren_symmetric",
+    "top_chord_truss_type": "none",
+    "bottom_chord_truss_type": "none",
     "load_distribution_model": "plate_surface_uniform",
     "load_footprint_length_mm": 400.0,
     "load_footprint_width_mm": 160.0,
@@ -51,7 +51,14 @@
     "load_footprint_center_x_mm": 600.0,
     "load_crown_contact_z_tolerance_mm": 1.0,
     "load_spreader_side_equalization": 0.88,
-    "side_truss_type": "Pratt_symmetric"
+    "side_truss_type": "Pratt_symmetric",
+    "cross_frame_truss_type": "Warren_symmetric",
+    "chord_plane_bracing_interpretation": "transverse_ties_only_top_and_bottom",
+    "cross_frame_bracing_interpretation": "alternating_internal_diagonal_between_left_and_right_verticals",
+    "top_chord_exclude_support_overhang_panels": false,
+    "vertical_exclude_support_overhang_stations": false,
+    "top_transverse_exclude_support_overhang_stations": false,
+    "side_diagonal_exclude_support_overhang_panels": false
   },
   "material": {
     "name": "Palito de picolé equivalente",
@@ -82,7 +89,7 @@
     "compression_area_cap_max_multiplier_vs_table": 1.75
   },
   "member_sticks_by_group": {
-    "bottom_chord": 3,
+    "bottom_chord": 2,
     "top_chord": 8,
     "vertical": 4,
     "diagonal": 1,
@@ -91,7 +98,7 @@
     "top_bracing": 1,
     "bottom_bracing": 1,
     "cross_frame_bracing": 1,
-    "support_pad": 4
+    "support_pad": 5
   },
   "effective_length_factor_by_group": {
     "bottom_chord": {
@@ -145,7 +152,7 @@
   },
   "planner": {
     "target_load_kgf": 80.0,
-    "target_breaking_load_kgf": 100.0,
+    "target_breaking_load_kgf": 80.0,
     "stretch_breaking_load_kgf": 120.0,
     "max_bridge_mass_g": 1000.0,
     "target_bridge_mass_g": 950.0,
@@ -166,30 +173,27 @@
       "max_local_iterations": 6,
       "require_topology_validation_after_removal": true,
       "min_sticks_primary_member_by_group": {
-        "top_chord": 6,
-        "bottom_chord": 3,
-        "vertical": 3,
-        "diagonal": 2,
+        "top_chord": 8,
+        "bottom_chord": 2,
+        "vertical": 4,
+        "diagonal": 1,
         "top_transverse": 1,
         "bottom_transverse": 1,
-        "support_pad": 4
+        "support_pad": 5
+      },
+      "max_sticks_primary_member_by_group": {
+        "top_chord": 8
       }
     },
     "use_stretch_breaking_load_as_acceptance": false,
     "consider_internal_trusses": [
-      "Pratt_symmetric",
-      "Warren_symmetric",
-      "Howe_inverted"
+      "Warren_symmetric"
     ],
     "consider_top_chord_trusses": [
-      "Pratt_symmetric",
-      "Warren_symmetric",
-      "Howe_inverted"
+      "none"
     ],
     "consider_bottom_chord_trusses": [
-      "Warren_symmetric",
-      "Pratt_symmetric",
-      "Howe_inverted"
+      "none"
     ],
     "consider_top_profiles": [
       "parker_plateau"
@@ -211,9 +215,7 @@
     ],
     "simple_flat_height_mm": 180.0,
     "consider_side_trusses": [
-      "Pratt_symmetric",
-      "Warren_symmetric",
-      "Howe_inverted"
+      "Pratt_symmetric"
     ]
   },
   "analysis": {
@@ -227,7 +229,7 @@
     "acceptance_min_primary_fs": 1.05,
     "acceptance_min_support_fs": 1.0,
     "acceptance_min_glue_fs": 1.5,
-    "acceptance_min_design_breaking_load_kgf": 100.0,
+    "acceptance_min_design_breaking_load_kgf": 80.0,
     "use_target_min_fs_as_hard_acceptance": false,
     "planner_objective_profile": "max_strength_per_competition_mass",
     "tension_only_groups": [
@@ -251,7 +253,7 @@
       "bottom_bracing",
       "cross_frame_bracing"
     ],
-    "optimize_variants": true,
+    "optimize_variants": false,
     "snap_panel_to_even_span_divisor": true,
     "frame3dd_stabilize_rigid_body_modes": true,
     "frame3dd_fix_support_rotations": false,
@@ -267,21 +269,26 @@
     },
     "planner_min_sticks_per_group_by_group": {
       "top_chord": 8,
-      "bottom_chord": 3,
+      "bottom_chord": 2,
       "vertical": 4,
       "diagonal": 1,
-      "support_pad": 4,
+      "support_pad": 5,
       "top_transverse": 2,
       "bottom_transverse": 2
     },
     "use_quarter_model": false,
     "quarter_model_available_for_debug": true,
-    "acceptance_min_torsion_80_20_kgf": 80.0
+    "acceptance_min_torsion_80_20_kgf": 80.0,
+    "planner_max_sticks_per_group_by_group": {
+      "bottom_chord": 2,
+      "top_chord": 10
+    },
+    "clean_output_root_before_run": true
   },
   "detail_model": {
     "enabled": true,
-    "splice_mode": "butt_with_splints",
-    "overlap_length_mm": 0.0,
+    "splice_mode": "overlap",
+    "overlap_length_mm": 20.0,
     "min_end_margin_mm": 15.0,
     "reinforcement_length_mm": 25.0,
     "reinforcement_sticks_per_splice": 1,
@@ -303,7 +310,8 @@
         "weak": 0.55,
         "normal": 0.7,
         "laced": 0.85,
-        "continuous_box": 0.9
+        "continuous_box": 0.9,
+        "face_laminated": 0.7
       },
       "eta_A": 1.0
     },
@@ -321,7 +329,7 @@
     "node_face_lap_enabled": true,
     "node_lap_overlap_mm": 35.0,
     "min_node_lap_overlap_mm": 25.0,
-    "terminal_joint_area_factor": 14.0,
+    "terminal_joint_area_factor": 1.0,
     "terminal_joint_secondary_bending_factor": 1.0,
     "angled_end_cuts_enabled": true,
     "end_cut_angle_increment_deg": 5.0,
@@ -419,10 +427,7 @@
     ],
     "x_bracing_layered_solution_documented": true,
     "x_bracing_midspan_joint_required": false,
-    "simple_even_box_section_groups": [
-      "top_chord",
-      "vertical"
-    ],
+    "simple_even_box_section_groups": [],
     "miter_cut_visual_flip_sign": false,
     "piece_view_mounted_connection_offset_scale": 0.0,
     "piece_view_exploded_connection_offset_scale": 0.75,
@@ -437,16 +442,15 @@
     "auto_expand_node_lap_physical_offset_groups": true,
     "node_lap_visual_side_offset_max_mm": 14.0,
     "auto_shrink_node_lap_physical_offsets": true,
-    "auto_balance_compression_section_layouts": true,
+    "auto_balance_compression_section_layouts": false,
     "side_lap_groups_skip_axis_setback": true,
     "side_lap_no_axis_setback_groups": [
-      "vertical",
       "diagonal",
       "top_transverse",
       "bottom_transverse",
-      "top_bracing",
       "bottom_bracing",
-      "chord_lacing"
+      "chord_lacing",
+      "cross_frame_bracing"
     ],
     "auto_lightweight_butt_splints": true,
     "as_built_face_contact_tolerance_mm": 1.6,
@@ -454,57 +458,217 @@
     "auto_mountable_layer_offsets": true,
     "node_lap_physical_offset_model": "contact_stack_not_exploded",
     "contact_stack_offsets_mm": {
-      "vertical_y": 10.0,
-      "diagonal_y": 12.0,
+      "vertical_y": 0.0,
+      "diagonal_y": 5.75,
       "top_bracing_y": 14.0,
-      "bottom_bracing_y": 14.0,
+      "bottom_bracing_y": 4.5,
       "top_transverse_z": 4.8,
       "bottom_transverse_z": -4.8,
       "support_pad_z": -4.8,
-      "cross_frame_bracing_x": 4.0
+      "cross_frame_bracing_x": 0.0,
+      "top_bracing_z": 0.0,
+      "bottom_bracing_z": -6.375
     },
     "joint_min_setback_by_group": {
-      "cross_frame_bracing": 8.0
+      "cross_frame_bracing": 0.0
     },
-    "auto_reduce_floating_contact_stack_offsets": true
+    "auto_reduce_floating_contact_stack_offsets": true,
+    "bottom_chord_tee_profile_enabled": true,
+    "bottom_chord_tee_lock_two_stick_section": true,
+    "bottom_chord_continuous_tee_fabrication_enabled": true,
+    "bottom_chord_tee_flange_phase_mm": 50.0,
+    "bottom_chord_tee_web_splints_per_splice": 0,
+    "bottom_chord_tee_flange_splints_per_splice": 0,
+    "bottom_chord_tee_reinforcement_length_mm": 50.0,
+    "vertical_seated_on_bottom_flange_enabled": true,
+    "simple_chord_transverse_only_enabled": true,
+    "internal_cross_frame_zigzag_enabled": true,
+    "loaded_top_transverse_reinforcement_enabled": false,
+    "loaded_top_transverse_extra_sticks": 1,
+    "loaded_top_transverse_min_sticks": 2,
+    "loaded_top_transverse_max_sticks": 3,
+    "miter_cut_primary_host_priority_by_member_group": {
+      "cross_frame_bracing": [
+        "vertical",
+        "top_chord",
+        "bottom_chord",
+        "top_transverse",
+        "bottom_transverse",
+        "diagonal"
+      ],
+      "diagonal": [
+        "vertical",
+        "bottom_chord",
+        "top_chord",
+        "diagonal"
+      ],
+      "vertical": [
+        "top_chord",
+        "bottom_chord",
+        "diagonal"
+      ]
+    },
+    "miter_cut_required_both_ends_groups": [
+      "diagonal",
+      "cross_frame_bracing"
+    ],
+    "internal_cross_frame_station_diaphragms_enabled": true,
+    "internal_cross_frame_station_diaphragm_interval_panels": 2,
+    "internal_cross_frame_station_diaphragm_at_loaded_top_nodes": true,
+    "internal_cross_frame_station_layer_x_mm": -4.25,
+    "internal_cross_frame_longitudinal_layer_x_mm": 0.0,
+    "internal_cross_frame_mounted_inner_face_y_mm": 5.0,
+    "internal_bracing_exclude_support_overhang_panels": false,
+    "internal_longitudinal_bracing_exclude_support_overhang_panels": false,
+    "internal_cross_frame_longitudinal_terminal_face_x_mm": 4.25,
+    "physical_connection_policy_enabled": true,
+    "physical_connection_policy_name": "face_contact_only_no_plain_butt_no_edge_bond_credit",
+    "allowed_structural_joint_families": [
+      "face_overlap",
+      "face_lamination",
+      "butt_with_double_face_splints",
+      "terminal_face_lap"
+    ],
+    "forbid_plain_butt_connections": true,
+    "forbid_unreinforced_edge_or_side_connections": true,
+    "require_face_splints_for_butt_connections": true,
+    "minimum_face_splints_per_butt_joint": 1,
+    "bottom_chord_tee_web_splice_mode": "face_overlap",
+    "bottom_chord_tee_web_overlap_mm": 20.0,
+    "bottom_chord_tee_web_piece_count_per_side": 14,
+    "bottom_chord_tee_web_alternate_face_layers_enabled": true,
+    "bottom_chord_tee_web_layer_offset_y_mm": 0.75,
+    "bottom_chord_tee_interface_axial_credit_policy": "web_primary_flange_seat_interface_requires_test",
+    "solid_face_laminated_primary_members_enabled": true,
+    "forbid_hollow_structural_sections": true,
+    "top_chord_solid_monolithic_laminate_enabled": false,
+    "top_chord_master_lamina_miter_required": true,
+    "top_chord_master_lamina_index": 1,
+    "bottom_chord_tee_flange_splice_mode": "face_overlap",
+    "bottom_chord_tee_flange_overlap_mm": 20.0,
+    "bottom_chord_tee_web_overlap_reinforcement_enabled": true,
+    "bottom_chord_tee_web_overlap_reinforcement_length_mm": 25.0,
+    "bottom_chord_tee_web_overlap_target_fs": 1.5,
+    "top_chord_solid_laminate_orientation": "flat",
+    "top_chord_three_inclined_solid_blocks_per_side_enabled": false,
+    "top_chord_required_inclined_blocks_per_side": 3,
+    "bottom_chord_tee_flange_overlap_reinforcement_enabled": true,
+    "bottom_chord_tee_flange_overlap_reinforcement_length_mm": 20.0,
+    "bottom_chord_tee_flange_overlap_target_fs": 1.5,
+    "generic_face_overlap_physical_layers_enabled": true,
+    "generic_face_overlap_physical_layer_groups": [
+      "cross_frame_bracing"
+    ],
+    "generic_face_overlap_layer_offset_mm": 1.55,
+    "top_chord_inclined_members_are_monolithic_solid_face_laminates": true,
+    "top_chord_physical_diagonal_block_count_note": "Quantidade exata de blocos inclinados deve ser conferida no gabarito; cada segmento inclinado modelado e macico face-a-face.",
+    "top_chord_closed_sandwich_enabled": true,
+    "sandwich_continuous_face_glue_mass_enabled": true,
+    "sandwich_accounting_policy": "continuous_face_glue_mass_counted_composite_action_via_eta_I",
+    "vertical_closed_sandwich_stations_mm": [
+      0.0,
+      1300.0
+    ],
+    "single_piece_chord_transverse_ties_enabled": true,
+    "original_bridge_width_before_single_piece_ties_mm": 150.0,
+    "single_piece_chord_transverse_max_centerline_span_mm": 115.0,
+    "splice_mode_by_group": {
+      "diagonal": "butt_with_splints"
+    },
+    "splints_per_splice_by_group": {
+      "diagonal": 1
+    },
+    "splint_length_mm_by_group": {
+      "diagonal": 40.0
+    },
+    "render_physical_splints_by_group": [
+      "diagonal"
+    ],
+    "render_physical_face_splints_enabled": true,
+    "top_chord_seated_above_vertical_enabled": true,
+    "top_chord_centroid_seat_raise_mm": 6.5,
+    "top_chord_transition_miter_reverse_side_enabled": true,
+    "vertical_trim_to_top_chord_underside_enabled": true,
+    "vertical_top_chord_underside_trim_mm": 6.5,
+    "top_chord_outer_transition_miter_flip_enabled": true,
+    "top_chord_outer_transition_nodes_x_mm": [
+      0.0,
+      1200.0
+    ],
+    "top_chord_outer_transition_single_receiving_cut_enabled": true,
+    "forbid_same_lane_axial_interpenetration": true,
+    "nonoverlap_staggered_laminate_groups": [
+      "top_chord",
+      "vertical",
+      "top_transverse",
+      "bottom_transverse",
+      "support_pad"
+    ],
+    "laminated_butt_bridge_overlap_mm": 20.0,
+    "laminated_butt_joint_stagger_mm": 25.0,
+    "same_lane_interpenetration_audit_enabled": true,
+    "solid_face_laminated_continuous_glue_mass_enabled": true,
+    "top_chord_inner_transition_single_receiving_cut_enabled": true,
+    "top_chord_inner_transition_nodes_x_mm": [
+      360.0,
+      840.0
+    ],
+    "top_chord_inner_transition_span_start_mm": 0.0,
+    "top_chord_inner_transition_span_end_mm": 1200.0,
+    "top_chord_inner_transition_tolerance_mm": 1e-06,
+    "top_chord_transition_cover_relief_enabled": true,
+    "top_chord_transition_cover_relief_mm": 4.0,
+    "top_chord_transition_cover_relief_lane_roles": [
+      "capa_externa_inferior_1",
+      "capa_externa_inferior_2"
+    ],
+    "support_overhang_upper_frame_restored_enabled": true,
+    "support_overhang_upper_frame_note": "Quadros superiores das sapatas restaurados em x=-100 e x=1300; os 11 montantes do vao principal permanecem nas estacoes x=0..1200.",
+    "support_overhang_spatial_bracing_required": true,
+    "restored_support_frame_mass_reinvestment_policy": "reforcar banzo superior comprimido e contato da sapata sem ultrapassar 50 g de margem alvo nominal",
+    "terminal_joint_area_factor_physical_cap": 1.0,
+    "terminal_joint_area_factor_note": "Uma junta terminal por lâmina considera somente a face física explicitamente modelada; valores maiores exigem faces adicionais representadas e ensaiadas."
   },
   "section_layout_by_group": {
     "bottom_chord": {
-      "layout": "contact_box",
-      "stick_orientation": "edge",
-      "spacing_y_mm": 0,
-      "spacing_z_mm": 0,
-      "box_extra_stick_strategy": "balanced"
+      "layout": "tee_top",
+      "stick_orientation": "mixed",
+      "joint_quality": "normal",
+      "spacing_y_mm": 0.0,
+      "spacing_z_mm": 0.0
     },
     "top_chord": {
-      "layout": "contact_box",
-      "stick_orientation": "edge",
-      "spacing_y_mm": 0,
-      "spacing_z_mm": 0,
-      "box_extra_stick_strategy": "balanced"
+      "layout": "closed_sandwich_4core_2caps_2covers",
+      "stick_orientation": "mixed",
+      "joint_quality": "face_laminated",
+      "spacing_y_mm": 0.0,
+      "spacing_z_mm": 0.0
     },
     "vertical": {
-      "layout": "contact_box",
+      "layout": "solid_face_laminated_edge",
       "stick_orientation": "edge",
-      "spacing_y_mm": 0,
-      "spacing_z_mm": 0,
-      "box_extra_stick_strategy": "balanced"
+      "joint_quality": "face_laminated",
+      "spacing_y_mm": 0.0,
+      "spacing_z_mm": 0.0
     },
     "diagonal": {
-      "layout": "double_stack",
-      "columns": 2,
-      "spacing_y_mm": 0,
-      "spacing_z_mm": 0
+      "layout": "stacked_edge",
+      "stick_orientation": "edge",
+      "joint_quality": "normal"
     },
     "top_transverse": {
-      "layout": "stacked",
-      "spacing_y_mm": 0,
-      "spacing_z_mm": 0
+      "layout": "solid_face_laminated_flat",
+      "stick_orientation": "flat",
+      "joint_quality": "face_laminated",
+      "spacing_y_mm": 0.0,
+      "spacing_z_mm": 0.0
     },
     "bottom_transverse": {
-      "layout": "stacked",
-      "spacing_y_mm": 0,
-      "spacing_z_mm": 0
+      "layout": "solid_face_laminated_flat",
+      "stick_orientation": "flat",
+      "joint_quality": "face_laminated",
+      "spacing_y_mm": 0.0,
+      "spacing_z_mm": 0.0
     },
     "top_bracing": {
       "layout": "single",
@@ -561,7 +725,7 @@
     "support_pad_push_max_proxy_mass_ratio": 1.0,
     "support_pad_push_proxy_mass_margin_g": 0.0,
     "ultimate_strength_target_kgf": 120.0,
-    "enable_plane_bracing_efficiency_mutation": true,
+    "enable_plane_bracing_efficiency_mutation": false,
     "plane_bracing_efficiency_min_break_retention": 0.995,
     "plane_bracing_efficiency_min_fs_retention": 0.94,
     "plane_bracing_efficiency_min_mass_saving_g": 8.0,
@@ -618,7 +782,7 @@
       10.0
     ],
     "section_efficiency_min_robustness_gain": 1.01,
-    "enable_bottom_chord_tension_donor_trim": true,
+    "enable_bottom_chord_tension_donor_trim": false,
     "bottom_chord_tension_donor_min_sticks": 1,
     "bottom_chord_tension_donor_min_fs_after": 2.0,
     "bottom_chord_tension_donor_min_mass_saving_g": 12.0,
@@ -768,5 +932,104 @@
   "member_group_defaults": {
     "support_pad": 5
   },
-  "optimizer": {}
+  "optimizer": {},
+  "member_sticks_by_signature": [
+    {
+      "group": "vertical",
+      "x_mm": 0.0,
+      "n_sticks": 6,
+      "match": "station_both_sides",
+      "purpose": "closed_sandwich_end_post_11_node_model"
+    },
+    {
+      "group": "vertical",
+      "x_mm": 480.0,
+      "n_sticks": 6,
+      "match": "station_both_sides",
+      "purpose": "compressed_post_local_reinforcement"
+    },
+    {
+      "group": "vertical",
+      "x_mm": 600.0,
+      "n_sticks": 5,
+      "match": "station_both_sides",
+      "purpose": "center_post_solid_laminate"
+    },
+    {
+      "group": "vertical",
+      "x_mm": 720.0,
+      "n_sticks": 6,
+      "match": "station_both_sides",
+      "purpose": "compressed_post_local_reinforcement"
+    },
+    {
+      "group": "vertical",
+      "x_mm": 1200.0,
+      "n_sticks": 6,
+      "match": "station_both_sides",
+      "purpose": "closed_sandwich_end_post_11_node_model"
+    },
+    {
+      "group": "top_chord",
+      "x_mm": 540.0,
+      "n_sticks": 10,
+      "match": "station_both_sides",
+      "tolerance_mm": 1e-06,
+      "purpose": "external_face_pair_reinforcement_using_mass_margin"
+    },
+    {
+      "group": "top_chord",
+      "x_mm": 660.0,
+      "n_sticks": 10,
+      "match": "station_both_sides",
+      "tolerance_mm": 1e-06,
+      "purpose": "external_face_pair_reinforcement_using_mass_margin"
+    },
+    {
+      "group": "top_chord",
+      "x_mm": 300.0,
+      "n_sticks": 10,
+      "match": "station_both_sides",
+      "tolerance_mm": 1e-06,
+      "purpose": "external_face_pair_reinforcement_next_governing_top_chord"
+    },
+    {
+      "group": "top_chord",
+      "x_mm": 900.0,
+      "n_sticks": 10,
+      "match": "station_both_sides",
+      "tolerance_mm": 1e-06,
+      "purpose": "external_face_pair_reinforcement_next_governing_top_chord"
+    }
+  ],
+  "section_layout_by_signature": [
+    {
+      "group": "vertical",
+      "x_mm": 0.0,
+      "match": "station_both_sides",
+      "tolerance_mm": 1e-06,
+      "section_layout": {
+        "layout": "closed_sandwich_4core_2caps",
+        "stick_orientation": "mixed",
+        "joint_quality": "face_laminated"
+      }
+    },
+    {
+      "group": "vertical",
+      "x_mm": 1200.0,
+      "match": "station_both_sides",
+      "tolerance_mm": 1e-06,
+      "section_layout": {
+        "layout": "closed_sandwich_4core_2caps",
+        "stick_orientation": "mixed",
+        "joint_quality": "face_laminated"
+      }
+    }
+  ],
+  "fabrication_validation": {
+    "fs_guided_reallocation_selected_variant": "top_chord_outer_and_high_fs_panels_to_sandwich6_plus_left_overhang_post_3",
+    "fs_guided_reallocation_min_breaking_load_kgf": 80.0,
+    "internal_diaphragm_reduction_rejected_due_to_solver_singularity": true,
+    "montante_layer_reductions_rejected_due_to_breaking_load_below_target": true
+  }
 }

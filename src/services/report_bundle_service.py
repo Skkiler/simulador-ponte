@@ -96,6 +96,19 @@ class ReportBundleService:
                     failures.append(f"S8 multi-loadcase: {s8_failed}")
 
         if not failures:
+            advisories: List[str] = []
+            target_fs = safe_float(analysis.get("target_min_fs"), None)
+            if target_fs is not None and min_primary < target_fs:
+                advisories.append(f"FS mínimo de membro {min_primary:.3f} abaixo do alvo recomendado {target_fs:.3f}")
+            mass_margin = (safe_float(metrics.get("mass_limit_effective_g"), 1000.0) or 1000.0) - (safe_float(metrics.get("competition_mass_g"), 0.0) or 0.0)
+            fabrication_reserve = safe_float((cfg.get("planner", {}).get("local_sizing", {}) or {}).get("mass_reserve_for_fabrication_g"), 25.0) or 25.0
+            if mass_margin < fabrication_reserve:
+                advisories.append(f"margem de massa {mass_margin:.2f} g abaixo da reserva prática de fabricação {fabrication_reserve:.2f} g")
+            frame_status = str(metrics.get("frame3dd_status", "") or "")
+            if frame_status and frame_status not in {"ok", "regular", "passed"}:
+                advisories.append(f"checagem Frame3DD não validou equivalência do modelo ({frame_status})")
+            if advisories:
+                return "APROVADA COM RESSALVAS", "Atende aos critérios mínimos configurados, porém: " + "; ".join(advisories) + ".", failures
             return "APROVADA", "Atende aos critérios de ruptura, massa, S8 multi-loadcase e regularidade do solver.", failures
 
         has_feasible = any(bool(r.get("feasible")) for r in self._iter_stage_rows(optimization))
@@ -527,11 +540,11 @@ Arquivo completo: `section_layout_audit.csv`.
             layout = str(item.get("layout"))
             n = int(item.get("n_sticks") or 1)
             if g == "top_chord":
-                note = "banzo superior comprimido: montar em gabarito rígido, orientação edge, seção box de contato; não afastar lanes como lacing não modelado"
+                note = "banzo superior comprimido: sanduíche fechado de 8 palitos (4 no núcleo, 2 capas internas e 2 capas externas contínuas); primeira lâmina do núcleo recebe os cortes-guia; cola longitudinal das faces contabilizada"
             elif g == "bottom_chord":
-                note = "banzo inferior/tirante: manter continuidade, emendas desencontradas e alinhamento longitudinal"
+                note = "banzo inferior em T: alma edge com 14 palitos por lateral sobrepostos 20 mm face-a-face; mesa flat também sobreposta face-a-face e reforçada localmente quando o FS da cola exigir"
             elif g == "vertical":
-                note = "montantes: colar como subpeças retas; controlar perpendicularidade e evitar flambagem por empeno"
+                note = "montantes: nas estações x=0 e x=1300 usar sanduíche fechado de 6 palitos (4 no núcleo + 2 capas); demais montantes mantêm a seção exportada; controlar perpendicularidade e flambagem"
             elif g == "diagonal":
                 note = "diagonais: montar em pares espelhados; não alinhar emendas em painéis vizinhos"
             elif "bracing" in g or "transverse" in g:
@@ -617,7 +630,7 @@ Arquivo completo: `05_mapa_juntas_por_tipo.csv`.
 
 ## 5. Visualizações de montagem
 - Geometria 3D com cargas, apoios e FS/uso: `../plots/01_geometria_3d_fs_uso.html`.
-- Geometria 3D com prismas reais completos: `../plots/02_geometria_3d_prismas_reais_completo.html`.
+- Geometria 3D com prismas reais completos: `../plots/02_montagem_3d_prismas_reais_interativa.html`.
 - Vistas 2D/CAD peça-a-peça gerais: `../plots/16_vistas_cad_peca_a_peca.png`.
 - Vistas 2D/CAD peça-a-peça por subconjunto: `../plots/cad_subconjuntos/`.
 - HTMLs peça-a-peça por subconjunto: `../plots/subconjuntos_html/`.
@@ -777,12 +790,260 @@ O tratamento `single_diagonal_no_crossing` substitui X por diagonais alternadas 
 {top_over}
 
 ## Interpretação
-- `face_to_face_lamination`: palitos colados por face, sem caixa falsa.
+- `face_to_face_lamination`: palitos colados por face, sem crédito para contato por aresta.
+- `closed_face_sandwich_core_caps_external_covers`: sanduíche fechado com núcleo, capas internas e capas externas contínuas; cola longitudinal contabilizada e ação composta reduzida por `eta_I`.
 - `mixed_T_contact_lamination`: seção de 3 palitos conectada; não é caixa.
 - `four_side_contact_box_with_face_side_glue`: caixa de 4+ palitos por contato lateral/face, coerente com montagem física.
 - Se qualquer contagem de falha for maior que zero, o relatório estrutural não deve ser usado como memorial final sem corrigir o detalhamento.
 """
         path = out / "09_auditoria_conectividade_e_cortes.md"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+
+    @staticmethod
+    def _md_number(value: Any, digits: int = 3) -> str:
+        number = safe_float(value, None)
+        return "—" if number is None else f"{number:.{digits}f}"
+
+    @staticmethod
+    def _md_text(value: Any) -> str:
+        if value in (None, ""):
+            return "—"
+        return str(value).replace("|", "/").replace("\n", " ")
+
+    def _write_complete_calculation_ledger(
+        self,
+        out: Path,
+        cfg: Dict[str, Any],
+        metrics: Dict[str, Any],
+        detailed: Dict[str, Any],
+    ) -> str:
+        """Exporta o memorial rastreável membro -> peça -> junta colada."""
+        member_rows = sorted(
+            list((detailed or {}).get("member_detail_checks", []) or []),
+            key=lambda r: int(r.get("member_id", 0) or 0),
+        )
+        piece_rows = sorted(
+            list((detailed or {}).get("stick_pieces", []) or []),
+            key=lambda r: (
+                str(r.get("member_group", "")),
+                int(r.get("member_id", 0) or 0),
+                int(r.get("lane", 0) or 0),
+                int(r.get("piece_index", 0) or 0),
+            ),
+        )
+        joint_rows = sorted(
+            list((detailed or {}).get("glue_joints", []) or []),
+            key=lambda r: (
+                str(r.get("member_group", "")),
+                int(r.get("member_id", 0) or 0),
+                str(r.get("joint_id", "")),
+            ),
+        )
+        detail = cfg.get("detail_model", {}) or {}
+        material = cfg.get("material", {}) or {}
+
+        group_summary: Dict[str, Dict[str, Any]] = {}
+        for r in member_rows:
+            group = str(r.get("group", "—"))
+            row = group_summary.setdefault(group, {"members": 0, "min_fs": None, "max_N": 0.0, "mode": "—"})
+            row["members"] += 1
+            fs = safe_float(r.get("FS_min_global"), None)
+            if fs is not None and (row["min_fs"] is None or fs < row["min_fs"]):
+                row["min_fs"] = fs
+                row["mode"] = r.get("governing_mode_global") or "—"
+            n = abs(safe_float(r.get("N_member_N"), 0.0) or 0.0)
+            row["max_N"] = max(row["max_N"], n)
+
+        grouped_lines = [
+            "| grupo | membros | |N| máximo (N) | FS mínimo pós-detalhe | modo governante |",
+            "| --- | ---: | ---: | ---: | --- |",
+        ]
+        for group in sorted(group_summary):
+            r = group_summary[group]
+            grouped_lines.append(
+                f"| {self._md_text(group)} | {r['members']} | {self._md_number(r['max_N'])} | {self._md_number(r['min_fs'])} | {self._md_text(r['mode'])} |"
+            )
+
+        member_lines = [
+            "| id | grupo | função | L (mm) | seção / n | A (mm²) | Iy (mm⁴) | Iz (mm⁴) | ηI | N (N) | σ axial (MPa) | M imperf. (N·mm) | σ comb. (MPa) | FS global | modo |",
+            "| ---: | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        ]
+        for r in member_rows:
+            member_lines.append(
+                "| {id} | {grp} | {role} | {L} | {layout} / {n} | {A} | {Iy} | {Iz} | {eta} | {N} | {sig} | {M} | {comb} | {FS} | {mode} |".format(
+                    id=self._md_text(r.get("member_id")), grp=self._md_text(r.get("group")), role=self._md_text(r.get("role")),
+                    L=self._md_number(r.get("member_length_mm")), layout=self._md_text(r.get("layout")), n=self._md_text(r.get("n_sticks_current")),
+                    A=self._md_number(r.get("section_A_mm2")), Iy=self._md_number(r.get("section_Iy_mm4")), Iz=self._md_number(r.get("section_Iz_mm4")),
+                    eta=self._md_number(r.get("section_eta_I")), N=self._md_number(r.get("N_member_N")), sig=self._md_number(r.get("sigma_axial_member_MPa")),
+                    M=self._md_number(r.get("M_imperfection_Nmm")), comb=self._md_number(r.get("sigma_combined_est_MPa")), FS=self._md_number(r.get("FS_min_global")),
+                    mode=self._md_text(r.get("governing_mode_global")),
+                )
+            )
+
+        piece_lines = [
+            "| palito | membro / grupo | faixa | papel | orientação | corte (mm) | massa (g) | N atribuído (N) | σ (MPa) | corte início / fim | hospedeiro início / fim |",
+            "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
+        ]
+        for r in piece_rows:
+            start = "sim" if bool(r.get("miter_cut_start_required", False)) else "não"
+            end = "sim" if bool(r.get("miter_cut_end_required", False)) else "não"
+            piece_lines.append(
+                "| {sid} | {mid} / {grp} | L{lane}-P{piece} | {role} | {ori} | {cut} | {mass} | {N} | {sig} | {sta} / {end} | {hs} / {he} |".format(
+                    sid=self._md_text(r.get("stick_id")), mid=self._md_text(r.get("member_id")), grp=self._md_text(r.get("member_group")),
+                    lane=self._md_text(r.get("lane")), piece=self._md_text(r.get("piece_index")), role=self._md_text(r.get("structural_lane_role")),
+                    ori=self._md_text(r.get("stick_orientation")), cut=self._md_number(r.get("shop_cut_length_mm", r.get("cut_length_mm"))),
+                    mass=self._md_number(r.get("mass_g")), N=self._md_number(r.get("N_piece_N")), sig=self._md_number(r.get("sigma_axial_piece_MPa")),
+                    sta=start, end=end, hs=self._md_text(r.get("miter_cut_start_host_group")), he=self._md_text(r.get("miter_cut_end_host_group")),
+                )
+            )
+
+        joint_lines = [
+            "| junta | membro / grupo | modelo | sobreposição (mm) | talas | área física cola (mm²) | força transferida (N) | τ cola (MPa) | FS cola | risco |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        ]
+        for r in joint_rows:
+            joint_lines.append(
+                "| {jid} | {mid} / {grp} | {model} | {ov} | {spl} | {area} | {force} | {tau} | {fs} | {risk} |".format(
+                    jid=self._md_text(r.get("joint_id")), mid=self._md_text(r.get("member_id")), grp=self._md_text(r.get("member_group")), model=self._md_text(r.get("joint_model")),
+                    ov=self._md_number(r.get("overlap_length_mm")), spl=self._md_text(r.get("splints_per_splice")), area=self._md_number(r.get("physical_glue_area_mm2")),
+                    force=self._md_number(r.get("force_transfer_N")), tau=self._md_number(r.get("glue_shear_MPa")), fs=self._md_number(r.get("FS_glue_shear")), risk=self._md_text(r.get("risk_flag")),
+                )
+            )
+
+        text = f"""# Memorial completo por membro, palito e junta
+
+Este arquivo é a rastreabilidade pós-detalhamento da estrutura fabricável. Ele lista as propriedades de seção efetivamente usadas, esforços axiais, momento de imperfeição para peças comprimidas, tensões combinadas, fatores de segurança, cortes de cada palito e verificação de cada junta colada registrada.
+
+## Hipóteses numéricas registradas
+
+| parâmetro | valor |
+| --- | ---: |
+| carga nominal total (N) | {self._md_number((cfg.get('bridge', {}) or {}).get('load_total_N'))} |
+| massa competitiva calculada (g) | {self._md_number(metrics.get('competition_mass_g', metrics.get('estimated_total_mass_g')))} |
+| limite de massa (g) | {self._md_number(metrics.get('mass_limit_effective_g', material.get('mass_limit_g')))} |
+| resistência de cisalhamento adotada para cola (MPa) | {self._md_number(detail.get('glue_shear_strength_MPa'))} |
+| excentricidade base de imperfeição (mm) | {self._md_number(detail.get('imperfection_eccentricity_mm'))} |
+| comprimento máximo de corte (mm) | {self._md_number(detail.get('max_cut_length_mm', material.get('stick_length_mm')))} |
+| comprimento mínimo construtivo (mm) | {self._md_number(detail.get('min_constructive_piece_length_mm'))} |
+
+## Síntese por grupo
+
+{chr(10).join(grouped_lines)}
+
+## Cálculo membro a membro
+
+{chr(10).join(member_lines)}
+
+## Rastreabilidade palito a palito
+
+{chr(10).join(piece_lines)}
+
+## Juntas e transferência por cola
+
+{chr(10).join(joint_lines)}
+
+## Leitura obrigatória
+
+A tabela permite localizar o ponto calculado mais solicitado, mas a carga real de ruptura depende da dispersão da madeira e da execução da cola. A validação física requer corpos de prova do lote de palitos e da junta empregada, além de conferência dimensional do gabarito e da cura.
+"""
+        path = out / "12_memorial_completo_membro_palito_junta.md"
+        path.write_text(text, encoding="utf-8")
+        GeometryService.write_csv(out / "12_memorial_membros.csv", member_rows)
+        GeometryService.write_csv(out / "12_memorial_palitos.csv", piece_rows)
+        GeometryService.write_csv(out / "12_memorial_juntas.csv", joint_rows)
+        return str(path)
+
+    def _write_model_basis_and_feature_audit(
+        self,
+        out: Path,
+        cfg: Dict[str, Any],
+        metrics: Dict[str, Any],
+        detailed: Dict[str, Any],
+    ) -> str:
+        pieces = list((detailed or {}).get("stick_pieces", []) or [])
+        joints = list((detailed or {}).get("glue_joints", []) or [])
+        summary = (detailed or {}).get("summary", {}) or {}
+        by_group: Dict[str, List[Dict[str, Any]]] = {}
+        for r in pieces:
+            by_group.setdefault(str(r.get("member_group", "")), []).append(r)
+
+        def endpoint_compliance(group: str) -> tuple[int, int]:
+            rows = by_group.get(group, [])
+            mids = sorted({int(r.get("member_id", 0) or 0) for r in rows})
+            compliant = 0
+            for mid in mids:
+                pr = [r for r in rows if int(r.get("member_id", 0) or 0) == mid]
+                has_start = any(bool(r.get("miter_cut_start_required", False)) for r in pr)
+                has_end = any(bool(r.get("miter_cut_end_required", False)) for r in pr)
+                if has_start and has_end:
+                    compliant += 1
+            return compliant, len(mids)
+
+        d_ok, d_total = endpoint_compliance("diagonal")
+        x_ok, x_total = endpoint_compliance("cross_frame_bracing")
+        tee = by_group.get("bottom_chord", [])
+        tee_web = [r for r in tee if str(r.get("structural_lane_role", "")) in {"tee_web", "alma"}]
+        tee_flange = [r for r in tee if str(r.get("structural_lane_role", "")) in {"tee_flange", "mesa_superior"}]
+        bottom_joints = [r for r in joints if str(r.get("member_group", "")) == "bottom_chord"]
+        min_bottom_glue = min((safe_float(r.get("FS_glue_shear"), 1.0e99) or 1.0e99 for r in bottom_joints), default=None)
+        max_cut = max((safe_float(r.get("shop_cut_length_mm", r.get("cut_length_mm")), 0.0) or 0.0 for r in pieces), default=0.0)
+        min_cut = min((safe_float(r.get("shop_cut_length_mm", r.get("cut_length_mm")), 1.0e99) or 1.0e99 for r in pieces), default=0.0)
+        bridge = cfg.get("bridge", {}) or {}
+        detail = cfg.get("detail_model", {}) or {}
+        analysis = cfg.get("analysis", {}) or {}
+        top_bracing_count = len(by_group.get("top_bracing", []))
+        bottom_bracing_count = len(by_group.get("bottom_bracing", []))
+        internal_count = len(by_group.get("cross_frame_bracing", []))
+
+        text = f"""# Validação da modelagem física e base técnica
+
+## Alterações construtivas verificadas
+
+| requisito de projeto | implementação auditada | situação |
+| --- | --- | --- |
+| Banzo inferior em T fabricável | alma vertical e mesa superior; fabricação contínua com juntas desencontradas | {'atendido' if tee_web and tee_flange else 'não atendido'} |
+| Sem zig-zag no plano do banzo inferior | peças `bottom_bracing` geradas: {bottom_bracing_count} | {'atendido' if bottom_bracing_count == 0 else 'não atendido'} |
+| Sem zig-zag longitudinal no banzo superior | peças `top_bracing` geradas: {top_bracing_count}; topo usa travessas transversais reforçadas nas estações carregadas | {'atendido' if top_bracing_count == 0 else 'não atendido'} |
+| Zig-zag interno entre as laterais | peças `cross_frame_bracing` geradas: {internal_count}, incluindo diafragmas transversais internos e zig-zag longitudinal 3D; tipo-base fixado em `{self._md_text(bridge.get('cross_frame_truss_type'))}` | {'atendido' if internal_count > 0 else 'não atendido'} |
+| Cortes nas duas pontas das diagonais laterais | membros conformes: {d_ok}/{d_total} | {'atendido' if d_total > 0 and d_ok == d_total else 'revisar'} |
+| Cortes nas duas pontas das diagonais internas | membros conformes: {x_ok}/{x_total} | {'atendido' if x_total > 0 and x_ok == x_total else 'revisar'} |
+| Limite construtivo de comprimento | faixa de corte: {min_cut:.3f} a {max_cut:.3f} mm | {'atendido' if min_cut >= float(detail.get('min_constructive_piece_length_mm', 20.0)) - 1e-9 and max_cut <= float(detail.get('max_cut_length_mm', 120.0)) + 1e-9 else 'não atendido'} |
+| Colisão volumétrica as-built | interpenetrações registradas: {int(metrics.get('as_built_interpenetration_count', 0) or 0)} | {'atendido' if int(metrics.get('as_built_interpenetration_count', 0) or 0) == 0 else 'não atendido'} |
+
+## Banzo inferior em T e colagem
+
+A alma do T é tratada como caminho principal de tração; a mesa superior fornece assentamento para os nós e rigidez secundária. O detalhamento gerou **{len(tee_web)}** peças de alma e **{len(tee_flange)}** peças de mesa. A alma usa exatamente **{self._md_text(detail.get('bottom_chord_tee_web_piece_count_per_side'))} palitos por lateral**, com sobreposição face-a-face de **{self._md_number(detail.get('bottom_chord_tee_web_overlap_mm'))} mm**; a mesa usa sobreposição face-a-face desencontrada pela fase nominal de **{self._md_number(detail.get('bottom_chord_tee_flange_phase_mm'))} mm**. Talas locais somente são adicionadas onde o FS calculado da junta sobreposta não alcança o mínimo de cola configurado. O menor FS de cola registrado para o T é **{self._md_number(min_bottom_glue)}**.
+
+## Modelo mecânico efetivamente considerado
+
+O cálculo global continua baseado na malha estrutural tridimensional do simulador, com membros discretizados por eixo e esforços obtidos por análise elástica. O pós-processamento não assume apenas tração/compressão ideal: para membros comprimidos, registra flambagem por Euler/Johnson, imperfeição geométrica equivalente e interação flexo-compressiva; para seções coladas, reduz a inércia composta por um fator de ação parcial `eta_I`, em vez de presumir ligação monolítica perfeita.
+
+| fator modelado | valor/configuração registrada |
+| --- | --- |
+| Frame3DD habilitado quando disponível | {self._md_text(analysis.get('run_frame3dd_if_available'))} |
+| rigidez geométrica Frame3DD | {self._md_text(analysis.get('frame3dd_include_geometric_stiffness'))} |
+| deformação por cisalhamento Frame3DD | {self._md_text(analysis.get('frame3dd_include_shear_deformation'))} |
+| excentricidade nominal de imperfeição | {self._md_number(detail.get('imperfection_eccentricity_mm'))} mm |
+| FS mínimo de membro calculado / alvo recomendado | {self._md_number(metrics.get('min_fs_member_design', metrics.get('min_fs_design')))} / {self._md_number(analysis.get('target_min_fs'))} |
+| FS mínimo de cola aceitável | {self._md_number(analysis.get('acceptance_min_glue_fs'))} |
+| solver retornado | {self._md_text(metrics.get('solver_status'))} |
+| status da checagem Frame3DD | {self._md_text(metrics.get('frame3dd_status'))} |
+| massa competitiva / limite | {self._md_number(metrics.get('competition_mass_g', metrics.get('estimated_total_mass_g')))} / {self._md_number(metrics.get('mass_limit_effective_g'))} g |
+
+## Fundamentação e limite de validade
+
+A geometria adotada segue a premissa de treliça: esforços devem entrar nos nós com excentricidade mínima, para reduzir flexões secundárias. A modelagem das peças coladas considera que a ligação transfere esforço pela área efetivamente colada e que a seção composta não é perfeitamente monolítica sem calibração. O emprego de análise de pórticos/treliças em 3D com rigidez geométrica e forças internas é compatível com a classe de problema resolvida pelo Frame3DD.
+
+O veredito deve ser lido com ressalva sempre que o FS mínimo calculado ficar abaixo do alvo recomendado ou quando a margem de massa não absorver variação real de cola e palitos. A aprovação numérica não substitui validação experimental. Palitos de picolé apresentam dispersão de propriedades, e a capacidade real da cola depende do adesivo, preparo superficial, pressão, cura e falha da madeira. Antes da construção definitiva, devem ser ensaiados: palitos do lote em tração/compressão, emendas com as talas previstas, uma amostra do nó T–montante–diagonal e o contato real da carga e dos apoios.
+
+### Referências técnicas utilizadas como base conceitual
+
+- USDA Forest Products Laboratory. *Wood Handbook: Wood as an Engineering Material*, FPL-GTR-282, capítulos de propriedades mecânicas e adesivos para madeira, 2021.
+- Gavin, H. P. *Frame3DD: Static and Dynamic Structural Analysis of 2D and 3D Frames*, documentação do solucionador empregado como verificação complementar.
+"""
+        path = out / "13_validacao_modelagem_e_base_tecnica.md"
         path.write_text(text, encoding="utf-8")
         return str(path)
 
@@ -1269,7 +1530,7 @@ Top 5 mudanças necessárias:
     </section>
     <section>
       <h2>3D com prismas reais — estrutura completa</h2>
-      <iframe src="../plots/02_geometria_3d_prismas_reais_completo.html"></iframe>
+      <iframe src="../plots/02_montagem_3d_prismas_reais_interativa.html"></iframe>
     </section>
   </div>
   <h2>Resumo markdown bruto</h2>
@@ -1352,9 +1613,9 @@ Este pacote reduz a redundância dos outputs e organiza os arquivos por função
 
 ## Critérios usados
 - Solver axial linear 3D com verificações pós-processadas de tração, compressão direta, flambagem Euler/Johnson e interação axial-flexão.
-- Para membros comprimidos, o risco é dominado por `EI/(KL)^2`; portanto, orientação, seção box de contato e conexões coladas alteram diretamente a capacidade. Lacing/talas não modelados não são considerados.
+- Para membros comprimidos, o risco é dominado por `EI/(KL)^2`; portanto, orientação, laminação maciça face-a-face e conexões coladas alteram diretamente a capacidade. Seções ocas e talas não explicitamente detalhadas não recebem crédito resistente.
 - `left_offset` e `right_offset` são tratados como robustez; a ruptura de projeto usa os casos governantes definidos em `multi_loadcase_screening.strength_governing_cases`.
-- O banzo superior usa palitos em `edge` por padrão, isto é, lateral para cima, para aumentar a inércia no eixo crítico.
+- O banzo superior modelado usa sanduíche fechado de oito palitos: quatro lâminas centrais, duas capas de fechamento e duas capas externas contínuas. A massa da cola longitudinal é contabilizada, enquanto a ação composta permanece reduzida por `eta_I`.
 
 ## Membros críticos
 | member_id | group | role | FS | modo |
@@ -1362,8 +1623,8 @@ Este pacote reduz a redundância dos outputs e organiza os arquivos por função
 {critical_md}
 
 ## Interpretação
-- Se os críticos forem `top_chord`, priorizar seção box, orientação edge, espaçamento maior e travamento lateral.
-- Se os críticos forem `vertical`, priorizar box/double-stack e reduzir o comprimento efetivo por travamento transversal.
+- Se os críticos forem `top_chord`, a revisão deve atuar no sanduíche real e no travamento lateral; não aumentar rigidez por caixa vazia não construída.
+- Se os críticos forem `vertical`, verificar quais estações possuem sanduíche real e reduzir comprimento efetivo somente por travamentos fisicamente presentes.
 - Se os críticos forem `diagonal`, verificar se o caso governante é nominal ou robustez deslocada antes de reforçar.
 """
 
@@ -1378,14 +1639,14 @@ Este pacote reduz a redundância dos outputs e organiza os arquivos por função
 ## Orientação dos palitos
 | grupo | orientação recomendada | motivo |
 | --- | --- | --- |
-| banzo superior | lateral para cima (`edge`) em seção box | aumenta a inércia contra flambagem/interação em compressão |
-| banzo inferior | `edge` se estiver em box; caso contrário priorizar área de cola | tração é menos sensível à orientação, mas a continuidade da junta é crítica |
-| montantes centrais | box/double-stack, bem alinhados | reduz risco de flambagem local |
+| banzo superior | sanduíche fechado de 8 palitos | núcleo e capas por faces coladas; capas externas contínuas; massa de cola incluída |
+| banzo inferior | seção T superior: alma `edge` + mesa `flat` | alma mantém o caminho axial; mesa dá área de colagem aos nós; emendas de alma e mesa devem ser desencontradas |
+| montantes construídos em x=0 e x=1300 | sanduíche fechado de 6 palitos | quatro lâminas centrais e duas capas coladas por face |
 | diagonais | manter simetria e evitar emendas coincidentes | caminho de carga e estabilidade lateral |
 
 ## Emendas e cola
 - Escalone emendas: não alinhe emendas de palitos no mesmo nó ou no mesmo painel.
-- Use overlap constante: {detail.get('overlap_length_mm')} mm, salvo se o edital exigir outro valor.
+- Use sobreposição face-a-face de {detail.get('overlap_length_mm')} mm nas continuidades modeladas; ponta-a-ponta só é admissível quando o plano indicar talas face-a-face.
 - Remova excesso de cola: massa curada conta na competição e excesso raramente aumenta FS proporcionalmente.
 - Pressione as juntas durante a cura; junta empenada aumenta excentricidade e reduz capacidade de flambagem.
 
@@ -1429,6 +1690,8 @@ Este pacote reduz a redundância dos outputs e organiza os arquivos por função
 
         detailed_method_paths = self._write_detailed_fabrication_method(out, cfg, detailed or {})
         connectivity_audit_path = self._write_connectivity_cut_audit(out, cfg, detailed or {})
+        complete_ledger_path = self._write_complete_calculation_ledger(out, cfg, metrics, detailed or {})
+        model_basis_path = self._write_model_basis_and_feature_audit(out, cfg, metrics, detailed or {})
 
         focused_manifest = {
             "purpose": "pacote executivo/fabricacao com poucos arquivos e alta densidade de informacao",
@@ -1446,6 +1709,8 @@ Este pacote reduz a redundância dos outputs e organiza os arquivos por função
                 "08_auditoria_secao_e_realismo.md",
                 "09_auditoria_conectividade_e_cortes.md",
                 "10_debug_calculos_criticos.md",
+                "12_memorial_completo_membro_palito_junta.md",
+                "13_validacao_modelagem_e_base_tecnica.md",
             ],
             "verdict": verdict,
             "predicted_breaking_load_kgf": pred_break,
@@ -1471,6 +1736,8 @@ Este pacote reduz a redundância dos outputs e organiza os arquivos por função
             "construction_checklist_md": str(out / "03_checklist_construcao.md"),
             **detailed_method_paths,
             "connectivity_cut_audit_md": connectivity_audit_path,
+            "complete_member_piece_joint_memorial_md": complete_ledger_path,
+            "model_basis_and_feature_audit_md": model_basis_path,
             "focused_outputs_manifest_json": str(out / "focused_outputs_manifest.json"),
             "executive_summary_json": str(out / "executive_summary.json"),
             "critical_members_csv": str(out / "critical_members.csv"),

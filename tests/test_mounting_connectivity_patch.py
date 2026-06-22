@@ -70,7 +70,7 @@ def test_chords_keep_node_axis_continuity_even_when_legacy_setback_group_is_pres
     ) == pytest.approx((0.0, 0.0))
 
 
-def test_cross_frame_contact_offset_does_not_move_terminal_node_out_of_station() -> None:
+def test_cross_frame_station_diagonal_uses_opposite_montante_contact_layer() -> None:
     ni = _node(1, 100.0, -50.0, 0.0)
     nj = _node(2, 100.0, 50.0, 100.0)
 
@@ -78,4 +78,26 @@ def test_cross_frame_contact_offset_does_not_move_terminal_node_out_of_station()
         member=_member("cross_frame_bracing"), ni=ni, nj=nj, detail={}
     )
 
-    assert offset == pytest.approx((0.0, 0.0, 0.0))
+    # O diafragma interno é colado na face longitudinal oposta à diagonal
+    # 3D; 1,6 mm representa a camada de contato, não uma peça flutuante.
+    assert offset == pytest.approx((-1.6, 0.0, 0.0))
+
+
+def test_vertical_can_be_seated_on_tee_flange_without_lateral_displacement() -> None:
+    ni = _node(1, 100.0, -50.0, 0.0)
+    nj = _node(2, 100.0, -50.0, 100.0)
+    detail = {
+        "node_lap_visual_side_offset_enabled": True,
+        "node_lap_visual_side_offset_groups": ["vertical", "diagonal"],
+        "contact_stack_offsets_mm": {"vertical_y": 0.0, "diagonal_y": 5.75},
+    }
+
+    vertical_offset = StickDetailService._node_lap_visual_side_offset(
+        member=_member("vertical"), ni=ni, nj=nj, detail=detail
+    )
+    diagonal_offset = StickDetailService._node_lap_visual_side_offset(
+        member=_member("diagonal"), ni=ni, nj=nj, detail=detail
+    )
+
+    assert vertical_offset == pytest.approx((0.0, 0.0, 0.0))
+    assert diagonal_offset == pytest.approx((0.0, -5.75, 0.0))

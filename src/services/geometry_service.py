@@ -14,6 +14,33 @@ class GeometryService:
     def __init__(self, section_service: SectionService | None = None) -> None:
         self.sections = section_service or SectionService()
 
+    @staticmethod
+    def resolve_section_layout_for_member(
+        cfg: Dict,
+        group: str,
+        x_mid: float,
+        y_mid: float,
+    ) -> Dict:
+        """Resolve a seção por grupo e, quando informado, por estação física.
+
+        Isto impede que montantes efetivamente construídos em sanduíche sejam
+        substituídos por uma seção genérica de todo o grupo.
+        """
+        layout = dict(cfg.get("section_layout_by_group", {}).get(group, {"layout": "stacked"}))
+        for rule in (cfg.get("section_layout_by_signature", []) or []):
+            if str(rule.get("group", "")) != str(group):
+                continue
+            tol = float(rule.get("tolerance_mm", 1.0e-6) or 1.0e-6)
+            if rule.get("x_mm") is not None and abs(float(x_mid) - float(rule["x_mm"])) > tol:
+                continue
+            if rule.get("y_mm") is not None and abs(float(y_mid) - float(rule["y_mm"])) > tol:
+                continue
+            override = rule.get("section_layout") or rule.get("layout_cfg") or {}
+            if isinstance(override, dict):
+                layout.update(override)
+            break
+        return layout
+
     def x_stations(self, cfg: Dict) -> List[float]:
         b = cfg["bridge"]
         left = -float(b["left_support_overhang_mm"])
@@ -88,6 +115,20 @@ class GeometryService:
         if p0 <= x <= p1: return center_h
         if x < p0: return end_h + (center_h-end_h)*(x/p0 if p0 else 1.0)
         return center_h + (end_h-center_h)*((x-p1)/(span-p1) if span != p1 else 1.0)
+
+    def fabricated_top_node_height(self, cfg: Dict, x: float) -> float:
+        """Return centroid elevation of a top chord seated above montantes.
+
+        ``top_height`` historically located the top-chord centroid at the end
+        of each montante, causing both physical prisms to occupy the same
+        volume. When the sandwich chord is glued *above* a mitered montante,
+        the centroid of the chord is raised by its underside-to-centroid depth.
+        """
+        z = self.top_height(cfg, x)
+        detail = cfg.get("detail_model", {}) or {}
+        if bool(detail.get("top_chord_seated_above_vertical_enabled", False)):
+            z += max(0.0, float(detail.get("top_chord_centroid_seat_raise_mm", 0.0) or 0.0))
+        return z
 
     def _add_side_diagonal(self, truss_type: str, idx: int, x0: float, x1: float, y: float, mid: float, nid, add_member) -> None:
         typ = self._normalize_truss_mode(truss_type)
@@ -266,6 +307,20 @@ class GeometryService:
         # Pratt e demais modos usam diagonal inversa.
         add_member(nid(x, ys[0], "bottom"), nid(x, ys[1], "top"), "cross_frame_bracing")
 
+    def _add_internal_longitudinal_zigzag(self, idx: int, x0: float, x1: float, ys: List[float], nid, add_member) -> None:
+        """Contraventamento 3D interno, entre montantes consecutivos de lados opostos.
+
+        O elemento não pertence aos planos horizontais dos banzos: ele liga o
+        topo de um montante à base do próximo montante da lateral contrária,
+        alternando lado a lado. Isso triangula a forma espacial e elimina o
+        mecanismo lateral que ocorre quando cada quadro transversal é braceado
+        isoladamente, sem continuidade longitudinal.
+        """
+        if idx % 2 == 0:
+            add_member(nid(x0, ys[1], "top"), nid(x1, ys[0], "bottom"), "cross_frame_bracing")
+        else:
+            add_member(nid(x0, ys[0], "top"), nid(x1, ys[1], "bottom"), "cross_frame_bracing")
+
     def generate(self, cfg: Dict) -> Tuple[List[Node], List[Member], List[Support], List[Load]]:
         nodes: List[Node] = []
         node_id_by_key: Dict[Tuple[float, float, str], int] = {}
@@ -294,10 +349,13 @@ class GeometryService:
                 cfg["bridge"].get("internal_truss_type", "X"),
             )
         )
+        # O contraventamento transversal interno tem padrão próprio. Quando
+        # cross_frame_truss_type está configurado, ele prevalece sobre o campo
+        # legado internal_truss_type para permitir a alternância esquerda/direita.
         internal_type = str(
             cfg["bridge"].get(
-                "internal_truss_type",
-                cfg["bridge"].get("cross_frame_truss_type", "X"),
+                "cross_frame_truss_type",
+                cfg["bridge"].get("internal_truss_type", "X"),
             )
         )
         side_panel_pattern = cfg["bridge"].get("panel_side_truss_pattern", {}) or {}
@@ -314,10 +372,31 @@ class GeometryService:
             node_id_by_key[key] = node_id
             return node_id
 
+        span_for_node_filter = float(cfg["bridge"]["span_mm"])
+        exclude_top_overhang_nodes = bool(cfg.get("bridge", {}).get("top_chord_exclude_support_overhang_panels", False))
         for x in xs:
             for y in ys:
                 add_node(x, y, 0.0, "bottom")
-                add_node(x, y, self.top_height(cfg, x), "top")
+                if (not exclude_top_overhang_nodes) or (-1.0e-6 <= float(x) <= span_for_node_filter + 1.0e-6):
+                    add_node(x, y, self.fabricated_top_node_height(cfg, x), "top")
+
+        # Identifica os nós que efetivamente recebem a carga principal. O
+        # reforço de travessas do topo deve ocorrer somente nessas estações,
+        # em vez de adicionar diagonais longitudinais ao plano do banzo.
+        preliminary_loads = LoadDistributionService.build_nodal_loads(
+            cfg,
+            nodes,
+            loadcase="LC1_carga_central_distribuida",
+            total_N=float(cfg["bridge"]["load_total_N"]),
+        )
+        preliminary_node_by_id = {int(n.id): n for n in nodes}
+        loaded_top_stations = {
+            round(float(preliminary_node_by_id[int(ld.node_id)].x), 6)
+            for ld in preliminary_loads
+            if int(ld.node_id) in preliminary_node_by_id
+            and str(preliminary_node_by_id[int(ld.node_id)].level) == "top"
+            and abs(float(ld.Fz)) > 1.0e-12
+        }
 
         node_lookup = {(n.x, n.y, n.level): n.id for n in nodes}
         node_by_id = {n.id: n for n in nodes}
@@ -326,14 +405,14 @@ class GeometryService:
         def nid(x: float, y: float, level: str) -> int:
             key = (round(float(x), 6), round(float(y), 6), level)
             if key not in node_id_by_key:
-                z = 0.0 if str(level).startswith("bottom") else self.top_height(cfg, float(x))
+                z = 0.0 if str(level).startswith("bottom") else self.fabricated_top_node_height(cfg, float(x))
                 node_id = add_node(float(x), float(y), z, level)
                 node_by_id[node_id] = nodes[-1]
                 node_lookup[(float(x), float(y), level)] = node_id
             return node_id_by_key[key]
 
         def mid_node(x: float, y: float, level: str) -> int:
-            z = 0.5 * self.top_height(cfg, float(x))
+            z = 0.5 * self.fabricated_top_node_height(cfg, float(x))
             key = (round(float(x), 6), round(float(y), 6), level)
             if key not in node_id_by_key:
                 node_id = add_node(float(x), float(y), z, level)
@@ -353,6 +432,17 @@ class GeometryService:
         span = float(cfg["bridge"]["span_mm"])
         left_overhang_x = -float(cfg["bridge"]["left_support_overhang_mm"])
         right_overhang_x = span + float(cfg["bridge"]["right_support_overhang_mm"])
+        bridge_cfg = cfg.get("bridge", {}) or {}
+        exclude_top_overhang = bool(bridge_cfg.get("top_chord_exclude_support_overhang_panels", False))
+        exclude_vertical_overhang = bool(bridge_cfg.get("vertical_exclude_support_overhang_stations", False))
+        exclude_top_transverse_overhang = bool(bridge_cfg.get("top_transverse_exclude_support_overhang_stations", exclude_top_overhang))
+        exclude_side_diagonal_overhang = bool(bridge_cfg.get("side_diagonal_exclude_support_overhang_panels", False))
+
+        def in_main_span(x: float) -> bool:
+            return -1.0e-6 <= float(x) <= span + 1.0e-6
+
+        def panel_in_main_span(x0: float, x1: float) -> bool:
+            return in_main_span(x0) and in_main_span(x1)
 
         panel_modes = [
             self._normalize_truss_mode(
@@ -370,13 +460,18 @@ class GeometryService:
         for y in ys:
             for x0, x1 in zip(xs[:-1], xs[1:]):
                 add_member(nid(x0, y, "bottom"), nid(x1, y, "bottom"), "bottom_chord")
-                add_member(nid(x0, y, "top"), nid(x1, y, "top"), "top_chord")
+                if (not exclude_top_overhang) or panel_in_main_span(x0, x1):
+                    add_member(nid(x0, y, "top"), nid(x1, y, "top"), "top_chord")
             if self._side_truss_uses_intermediate_verticals(side_truss_type) or side_has_non_warren:
                 for x in xs:
+                    if exclude_vertical_overhang and not in_main_span(x):
+                        continue
                     add_member(nid(x, y, "bottom"), nid(x, y, "top"), "vertical")
             else:
                 # Warren puro: manter apenas postes de extremidade/apoio.
                 for x in xs:
+                    if exclude_vertical_overhang and not in_main_span(x):
+                        continue
                     if (
                         abs(float(x) - left_overhang_x) <= 1.0e-6
                         or abs(float(x) - 0.0) <= 1.0e-6
@@ -387,6 +482,8 @@ class GeometryService:
             mid = span / 2.0
             for idx_panel, (x0, x1) in enumerate(zip(xs[:-1], xs[1:])):
                 if x1 < 0 or x0 > span:
+                    continue
+                if exclude_side_diagonal_overhang and not panel_in_main_span(x0, x1):
                     continue
                 side_mode_panel = self._panel_mode_from_map(
                     side_panel_pattern,
@@ -425,7 +522,8 @@ class GeometryService:
 
         for x in xs:
             add_member(nid(x, ys[0], "bottom"), nid(x, ys[1], "bottom"), "bottom_transverse")
-            add_member(nid(x, ys[0], "top"), nid(x, ys[1], "top"), "top_transverse")
+            if (not exclude_top_transverse_overhang) or in_main_span(x):
+                add_member(nid(x, ys[0], "top"), nid(x, ys[1], "top"), "top_transverse")
 
         for idx_panel, (x0, x1) in enumerate(zip(xs[:-1], xs[1:])):
             if cfg["bridge"].get("include_bottom_x_bracing", True):
@@ -466,16 +564,37 @@ class GeometryService:
                 )
 
         if cfg["bridge"].get("include_cross_frame_bracing", True):
-            for idx_x, x in enumerate(xs):
-                self._add_cross_frame_bracing(
-                    self._physical_bracing_mode(cfg, internal_type, "cross_frame_bracing"),
-                    idx_x,
-                    x,
-                    ys,
-                    nid,
-                    add_member,
-                    mid_node=mid_node,
-                )
+            detail_cfg = cfg.get("detail_model", {}) or {}
+            if bool(detail_cfg.get("internal_cross_frame_zigzag_enabled", False)):
+                # Diafragmas transversais nos planos dos montantes mantêm cada
+                # quadro lateral esquadrejado; o zig-zag 3D subsequente liga
+                # quadros consecutivos e impede racking/torsão longitudinal.
+                if bool(detail_cfg.get("internal_cross_frame_station_diaphragms_enabled", True)):
+                    diaphragm_interval = max(1, int(detail_cfg.get("internal_cross_frame_station_diaphragm_interval_panels", 1) or 1))
+                    load_station_diaphragms = bool(detail_cfg.get("internal_cross_frame_station_diaphragm_at_loaded_top_nodes", True))
+                    exclude_overhang = bool(detail_cfg.get("internal_bracing_exclude_support_overhang_panels", True))
+                    for idx_x, x in enumerate(xs):
+                        in_structural_span = (not exclude_overhang) or (-1.0e-6 <= float(x) <= float(span) + 1.0e-6)
+                        keep_station = in_structural_span and ((idx_x % diaphragm_interval == 0) or round(float(x), 6) in {0.0, round(float(span), 6)})
+                        if in_structural_span and load_station_diaphragms and round(float(x), 6) in loaded_top_stations:
+                            keep_station = True
+                        if keep_station:
+                            self._add_cross_frame_bracing("Warren_symmetric", idx_x, x, ys, nid, add_member, mid_node=mid_node)
+                for idx_panel, (x0, x1) in enumerate(zip(xs[:-1], xs[1:])):
+                    if bool(detail_cfg.get("internal_longitudinal_bracing_exclude_support_overhang_panels", False)) and (float(x0) < -1.0e-6 or float(x1) > float(span) + 1.0e-6):
+                        continue
+                    self._add_internal_longitudinal_zigzag(idx_panel, x0, x1, ys, nid, add_member)
+            else:
+                for idx_x, x in enumerate(xs):
+                    self._add_cross_frame_bracing(
+                        self._physical_bracing_mode(cfg, internal_type, "cross_frame_bracing"),
+                        idx_x,
+                        x,
+                        ys,
+                        nid,
+                        add_member,
+                        mid_node=mid_node,
+                    )
 
         if cfg["bridge"].get("include_support_pad_members", True):
             for y in ys:
@@ -510,15 +629,59 @@ class GeometryService:
             )
             if (idx in disabled_member_ids) or (not enabled):
                 continue
+            has_id_override = (str(idx) in member_sticks_by_id) or (idx in member_sticks_by_id)
+            x_mid = 0.5 * (float(node_by_id[i].x) + float(node_by_id[j].x))
+            y_mid = 0.5 * (float(node_by_id[i].y) + float(node_by_id[j].y))
             n_sticks = int(
                 member_sticks_by_id.get(
                     str(idx),
                     member_sticks_by_id.get(idx, member_sticks_by_group.get(group, 1)),
                 )
             )
-            layout_cfg = dict(
-                cfg.get("section_layout_by_group", {}).get(group, {"layout": "stacked"})
-            )
+            # Overrides semânticos sobrevivem a alterações de enumeração da
+            # malha: reforçam o grupo e a estação, nunca um ID que possa passar
+            # a representar uma diagonal após mudar o painel. IDs explícitos,
+            # quando presentes, continuam tendo precedência para compatibilidade.
+            if not has_id_override:
+                for rule in (cfg.get("member_sticks_by_signature", []) or []):
+                    if str(rule.get("group", "")) != str(group):
+                        continue
+                    tol = float(rule.get("tolerance_mm", 1.0e-6) or 1.0e-6)
+                    if rule.get("x_mm") is not None and abs(x_mid - float(rule["x_mm"])) > tol:
+                        continue
+                    if rule.get("y_mm") is not None and abs(y_mid - float(rule["y_mm"])) > tol:
+                        continue
+                    n_sticks = int(rule.get("n_sticks", n_sticks))
+                    break
+            # No banzo superior, os travamentos são travessas simples. Nas
+            # estações que recebem a placa/carga, sua seção é reforçada de modo
+            # explícito no próprio membro e, portanto, entra em A/I/massa/FS.
+            detail_cfg = cfg.get("detail_model", {}) or {}
+            if (
+                str(group) == "top_transverse"
+                and bool(detail_cfg.get("loaded_top_transverse_reinforcement_enabled", False))
+                and abs(float(node_by_id[i].x) - float(node_by_id[j].x)) <= 1.0e-6
+                and round(float(node_by_id[i].x), 6) in loaded_top_stations
+            ):
+                extra = max(0, int(detail_cfg.get("loaded_top_transverse_extra_sticks", 1) or 0))
+                minimum = max(1, int(detail_cfg.get("loaded_top_transverse_min_sticks", 2) or 2))
+                maximum = max(minimum, int(detail_cfg.get("loaded_top_transverse_max_sticks", 3) or 3))
+                n_sticks = min(maximum, max(minimum, int(n_sticks) + extra))
+            layout_cfg = self.resolve_section_layout_for_member(cfg, group, x_mid, y_mid)
+            sandwich_layouts = {
+                "closed_sandwich_4core_2caps",
+                "closed_sandwich_4core_2caps_2covers",
+                "closed_face_sandwich_6",
+                "closed_face_sandwich_8",
+            }
+            if str(layout_cfg.get("layout", "")).strip().lower() in sandwich_layouts:
+                # Uma seção sanduíche construída não pode ser deslaminada pelo
+                # sizing automático para 5/7 palitos: o núcleo+capas é uma
+                # unidade física. Reforços adicionais só entram em pares
+                # simétricos, mantendo a seção fechada e centrada.
+                n_sticks = max(6, int(n_sticks))
+                if n_sticks % 2 != 0:
+                    n_sticks += 1
             # Projeto fabricável: seções box ímpares com 5+ palitos geram
             # arranjos difíceis de reproduzir e alteram inércia conforme a
             # montagem. Para os grupos críticos definidos no detalhamento,
@@ -602,12 +765,7 @@ class GeometryService:
             )
 
         load_total = float(cfg["bridge"]["load_total_N"])
-        loads = LoadDistributionService.build_nodal_loads(
-            cfg,
-            nodes,
-            loadcase="LC1_carga_central_distribuida",
-            total_N=load_total,
-        )
+        loads = list(preliminary_loads)
         if not loads:
             # Defensive fallback: preserve a central nodal load if the selected
             # level has no nodes after an aggressive topology mutation.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import copy
 import json
 import logging
 import os
@@ -10,12 +11,14 @@ from typing import Any, Dict
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import streamlit.components.v1 as components
 
 from src.core.numeric import safe_float
 from src.services.cache_cleanup_service import CacheCleanupService
 from src.services.config_service import ConfigService
 from src.services.mass_guard import resolve_mass_limits
 from src.services.pipeline import SimulationPipeline
+from src.services.piece_inspection_service import PieceInspectionService
 from src.services.visualization_service import VisualizationService
 
 
@@ -360,6 +363,14 @@ def _as_dataframe(data: Any) -> pd.DataFrame:
     return df
 
 
+def _arrow_safe_text_table(data: Any) -> pd.DataFrame:
+    """Tabela textual para fichas de montagem sem erro de serialização Arrow."""
+    df = _as_dataframe(data)
+    if df.empty:
+        return df
+    return df.fillna("—").astype(str)
+
+
 def _coerce_numeric(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     out = df.copy()
 
@@ -608,6 +619,41 @@ material_cfg = base_cfg.get("material", {})
 bridge_cfg = base_cfg.get("bridge", {})
 detail_cfg = base_cfg.get("detail_model", {})
 
+
+def _geometry_signature(cfg: Dict[str, Any]) -> tuple[Any, ...]:
+    bridge = cfg.get("bridge", {}) or {}
+    return (
+        bridge.get("span_mm"),
+        bridge.get("panel_mm"),
+        bridge.get("width_mm"),
+        bridge.get("center_height_mm"),
+        bridge.get("end_height_mm"),
+        bridge.get("top_profile"),
+        bridge.get("side_truss_type"),
+        bridge.get("internal_truss_type"),
+        bridge.get("top_chord_truss_type"),
+        bridge.get("bottom_chord_truss_type"),
+    )
+
+
+def _bundled_output_geometry_differs(current_cfg: Dict[str, Any]) -> bool:
+    output_cfg_path = Path("outputs/config_used.json")
+    if not output_cfg_path.exists():
+        return False
+    try:
+        output_cfg = json.loads(output_cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return _geometry_signature(current_cfg) != _geometry_signature(output_cfg)
+
+
+if _bundled_output_geometry_differs(base_cfg):
+    st.warning(
+        "Os outputs existentes foram gerados com uma geometria diferente do "
+        "bridge_config.json atual. Eles não representam este projeto; execute "
+        "novamente em modo de geometria validada antes de consultar o CAD."
+    )
+
 aba_simulacao, aba_config = st.tabs(["Simulação", "Configurações"])
 
 with aba_config:
@@ -721,6 +767,21 @@ with aba_simulacao:
                 "Ativar refinamento adaptativo (S4)",
                 value=bool(analysis_cfg.get("planner_adaptive_refinement", True)),
             )
+            run_frozen_validated_geometry = st.checkbox(
+                "Executar exatamente a geometria validada do arquivo",
+                value=bool(planner_cfg.get("user_design_domain_locked", False))
+                and not bool(analysis_cfg.get("optimize_variants", True)),
+                help=(
+                    "Mantém painéis, altura, topologia e reforços por membro do "
+                    "bridge_config.json. Use esta opção para reproduzir o CAD "
+                    "validado sem redesenhar a malha."
+                ),
+            )
+            if run_frozen_validated_geometry:
+                st.caption(
+                    "Modo congelado: o envelope geométrico abaixo não altera a malha; "
+                    "apenas material, carga e critérios de verificação podem ser atualizados."
+                )
 
             objective_labels = list(OBJECTIVE_LABEL_TO_CODE.keys())
             objective_default_code = str(analysis_cfg.get("planner_objective_profile", "balanced"))
@@ -1007,37 +1068,73 @@ with aba_simulacao:
             st.error("Selecione ao menos uma opção em cada lista de topologias candidatas.")
             st.stop()
 
-        cfg = cs.from_planner_inputs(
-            base_cfg,
-            target_load_kgf=target_load_kgf,
-            span_min_mm=span_min_mm,
-            span_max_mm=span_max_mm,
-            width_min_mm=width_min_mm,
-            width_max_mm=width_max_mm,
-            height_min_mm=height_min_mm,
-            height_max_mm=height_max_mm,
-            panel_min_mm=panel_min_mm,
-            panel_max_mm=panel_max_mm,
-            max_bridge_mass_g=max_bridge_mass_g,
-            target_bridge_mass_g=target_bridge_mass_g,
-            E_MPa=E_MPa,
-            stick_length_mm=stick_length_mm,
-            stick_width_mm=stick_width_mm,
-            stick_thickness_mm=stick_thickness_mm,
-            stick_mass_g=stick_mass_g,
-            tension_capacity_per_stick_kgf=tension_capacity_per_stick_kgf,
-            compression_capacity_one_stick_kgf=compression_capacity_one_stick_kgf,
-            compression_capacity_two_sticks_kgf=compression_capacity_two_sticks_kgf,
-            glue_shear_strength_MPa=glue_shear_strength_MPa,
-            overlap_length_mm=overlap_length_mm,
-            target_min_fs=target_min_fs,
-            stage1_variants=stage1_variants,
-            top_chord_truss_type=str(top_chord_trusses[0]),
-            bottom_chord_truss_type=str(bottom_chord_trusses[0]),
-            objective_profile=objective_profile,
-            adaptive_refinement=adaptive_refinement,
-            adaptive_iterations=int(adaptive_iterations),
-        )
+        if run_frozen_validated_geometry:
+            cfg = cs.from_fixed_design_inputs(
+                base_cfg,
+                target_load_kgf=target_load_kgf,
+                target_breaking_load_kgf=target_breaking_load_kgf,
+                max_bridge_mass_g=max_bridge_mass_g,
+                target_bridge_mass_g=target_bridge_mass_g,
+                E_MPa=E_MPa,
+                stick_length_mm=stick_length_mm,
+                stick_width_mm=stick_width_mm,
+                stick_thickness_mm=stick_thickness_mm,
+                stick_mass_g=stick_mass_g,
+                tension_capacity_per_stick_kgf=tension_capacity_per_stick_kgf,
+                compression_capacity_one_stick_kgf=compression_capacity_one_stick_kgf,
+                compression_capacity_two_sticks_kgf=compression_capacity_two_sticks_kgf,
+                glue_shear_strength_MPa=glue_shear_strength_MPa,
+                overlap_length_mm=overlap_length_mm,
+                target_min_fs=target_min_fs,
+                run_frame3dd=run_frame3dd,
+                generate_piece_views=generate_piece_views,
+            )
+            st.info(
+                "Executando a geometria congelada do bridge_config.json: "
+                f"painel {cfg['bridge']['panel_mm']:.1f} mm e altura central "
+                f"{cfg['bridge']['center_height_mm']:.1f} mm."
+            )
+        else:
+            cfg = cs.from_planner_inputs(
+                base_cfg,
+                target_load_kgf=target_load_kgf,
+                span_min_mm=span_min_mm,
+                span_max_mm=span_max_mm,
+                width_min_mm=width_min_mm,
+                width_max_mm=width_max_mm,
+                height_min_mm=height_min_mm,
+                height_max_mm=height_max_mm,
+                panel_min_mm=panel_min_mm,
+                panel_max_mm=panel_max_mm,
+                max_bridge_mass_g=max_bridge_mass_g,
+                target_bridge_mass_g=target_bridge_mass_g,
+                E_MPa=E_MPa,
+                stick_length_mm=stick_length_mm,
+                stick_width_mm=stick_width_mm,
+                stick_thickness_mm=stick_thickness_mm,
+                stick_mass_g=stick_mass_g,
+                tension_capacity_per_stick_kgf=tension_capacity_per_stick_kgf,
+                compression_capacity_one_stick_kgf=compression_capacity_one_stick_kgf,
+                compression_capacity_two_sticks_kgf=compression_capacity_two_sticks_kgf,
+                glue_shear_strength_MPa=glue_shear_strength_MPa,
+                overlap_length_mm=overlap_length_mm,
+                target_min_fs=target_min_fs,
+                stage1_variants=stage1_variants,
+                top_chord_truss_type=str(top_chord_trusses[0]),
+                bottom_chord_truss_type=str(bottom_chord_trusses[0]),
+                objective_profile=objective_profile,
+                adaptive_refinement=adaptive_refinement,
+                adaptive_iterations=int(adaptive_iterations),
+            )
+            if cfg.get("member_sticks_by_id"):
+                cfg.pop("member_sticks_by_id", None)
+                cfg.pop("member_active_by_id", None)
+                cfg.pop("disabled_member_ids", None)
+                st.warning(
+                    "A malha foi redesenhada; reforços fixos por ID foram removidos "
+                    "para impedir que reforços de banzos ou montantes sejam aplicados "
+                    "a diagonais de outra enumeração."
+                )
 
         # from_planner_inputs preserva compatibilidade antiga convertendo
         # target_min_fs em uma ruptura-alvo rígida.  Na interface atual, a
@@ -1052,24 +1149,26 @@ with aba_simulacao:
         cfg["planner"]["use_stretch_breaking_load_as_acceptance"] = False
         cfg["analysis"]["acceptance_min_design_breaking_load_kgf"] = float(target_breaking_load_kgf)
         cfg["analysis"]["use_target_min_fs_as_hard_acceptance"] = False
-        cfg["planner"]["consider_side_trusses"] = side_trusses
-        cfg["planner"]["consider_top_profiles"] = top_profiles
-        cfg["planner"]["consider_internal_trusses"] = internal_trusses
-        cfg["planner"]["consider_top_chord_trusses"] = top_chord_trusses
-        cfg["planner"]["consider_bottom_chord_trusses"] = bottom_chord_trusses
+        if not run_frozen_validated_geometry:
+            cfg["planner"]["consider_side_trusses"] = side_trusses
+            cfg["planner"]["consider_top_profiles"] = top_profiles
+            cfg["planner"]["consider_internal_trusses"] = internal_trusses
+            cfg["planner"]["consider_top_chord_trusses"] = top_chord_trusses
+            cfg["planner"]["consider_bottom_chord_trusses"] = bottom_chord_trusses
 
-        cfg["analysis"]["optimize_variants"] = bool(optimize_variants)
-        cfg["analysis"]["active_planner_enabled"] = bool(optimize_variants)
+        cfg["analysis"]["optimize_variants"] = bool(optimize_variants) and not run_frozen_validated_geometry
+        cfg["analysis"]["active_planner_enabled"] = bool(optimize_variants) and not run_frozen_validated_geometry
         cfg["analysis"]["run_frame3dd_if_available"] = bool(run_frame3dd)
         cfg["analysis"]["planner_stage1_variants"] = int(stage1_variants)
         cfg["analysis"]["planner_stage4_iterations"] = int(adaptive_iterations)
         cfg["analysis"]["planner_adaptive_refinement"] = bool(adaptive_refinement)
-        cfg["analysis"]["planner_objective_profile"] = str(objective_profile)
-        cfg["analysis"]["planner_objective_weight_fs"] = float(w_fs)
-        cfg["analysis"]["planner_objective_weight_break"] = float(w_break)
-        cfg["analysis"]["planner_objective_weight_mass_target"] = float(w_mass_target)
-        cfg["analysis"]["planner_objective_weight_mass_limit"] = float(w_mass_limit)
-        cfg["analysis"]["planner_threads"] = int(planner_threads)
+        if not run_frozen_validated_geometry:
+            cfg["analysis"]["planner_objective_profile"] = str(objective_profile)
+            cfg["analysis"]["planner_objective_weight_fs"] = float(w_fs)
+            cfg["analysis"]["planner_objective_weight_break"] = float(w_break)
+            cfg["analysis"]["planner_objective_weight_mass_target"] = float(w_mass_target)
+            cfg["analysis"]["planner_objective_weight_mass_limit"] = float(w_mass_limit)
+            cfg["analysis"]["planner_threads"] = int(planner_threads)
         cfg["analysis"]["strict_mass_acceptance"] = True
         cfg["analysis"]["final_variants_enabled"] = True
         cfg["detail_model"]["generate_piece_views"] = bool(generate_piece_views)
@@ -1194,901 +1293,111 @@ with aba_simulacao:
         st.caption("Simetria estrutural: ativa. Simetria construtiva: emendas podem ser desalinhadas intencionalmente.")
 
     viz = VisualizationService()
+    inspector = PieceInspectionService()
+    pieces_all = list(r.get("detailed", {}).get("stick_pieces", []) or [])
+    glue_joints = list(r.get("detailed", {}).get("glue_joints", []) or [])
+    member_checks_all = list(r.get("member_checks", []) or [])
+    detail_runtime_cfg = r.get("cfg", {}).get("detail_model", {}) or {}
 
-    result_sections = [
-        "Resumo",
-        "Por que esta treliça?",
-        "Cargas e membros críticos",
-        "Geometria 3D",
-        "Montagem real",
-        "Detalhamento técnico",
-        "Logs e auditoria",
-        "Frame3DD e downloads",
-    ]
+    st.divider()
     result_view = st.radio(
-        "Navegação dos resultados",
-        result_sections,
+        "Painel de trabalho",
+        ["Montagem 3D interativa", "Carga / FS", "Arquivos"],
         horizontal=True,
-        key="result_view",
+        key="assembly_clean_workspace",
+        help=(
+            "A tela foi reduzida às duas visualizações úteis: montagem por prismas reais "
+            "e caminho de carga colorido pelo fator de segurança."
+        ),
     )
-    st.caption("Modo leve: apenas a seção selecionada é renderizada, reduzindo recálculo de UI.")
+    plotly_config = {
+        "scrollZoom": True,
+        "displaylogo": False,
+        "responsive": True,
+        # Navegação 3D única por arraste: turntable. Zoom pela rolagem permanece.
+        "modeBarButtonsToRemove": ["orbitRotation", "pan3d", "zoom3d"],
+        "modeBarButtonsToAdd": ["tableRotation", "resetCameraLastSave3d"],
+    }
 
-    if result_view == "Resumo":
-        suggestions = recommendations.get("suggestions", [])
-        proposal_desc = recommendations.get("proposal_description", "")
-        comparison_notes = recommendations.get("comparison_notes", [])
-
-        if proposal_desc:
-            st.markdown("**Descrição objetiva da proposta gerada**")
-            st.info(proposal_desc)
-
-        if comparison_notes:
-            st.markdown("**Comparação rápida das versões finais**")
-            for note in comparison_notes:
-                st.write(f"- {note}")
-
-        if suggestions:
-            st.markdown("**Recomendações de engenharia**")
-            for i, suggestion in enumerate(suggestions, 1):
-                st.write(f"**{i}.** {suggestion}")
-        else:
-            st.info("Nenhuma recomendação textual foi gerada.")
-
-        with st.expander("Mostrar configuração completa", expanded=False):
-            st.json(r.get("cfg", {}), expanded=False)
-
-        if final_variants:
-            st.subheader("Versões finais da sugestão")
-            final_rows = []
-            for label in ("ideal", "min", "max"):
-                row = final_variants.get(label)
-                if not row:
-                    continue
-                cfg_mass_limit = float(mass_limits.get("effective_limit_g", 1000.0))
-                final_rows.append(
-                    {
-                        "versão": label,
-                        "FS_min_principal": row.get("min_fs_primary"),
-                        "carga_ruptura_estimada_kgf": row.get("predicted_breaking_load_kgf"),
-                        "massa_g": row.get("mass_g"),
-                        "solver_status": row.get("solver_status"),
-                        "viável": row.get("feasible"),
-                        "aceita_massa": (float(row.get("mass_g", 0.0) or 0.0) <= cfg_mass_limit),
-                        "span_mm": row.get("span_mm"),
-                        "width_mm": row.get("width_mm"),
-                        "center_height_mm": row.get("center_height_mm"),
-                        "panel_mm": row.get("panel_mm"),
-                    }
-                )
-
-            if final_rows:
-                table = _prepare_table(final_rows)
-                with st.expander("Mostrar tabela detalhada das versões finais", expanded=False):
-                    st.dataframe(_df_to_display_units(table, length_unit, force_unit), width="stretch")
-
-                labels = [row["versão"] for row in final_rows]
-                chosen = st.radio("Comparar versão em destaque", labels, horizontal=True)
-                chosen_row = next((row for row in final_rows if row["versão"] == chosen), None)
-                chosen_full = final_variants.get(chosen) if chosen in final_variants else None
-                if chosen_full:
-                    st.success(_describe_variant(chosen_full, length_unit, force_unit))
-
-    if result_view == "Por que esta treliça?":
-        proposal_desc = recommendations.get("proposal_description", "")
-        comparison_notes = recommendations.get("comparison_notes", [])
-        by_reason = stage_counts.get("stage0_prefilter_discarded_by_reason", {}) or {}
-        by_reason_all = stage_counts.get("discarded_by_reason", {}) or {}
-        mat_cfg = r.get("cfg", {}).get("material", {}) or {}
-        t_cap = float(mat_cfg.get("tension_capacity_per_stick_kgf", 72.0))
-        c_cap = max(1.0e-6, float(mat_cfg.get("compression_capacity_two_sticks_kgf", 11.0)) / 2.0)
-        tc_ratio = t_cap / c_cap
-
-        st.markdown("**Critério de escolha da solução**")
-        if proposal_desc:
-            st.info(proposal_desc)
-        else:
-            st.info("A seleção priorizou melhor equilíbrio entre fator de segurança, carga de ruptura prevista e massa limite.")
-
-        st.markdown(
-            "A influência do material foi considerada na triagem: "
-            f"relação tração/compressão aproximada = **{tc_ratio:.2f}**."
+    if result_view == "Montagem 3D interativa":
+        st.subheader("Montagem 3D interativa — membros e fabricação")
+        st.caption(
+            "Use Ctrl + clique em qualquer palito ou tala para selecionar o membro completo. "
+            "A vista pode destacar, isolar ou explodir somente o montante, banzo ou diagonal alvo; "
+            "os deslocamentos de inspeção são exclusivamente visuais."
         )
-        if tc_ratio >= 6.0:
-            st.caption(
-                "Como a tração está muito acima da compressão, a busca tende a favorecer famílias tipo Pratt "
-                "e reduzir famílias Howe, que penalizam diagonais comprimidas longas."
-            )
-
-        if comparison_notes:
-            st.markdown("**Comparação final (ideal/min/max)**")
-            for note in comparison_notes:
-                st.write(f"- {note}")
-
-        if by_reason:
-            st.markdown("**Topologias descartadas antes da S0/S1 (motivos principais)**")
-            top_rows = sorted(by_reason.items(), key=lambda kv: kv[1], reverse=True)[:12]
-            st.dataframe(
-                pd.DataFrame([{"motivo": k, "quantidade": v} for k, v in top_rows]),
-                width="stretch",
-            )
-        if by_reason_all:
-            with st.expander("Mostrar todos os descartes por motivo", expanded=False):
-                all_rows = sorted(by_reason_all.items(), key=lambda kv: kv[1], reverse=True)
-                st.dataframe(
-                    pd.DataFrame([{"motivo": k, "quantidade": v} for k, v in all_rows]),
-                    width="stretch",
-                )
-
-    if result_view == "Detalhamento técnico":
-        stage_map = {
-            "S1 - varredura": opt.get("stage1", []),
-            "S2 - refinamento": opt.get("stage2", []),
-            "S3 - validação detalhada": opt.get("stage3", []),
-            "S4 trace - ajustes iterativos": opt.get("stage4_trace", []),
-            "S4 - candidatos adaptados validados": opt.get("stage4", []),
-            "Descarte por filtros": opt.get("discarded", []),
-            "Final - ideal/min/max": list(final_variants.values()),
-        }
-
-        stage_pick = st.selectbox("Etapa", list(stage_map))
-        stage_rows = stage_map.get(stage_pick, [])
-
-        if stage_rows:
-            table = _prepare_table([{k: v for k, v in row.items() if k != "config"} for row in stage_rows])
-            table = _df_to_display_units(table, length_unit, force_unit)
-            with st.expander("Mostrar tabela completa da etapa", expanded=False):
-                st.dataframe(table, width="stretch")
-
-            if {"pontuação", "massa_g", "FS_mín_principal"}.issubset(set(table.columns)):
-                plot_df = table.copy()
-                plot_df["massa_g"] = pd.to_numeric(plot_df["massa_g"], errors="coerce")
-                plot_df["FS_mín_principal"] = pd.to_numeric(plot_df["FS_mín_principal"], errors="coerce")
-                plot_df["pontuação"] = pd.to_numeric(plot_df["pontuação"], errors="coerce")
-                plot_df = plot_df.dropna(subset=["massa_g", "FS_mín_principal", "pontuação"])
-                if not plot_df.empty:
-                    st.plotly_chart(
-                        px.scatter(
-                            plot_df,
-                            x="massa_g",
-                            y="FS_mín_principal",
-                            color="pontuação",
-                            hover_data=[c for c in ["id_candidato", "treliça_lateral", "perfil_topo"] if c in plot_df.columns],
-                            title="Comparação da etapa: massa x FS mínimo (cor = pontuação)",
-                        ),
-                        width="stretch",
-                    )
-
-            if stage_pick != "Descarte por filtros":
-                candidate_labels = []
-                for i, row in enumerate(stage_rows[:120]):
-                    cid = row.get("candidate_id", f"{stage_pick}-{i+1}")
-                    score = _format_float(row.get("score"), 1, "—")
-                    fs = _format_float(row.get("min_fs_primary"), 2, "—")
-                    candidate_labels.append(f"{cid} | score={score} | FS={fs}")
-                if candidate_labels:
-                    idx_pick = st.selectbox("Detalhar candidato da etapa", list(range(len(candidate_labels))), format_func=lambda i: candidate_labels[i])
-                    row = stage_rows[int(idx_pick)]
-                    st.info(_describe_variant(row, length_unit, force_unit))
+        if not pieces_all:
+            st.info("Sem detalhamento físico disponível para exibir.")
         else:
-            st.info("Sem dados para a etapa selecionada.")
-
-    if result_view == "Geometria 3D":
-        v1, v2 = st.columns([2, 1])
-
-        with v1:
-            scale_label = st.radio(
-                "Escala do 3D",
-                ["Didática", "Real", "Cubo unitário"],
-                index=0,
-                horizontal=True,
+            st.caption(
+                "Seleção: mantenha Ctrl pressionado e clique em qualquer lâmina ou tala do membro. "
+                "A rotação por arraste usa exclusivamente turntable; use a rolagem para zoom e os botões de vista do painel."
             )
-            scale_mode = {
-                "Didática": "didactic",
-                "Real": "real",
-                "Cubo unitário": "cube",
-            }[scale_label]
-            member_df_visual = _prepare_member_checks(r.get("member_checks", []))
-            rupture_df = member_df_visual[
-                (member_df_visual["member_id"] >= 0)
-                & (member_df_visual["FS_min_num"] < 1.0)
-            ].sort_values("FS_min_sort", ascending=True)
-            rupture_ids = rupture_df["member_id"].drop_duplicates().astype(int).head(20).tolist()
-            rupture_details = metrics.get("rupture_details", {}) or {}
-            gov_member_raw = rupture_details.get("governing_member_id")
-            gov_member_id = int(gov_member_raw) if safe_float(gov_member_raw, None) is not None else None
-            if gov_member_id is not None and gov_member_id > 0 and gov_member_id not in rupture_ids:
-                rupture_ids = [gov_member_id] + rupture_ids
-
-            rupture_colors = {}
-            for _, row in rupture_df.head(40).iterrows():
-                mid = int(row.get("member_id", -1))
-                fs_val = safe_float(row.get("FS_min_num"), 10.0) or 10.0
-                if fs_val < 0.4:
-                    rupture_colors[mid] = "#ff2d2d"
-                elif fs_val < 0.7:
-                    rupture_colors[mid] = "#ff6b2c"
+            piece_files = (r.get("detailed", {}).get("piece_view_files", {}) or {})
+            interactive_path = Path(str(piece_files.get("interactive_real_prisms_html", "")))
+            if interactive_path.exists():
+                native_iframe = getattr(st, "iframe", None)
+                if callable(native_iframe):
+                    # Streamlit >= 1.56 aceita um caminho HTML local diretamente.
+                    # Evita carregar e retransmitir uma string HTML de vários MB
+                    # a cada rerender da aplicação.
+                    native_iframe(interactive_path, height=1620, tab_index=0)
                 else:
-                    rupture_colors[mid] = "#ffb347"
-            if gov_member_id is not None and gov_member_id > 0:
-                rupture_colors[gov_member_id] = "#ff00ff"
-
-            st.plotly_chart(
-                viz.plotly_geometry(
-                    r["nodes"],
-                    r["members"],
-                    r["supports"],
-                    r["loads"],
-                    highlight_member_ids=rupture_ids,
-                    highlight_member_colors=rupture_colors,
-                    scale_mode=scale_mode,
-                ),
-                width="stretch",
-            )
-            if gov_member_id is not None and gov_member_id > 0:
-                st.info(
-                    "Membro governante da previsão de ruptura: "
-                    f"`M{gov_member_id}` | modo={rupture_details.get('governing_rupture_mode', '—')} "
-                    f"| FS governante={_format_float(rupture_details.get('governing_fs'), 2, '—')}."
-                )
-            if rupture_ids:
-                st.caption(
-                    "Membros destacados: possível ruptura (FS<1,0). "
-                    "Magenta = membro governante da estimativa de ruptura; tons quentes = criticidade por FS. "
-                    "A análise detalhada está na seção Membros Críticos."
+                    # Compatibilidade com instalações anteriores do Streamlit:
+                    # components.html exige o conteúdo textual e aceita scrolling.
+                    interactive_html = interactive_path.read_text(encoding="utf-8")
+                    components.html(interactive_html, height=1620, scrolling=False)
+                st.download_button(
+                    "Baixar visor HTML interativo",
+                    interactive_path.read_bytes(),
+                    file_name="montagem_3d_membros_ctrl_click.html",
+                    mime="text/html",
                 )
             else:
-                st.caption("Nenhum membro com FS < 1,0 nesta configuração.")
-
-        with v2:
-            st.markdown("**Planos e treliças (2D)**")
-            plot_dir = Path("outputs/plots")
-            preferred = [
-                "02_trelica_lateral_esquerda.png",
-                "03_trelica_lateral_direita.png",
-                "04_plano_superior.png",
-                "05_plano_inferior.png",
-            ]
-
-            shown = 0
-            for name in preferred:
-                p = plot_dir / name
-                if p.exists():
-                    st.image(str(p), caption=name)
-                    shown += 1
-
-            if shown == 0:
-                st.info("Imagens 2D não encontradas em outputs/plots.")
-
-            if rupture_ids:
-                node_by_id = {n.id: n for n in r.get("nodes", [])}
-                member_by_id = {m.id: m for m in r.get("members", [])}
-                rupture_rows = []
-                for _, row in rupture_df.head(12).iterrows():
-                    mid = int(row.get("member_id", -1))
-                    m = member_by_id.get(mid)
-                    if not m:
-                        continue
-                    ni = node_by_id.get(m.i)
-                    nj = node_by_id.get(m.j)
-                    x_med = None
-                    if ni and nj:
-                        x_med = 0.5 * (float(ni.x) + float(nj.x))
-                    rupture_rows.append(
-                        {
-                            "member_id": mid,
-                            "group": row.get("group"),
-                            "FS_min": row.get("FS_min"),
-                            "governing_mode": row.get("governing_mode"),
-                            "x_centro_mm": x_med,
-                            "força_axial_N": row.get("N_N"),
-                        }
-                    )
-                if rupture_rows:
-                    st.markdown("**Pontos críticos esperados de ruptura (top 12)**")
-                    st.dataframe(
-                        _df_to_display_units(_prepare_table(rupture_rows), length_unit, force_unit),
-                        width="stretch",
-                    )
-
-    if result_view == "Cargas e membros críticos":
-        member_df = _prepare_member_checks(r.get("member_checks", []))
-
-        if member_df.empty:
-            st.info("Nenhum membro disponível.")
-        else:
-            show_cols = [
-                c
-                for c in [
-                    "member_id",
-                    "group",
-                    "member_role",
-                    "state",
-                    "N_N",
-                    "L_mm",
-                    "FS_min",
-                    "FS_min_label",
-                    "governing_mode",
-                    "report_mode",
-                    "risk_flag",
-                ]
-                if c in member_df.columns
-            ]
-
-            show_df = member_df[show_cols].copy()
-            show_df = _df_to_display_units(show_df, length_unit, force_unit)
-            with st.expander("Mostrar tabela de membros (detalhada)", expanded=False):
-                st.dataframe(show_df.head(200), width="stretch")
-
-            critical_first = (
-                member_df[member_df["member_id"] >= 0]
-                .sort_values("FS_min_sort", ascending=True)["member_id"]
-                .drop_duplicates()
-                .tolist()
-            )
-
-            if critical_first:
-                # Allow multi-selection of members to highlight.  By default
-                # preselect the top 5 most critical members (lowest FS).  The
-                # list of options is sorted by ascending FS_min.
-                default_sel = critical_first[:5]
-                selected = st.multiselect(
-                    "Destacar membros",
-                    options=critical_first,
-                    default=default_sel,
-                    help="Selecione um ou mais IDs de membro para destacá-los na visualização 3D.",
+                st.warning("O HTML interativo ainda não foi gerado nesta execução. Exibindo a vista de contingência.")
+                fallback_fig = viz.plotly_stick_pieces(
+                    pieces_all,
+                    max_pieces=max(2500, len(pieces_all)),
+                    color_by="member_group",
+                    batch_by="member",
+                    connection_offset_scale=float(detail_runtime_cfg.get("piece_view_mounted_connection_offset_scale", 0.0)),
+                    section_explode_scale=1.0,
+                    uirevision_key="cad_member_fallback_camera",
+                    height_px=1020,
                 )
+                st.plotly_chart(fallback_fig, width="stretch", key="cad_member_fallback", config=plotly_config)
 
-                color_mode_critical = st.radio(
-                    "Cor da visualização crítica",
-                    [
-                        "risco estrutural (FS + utilização)",
-                        "fator de segurança",
-                        "utilização",
-                        "força axial",
-                    ],
-                    horizontal=True,
-                    index=0,
-                    help=(
-                        "Risco estrutural usa FS_design/FS_min como cor principal "
-                        "e utilização como espessura da barra. Força axial isolada "
-                        "serve para diagnóstico de caminho de carga, não para risco."
-                    ),
-                )
-
-                color_mode_map = {
-                    "risco estrutural (FS + utilização)": "risk",
-                    "fator de segurança": "safety_factor",
-                    "utilização": "utilization",
-                    "força axial": "force",
-                }
-                st.plotly_chart(
-                    viz.plotly_geometry(
-                        r["nodes"],
-                        r["members"],
-                        r["supports"],
-                        r["loads"],
-                        color_mode=color_mode_map[color_mode_critical],
-                        member_results=r.get("solver_result").member_results if r.get("solver_result") else [],
-                        member_checks=r.get("member_checks", []),
-                        selected_member_ids=[int(m) for m in selected] if selected else None,
-                        highlight_selected=True,
-                        scale_mode="didactic",
-                    ),
-                    width="stretch",
-                )
-
-                # Show detailed table for selected members.  If multiple
-                # members are selected, show them all; otherwise show none.
-                if selected:
-                    st.dataframe(
-                        _df_to_display_units(
-                            member_df[member_df["member_id"].isin([int(m) for m in selected])][show_cols],
-                            length_unit,
-                            force_unit,
-                        ),
-                        width="stretch",
-                    )
-
-    if result_view == "Montagem real":
-        pieces_all = r.get("detailed", {}).get("stick_pieces", [])
-        assembly_groups = r.get("detailed", {}).get("assembly_groups", [])
-        assembly_summary = r.get("detailed", {}).get("assembly_summary", {})
-        assembly_tutorial = r.get("detailed", {}).get("assembly_tutorial", {}) or {}
-        render_mode = "prismas reais"
-        st.caption("Render fixo: prismas reais opacos com arestas. Modos 'linhas leves' e 'prismas exagerados' foram removidos para evitar interpretação incorreta da montagem.")
-
-        tutorial_steps = assembly_tutorial.get("assembly_steps", []) or []
-        if tutorial_steps:
-            st.markdown("**Tutorial de montagem por etapas**")
-            for step in tutorial_steps:
-                st.markdown(
-                    f"**{step.get('step_id', '')} - {step.get('title', '')}**  \n"
-                    f"Palitos estimados: {step.get('stick_count', 0)} | "
-                    f"Massa estimada: {_format_float(step.get('estimated_mass_g'), 2, '0')} g  \n"
-                    f"{step.get('instruction', '')}"
-                )
-            with st.expander("Mostrar listas de corte e emenda do tutorial", expanded=False):
-                cut_df = _prepare_table(assembly_tutorial.get("cut_list", []))
-                joint_df = _prepare_table(assembly_tutorial.get("joint_list", []))
-                by_member_df = _prepare_table(
-                    [
-                        {"member_id": k, "stick_count": v}
-                        for k, v in (assembly_tutorial.get("stick_count_by_member", {}) or {}).items()
-                    ]
-                )
-                if not cut_df.empty:
-                    st.markdown("**Lista de cortes**")
-                    st.dataframe(_df_to_display_units(cut_df, length_unit, force_unit), width="stretch")
-                if not joint_df.empty:
-                    st.markdown("**Lista de juntas**")
-                    st.dataframe(_df_to_display_units(joint_df, length_unit, force_unit), width="stretch")
-                if not by_member_df.empty:
-                    st.markdown("**Palitos por membro**")
-                    st.dataframe(by_member_df, width="stretch")
-
-        mounted_scale_default = float(detail_cfg.get("piece_view_mounted_connection_offset_scale", 0.0))
-        connection_offset_scale = mounted_scale_default
-
-        # Show assembly group overview first if available
-        if assembly_groups:
-            st.markdown("**Resumo de grupos de montagem**")
-            # Convert to DataFrame for display.  Select key columns to keep the table narrow.
-            grp_df = pd.DataFrame(assembly_groups)
-            key_cols = [
-                c
-                for c in [
-                    "friendly_name",
-                    "member_group",
-                    "orientation",
-                    "approx_length_mm",
-                    "n_pieces",
-                    "n_members",
-                    "mass_g",
-                ]
-                if c in grp_df.columns
-            ]
-            st.dataframe(grp_df[key_cols].head(50), width="stretch")
-
-            # Provide summary metrics in a small table
-            if assembly_summary:
-                asm_rows = [
-                    {"item": "Total de peças", "valor": assembly_summary.get("total_pieces")},
-                    {"item": "Membros únicos", "valor": assembly_summary.get("unique_members")},
-                    {"item": "Massa total", "valor": f"{assembly_summary.get('total_mass_g', 0):.1f} g" if assembly_summary.get("total_mass_g") is not None else ""},
-                    {"item": "Faixa de comprimento", "valor": f"{assembly_summary.get('length_range_mm', (0,0))[0]:.1f}–{assembly_summary.get('length_range_mm', (0,0))[1]:.1f} mm"},
-                ]
-                # Ensure the 'valor' column is consistently treated as string to avoid
-                # Arrow conversion errors when values mix numbers and units.
-                asm_df = pd.DataFrame(asm_rows)
-                if "valor" in asm_df.columns:
-                    asm_df["valor"] = asm_df["valor"].astype(str)
-                st.dataframe(asm_df, width="stretch")
-
-            # Filtro de visualização por peça real, não apenas por classe aproximada.
-            # O agrupamento por comprimento/orientação continua disponível, mas a opção
-            # principal para auditoria fina é a unidade real de montagem gerada pelo CSV.
-            pieces_to_show = pieces_all
-            color_by_mode = "member_group"
-            filter_mode = st.radio(
-                "Tipo de filtro da visualização",
-                ["todos", "grupo estrutural", "subconjunto de montagem", "peça real"],
-                index=0,
-                horizontal=True,
-                help=(
-                    "'peça real' usa assembly_unit_key/stick_id do stick_pieces.csv. "
-                    "Assim o 3D mostra exatamente a unidade física selecionada, e não um grupo aproximado."
-                ),
-            )
-            piece_view_mode = st.radio(
-                "Modo geométrico",
-                ["posição de encaixe", "vista explodida"],
-                index=0,
-                horizontal=True,
-                help=(
-                    "'posição de encaixe' mostra as peças no lugar construtivo; "
-                    "'vista explodida' aplica um afastamento lateral moderado para auditar camadas e X."
-                ),
-            )
-            mounted_scale = float(detail_cfg.get("piece_view_mounted_connection_offset_scale", 0.0))
-            exploded_scale = float(detail_cfg.get("piece_view_exploded_connection_offset_scale", 0.60))
-            connection_offset_scale = mounted_scale if piece_view_mode == "posição de encaixe" else exploded_scale
-
-            if filter_mode == "grupo estrutural":
-                structural_groups = sorted({str(r.get("member_group", "sem_grupo")) for r in pieces_all})
-                picked_struct_group = st.selectbox(
-                    "Visualizar grupo estrutural",
-                    options=["(todos)"] + structural_groups,
-                    index=0,
-                )
-                if picked_struct_group != "(todos)":
-                    pieces_to_show = [r for r in pieces_all if str(r.get("member_group")) == picked_struct_group]
-                    color_by_mode = "assembly_unit"
-
-            elif filter_mode == "subconjunto de montagem":
-                group_keys = [g.get("friendly_name") for g in assembly_groups]
-                selected_group_name = None
-                if group_keys:
-                    selected_group_name = st.selectbox(
-                        "Visualizar subconjunto aproximado",
-                        options=["(todos)"] + group_keys,
-                        index=0,
-                        help="Agrupa por grupo estrutural, orientação e comprimento arredondado. Use 'peça real' para isolar uma unidade física exata."
-                    )
-                if selected_group_name and selected_group_name != "(todos)":
-                    selected_keys = [g for g in assembly_groups if g.get("friendly_name") == selected_group_name]
-                    if selected_keys:
-                        gsel = selected_keys[0]
-                        mg = gsel.get("member_group")
-                        orient = gsel.get("orientation")
-                        length_bin = gsel.get("approx_length_mm")
-                        n_sticks = gsel.get("n_sticks")
-                        filtered = []
-                        for r in pieces_all:
-                            if str(r.get("member_group")) != str(mg):
-                                continue
-                            p0 = (
-                                float(r.get("x0_mm", 0.0) or 0.0),
-                                float(r.get("y0_mm", 0.0) or 0.0),
-                                float(r.get("z0_mm", 0.0) or 0.0),
-                            )
-                            p1 = (
-                                float(r.get("x1_mm", 0.0) or 0.0),
-                                float(r.get("y1_mm", 0.0) or 0.0),
-                                float(r.get("z1_mm", 0.0) or 0.0),
-                            )
-                            from src.services.assembly_grouping_service import _orientation_from_endpoints  # type: ignore
-                            ori = _orientation_from_endpoints(p0, p1)
-                            if ori != orient:
-                                continue
-                            try:
-                                L = float(r.get("cut_length_mm"))
-                            except (TypeError, ValueError):
-                                L = ((p1[0] - p0[0]) ** 2 + (p1[1] - p0[1]) ** 2 + (p1[2] - p0[2]) ** 2) ** 0.5
-                            length_bin_r = round(L / 10.0) * 10.0
-                            if abs(length_bin_r - length_bin) > 1e-3:
-                                continue
-                            if n_sticks is not None:
-                                try:
-                                    ns = int(r.get("n_sticks"))
-                                except (TypeError, ValueError):
-                                    ns = None
-                                if ns != n_sticks:
-                                    continue
-                            filtered.append(r)
-                        pieces_to_show = filtered
-                        color_by_mode = "assembly_unit"
-
-            elif filter_mode == "peça real":
-                piece_options = []
-                seen_piece_keys = set()
-                for r in pieces_all:
-                    lane = int(safe_float(r.get("lane"), 0) or 0)
-                    pidx = int(safe_float(r.get("piece_index"), 0) or 0)
-                    key = str(r.get("assembly_unit_key") or r.get("stick_id") or f"M{r.get('member_id')}-L{lane:02d}-P{pidx:02d}")
-                    if key in seen_piece_keys:
-                        continue
-                    seen_piece_keys.add(key)
-                    label = (
-                        f"{key} | {r.get('member_group', 'sem_grupo')} | "
-                        f"corte≈{safe_float(r.get('cut_length_mm'), 0.0) or 0.0:.0f} mm"
-                    )
-                    piece_options.append((key, label))
-                piece_options.sort(key=lambda kv: kv[1])
-                if piece_options:
-                    picked_piece_key = st.selectbox(
-                        "Visualizar peça/unidade real",
-                        options=["(todos)"] + [k for k, _ in piece_options],
-                        index=0,
-                        format_func=lambda k: "(todos)" if k == "(todos)" else dict(piece_options).get(k, k),
-                    )
-                    if picked_piece_key != "(todos)":
-                        pieces_to_show = [
-                            r for r in pieces_all
-                            if str(r.get("assembly_unit_key") or r.get("stick_id")) == str(picked_piece_key)
-                        ]
-                        color_by_mode = "assembly_unit"
-
-            st.caption(
-                f"Peças exibidas: {len(pieces_to_show)} de {len(pieces_all)}. "
-                "Cores por grupo estrutural em '(todos)' e por unidade real quando há filtro."
-            )
-
-            # Show 3D piece chart (simplified) for selected group or all
-            if pieces_to_show:
-                st.plotly_chart(
-                    viz.plotly_stick_pieces(
-                        pieces_to_show,
-                        member_id=None,
-                        max_pieces=2000,
-                        render_mode=render_mode,
-                        color_by=color_by_mode,
-                        connection_offset_scale=connection_offset_scale,
-                    ),
-                    width="stretch",
-                )
-            else:
-                st.info("Nenhuma peça encontrada para o grupo selecionado.")
-        else:
-            # Fallback to original per-piece view when grouping is not available
-            if pieces_all:
-                only_member = st.checkbox("Mostrar apenas membro selecionado", value=False)
-                member_selected = None
-
-                if only_member:
-                    mdf = _prepare_member_checks(r.get("member_checks", []))
-                    mids = mdf["member_id"].drop_duplicates().tolist() if not mdf.empty else []
-
-                    if mids:
-                        member_selected = st.selectbox("Membro", mids, index=0, key="detail_member_pick")
-
-                st.plotly_chart(
-                    viz.plotly_stick_pieces(
-                        pieces_all,
-                        member_id=int(member_selected) if member_selected is not None else None,
-                        max_pieces=2000,
-                        render_mode=render_mode,
-                        connection_offset_scale=connection_offset_scale,
-                    ),
-                    width="stretch",
-                )
-            else:
-                st.info("Sem dados peça-a-peça para visualizar.")
-
-        # Show weakest glue joints and cutting list in expandable sections
-        glue_df = _prepare_table(r.get("detailed", {}).get("weakest_glue_joints", []))
-        if not glue_df.empty:
-            with st.expander("Juntas coladas mais críticas", expanded=False):
-                st.dataframe(
-                    _df_to_display_units(glue_df.head(40), length_unit, force_unit),
-                    width="stretch",
-                )
-
-        cuts_df = _prepare_table(r.get("detailed", {}).get("cutting_list", []))
-        if not cuts_df.empty:
-            with st.expander("Lista de cortes", expanded=False):
-                st.dataframe(
-                    _df_to_display_units(cuts_df.head(40), length_unit, force_unit),
-                    width="stretch",
-                )
-
-    if result_view == "Detalhamento técnico":
-        st.subheader("Verificação contra critérios eliminatórios (edital)")
-        checks_df = _prepare_table(r.get("edital_checks", []))
-        if not checks_df.empty:
-            checks_df = checks_df.rename(columns={"criterio": "critério", "valor_obtido": "valor obtido", "regra": "regra", "conforme": "conforme"})
-            st.dataframe(checks_df, width="stretch")
-        else:
-            st.info("Sem dados de critérios do edital.")
-
-        st.subheader("Memorial de cálculo (síntese)")
-        carga_projeto = float(r.get("cfg", {}).get("bridge", {}).get("load_total_kgf", 0.0))
-        ruptura_prevista = float(metrics.get("predicted_breaking_load_kgf", 0.0) or 0.0)
-        fs_member = metrics.get("min_fs_member_design", metrics.get("min_fs_design"))
-        fs_support = metrics.get("min_fs_support", metrics.get("min_support_fs"))
-        fs_glue = metrics.get("min_fs_glue", metrics.get("min_glue_fs"))
-        gov_ls = str(metrics.get("governing_limit_state", "—") or "—")
-        st.markdown(
-            f"""
-- Carga de projeto adotada: **{_format_force_kgf(carga_projeto, force_unit, 2)}**.
-- FS membro (design): **{_format_float(fs_member, 3)}**.
-- FS apoio: **{_format_float(fs_support, 3)}**.
-- FS cola: **{_format_float(fs_glue, 3)}**.
-- Estado limite governante: **{gov_ls}**.
-- Estimativa de carga de ruptura de projeto: **{_format_force_kgf(ruptura_prevista, force_unit, 2)}**.
-"""
+    elif result_view == "Carga / FS":
+        st.subheader("Caminho de carga e fator de segurança")
+        st.caption(
+            "Única visualização analítica mantida na tela: a cor representa o risco por FS e a "
+            "espessura representa a utilização relativa do membro."
         )
-
-        st.subheader("Gráficos de apoio à decisão")
-        member_df = _prepare_member_checks(r.get("member_checks", []))
+        fs_fig = viz.plotly_geometry(
+            r["nodes"],
+            r["members"],
+            r["supports"],
+            r["loads"],
+            color_mode="risk",
+            member_results=r.get("solver_result").member_results if r.get("solver_result") else [],
+            member_checks=member_checks_all,
+            scale_mode="didactic",
+            uirevision_key="load_fs_camera",
+        )
+        st.plotly_chart(fs_fig, width="stretch", key="load_fs_only_view", config=plotly_config)
+        member_df = _prepare_member_checks(member_checks_all)
         if not member_df.empty:
-            grp = (
-                member_df.groupby("group", as_index=False)["FS_min_num"]
-                .min()
-                .rename(columns={"group": "Grupo", "FS_min_num": "FS mínimo"})
-                .sort_values("FS mínimo", ascending=True)
-            )
-            st.plotly_chart(
-                px.bar(grp, x="Grupo", y="FS mínimo", title="FS mínimo por grupo estrutural"),
+            cols = [c for c in ["member_id", "group", "N_N", "L_mm", "FS_min", "FS_design", "governing_mode", "utilization"] if c in member_df.columns]
+            st.markdown("**Membros governantes**")
+            st.dataframe(
+                _df_to_display_units(member_df.sort_values("FS_min_sort", ascending=True)[cols].head(30), length_unit, force_unit),
+                hide_index=True,
                 width="stretch",
             )
 
-            top_axial = member_df.copy()
-            top_axial["Força axial"] = pd.to_numeric(top_axial.get("N_N"), errors="coerce").abs()
-            top_axial = top_axial.sort_values("Força axial", ascending=False).head(25)
-            top_axial["Força axial"] = (top_axial["Força axial"] / 9.80665) * KGF_TO_FORCE_UNIT[force_unit]
-            top_axial["membro"] = top_axial["member_id"].astype(str)
-            st.plotly_chart(
-                px.bar(top_axial, x="membro", y="Força axial", title=f"Top 25 forças axiais absolutas [{force_unit}]"),
-                width="stretch",
-            )
-
-        # Additional charts: axial force distribution along span and support reactions
-        # Compute axial force vs. x-position by averaging member endpoints
-        try:
-            # Build mapping of node id to x coordinate
-            node_map = {n.id: n for n in r.get("nodes", [])}
-            axial_rows = []
-            # Use member_results from solver (if available)
-            mres = r.get("solver_result").member_results if r.get("solver_result") else []
-            if not mres:
-                mres = []
-                for m in r.get("members", []):
-                    # fallback: use member_df values
-                    row = member_df[member_df["member_id"] == m.id]
-                    if not row.empty:
-                        N_val = float(row.iloc[0]["N_N"])
-                    else:
-                        N_val = 0.0
-                    mres.append({"member_id": m.id, "i": m.i, "j": m.j, "N_N": N_val})
-            for mr in mres:
-                mi = node_map.get(int(mr.get("i")))
-                mj = node_map.get(int(mr.get("j")))
-                if mi and mj:
-                    x_mid = 0.5 * (float(mi.x) + float(mj.x))
-                    N_val = float(mr.get("N_N", 0.0))
-                    axial_rows.append({"x_mm": x_mid, "N_N": N_val})
-            if axial_rows:
-                axial_df = pd.DataFrame(axial_rows)
-                axial_df = axial_df.sort_values("x_mm")
-                axial_df["Força axial"] = (axial_df["N_N"].abs() / 9.80665) * KGF_TO_FORCE_UNIT[force_unit]
-                # Convert x coordinate to user selected unit
-                try:
-                    axial_df["posição"] = axial_df["x_mm"] / LENGTH_TO_MM[length_unit]
-                    x_label = f"posição x [{length_unit}]"
-                except KeyError:
-                    axial_df["posição"] = axial_df["x_mm"]
-                    x_label = "x [mm]"
-                st.plotly_chart(
-                    px.line(
-                        axial_df,
-                        x="posição",
-                        y="Força axial",
-                        title=f"Distribuição da força axial ao longo do vão (|N|) [{force_unit}]",
-                        labels={"posição": x_label},
-                    ),
-                    width="stretch",
-                )
-        except (TypeError, ValueError, KeyError, AttributeError) as exc:
-            st.warning(f"Não foi possível gerar o gráfico de distribuição axial: {exc!r}")
-
-        # Support reaction graph
-        try:
-            sp_df = _prepare_table(r.get("support_checks", []))
-            if not sp_df.empty:
-                # Only show active supports with reactions
-                sp_df = sp_df[sp_df.get("support_active_vertical") == True].copy()
-                if not sp_df.empty:
-                    sp_df["reação Z"] = (pd.to_numeric(sp_df.get("reaction_Z_N"), errors="coerce").abs() / 9.80665) * KGF_TO_FORCE_UNIT[force_unit]
-                    sp_df["apoio"] = sp_df["node_id"].astype(str)
-                    st.plotly_chart(
-                        px.bar(
-                            sp_df,
-                            x="apoio",
-                            y="reação Z",
-                            title=f"Reações de apoio verticais [{force_unit}]",
-                        ),
-                        width="stretch",
-                    )
-        except (TypeError, ValueError, KeyError, AttributeError) as exc:
-            st.warning(f"Não foi possível gerar o gráfico de reações de apoio: {exc!r}")
-
-        st.subheader("Resumo dimensional e construtivo")
-        resumo = [
-            {
-                "item": "Vão final",
-                "valor": f"{_to_display_length(float(r.get('cfg', {}).get('bridge', {}).get('span_mm', 0.0)), length_unit):.2f} {length_unit}",
-            },
-            {
-                "item": "Largura final",
-                "valor": f"{_to_display_length(float(r.get('cfg', {}).get('bridge', {}).get('width_mm', 0.0)), length_unit):.2f} {length_unit}",
-            },
-            {
-                "item": "Altura final",
-                "valor": f"{_to_display_length(float(r.get('cfg', {}).get('bridge', {}).get('center_height_mm', 0.0)), length_unit):.2f} {length_unit}",
-            },
-            {
-                "item": "Peso estimado",
-                "valor": f"{_format_float(dsum.get('estimated_total_mass_g'), 1)} g",
-            },
-            {
-                "item": "Consumo estimado de palitos",
-                "valor": f"{_safe_metric(dsum.get('estimated_total_sticks_with_waste'))}",
-            },
-        ]
-        # Convert valor column to string to ensure consistent typing for Arrow tables
-        resumo_df = pd.DataFrame(resumo)
-        if "valor" in resumo_df.columns:
-            resumo_df["valor"] = resumo_df["valor"].astype(str)
-        st.dataframe(resumo_df, width="stretch")
-
-    if result_view == "Logs e auditoria":
-        st.markdown("**Resumo numérico da busca**")
-        stage_resume = pd.DataFrame(
-            [
-                {"etapa": "S0 geradas", "quantidade": stage_counts.get("stage0_generated", 0)},
-                {"etapa": "S0 aprovadas no prefilter", "quantidade": stage_counts.get("stage0_prefilter_passed", 0)},
-                {"etapa": "S0 descartadas no prefilter", "quantidade": stage_counts.get("stage0_prefilter_discarded", 0)},
-                {"etapa": "S1 avaliadas no solver", "quantidade": stage_counts.get("stage1_evaluated", 0)},
-                {"etapa": "S1 descartadas pós-solver", "quantidade": stage_counts.get("stage1_discarded_post_solver", 0)},
-                {"etapa": "S1 válidas", "quantidade": stage_counts.get("stage1", 0)},
-                {"etapa": "S2 variantes geradas", "quantidade": stage_counts.get("stage2_generated", 0)},
-                {"etapa": "S2A aprovadas no filtro rápido", "quantidade": stage_counts.get("stage2a_selected", 0)},
-                {"etapa": "S2B avaliadas no solver", "quantidade": stage_counts.get("stage2b_evaluated", 0)},
-                {"etapa": "S2 variantes únicas", "quantidade": stage_counts.get("stage2_unique", stage_counts.get("stage2", 0))},
-                {"etapa": "S3 validadas", "quantidade": stage_counts.get("stage3", 0)},
-                {"etapa": "S4 rastros", "quantidade": stage_counts.get("stage4_trace", 0)},
-                {"etapa": "S4 validadas", "quantidade": stage_counts.get("stage4", 0)},
-                {"etapa": "Versões finais", "quantidade": stage_counts.get("final_variants", 0)},
-            ]
-        )
-        st.dataframe(stage_resume, width="stretch")
-
-        by_reason = stage_counts.get("stage0_prefilter_discarded_by_reason", {}) or {}
-        if by_reason:
-            st.markdown("**Descarte por motivo (prefilter)**")
-            by_reason_df = pd.DataFrame(
-                [{"motivo": k, "quantidade": v} for k, v in by_reason.items()]
-            ).sort_values("quantidade", ascending=False)
-            st.dataframe(by_reason_df, width="stretch")
-
-        by_reason_all = stage_counts.get("discarded_by_reason", {}) or {}
-        if by_reason_all:
-            st.markdown("**Descarte por motivo (todas as etapas de filtro)**")
-            by_reason_all_df = pd.DataFrame(
-                [{"motivo": k, "quantidade": v} for k, v in by_reason_all.items()]
-            ).sort_values("quantidade", ascending=False)
-            st.dataframe(by_reason_all_df, width="stretch")
-
-        logs_combined = []
-        logs_combined.extend(st.session_state.get("last_run_logs", []))
-        logs_combined.extend(opt.get("logs", []))
-        warnings_list = r.get("warnings", []) or []
-
-        if logs_combined:
-            st.markdown("**Logs detalhados da execução**")
-            st.code("\n".join(logs_combined[-300:]), language="text")
-        else:
-            st.info("Nenhum log detalhado disponível.")
-        if warnings_list:
-            st.markdown("**Warnings estruturados**")
-            st.dataframe(pd.DataFrame(warnings_list), width="stretch")
-
-        debug_jsonl = Path(r.get("planner_debug_jsonl", ""))
-        debug_summary = Path(r.get("planner_debug_summary", ""))
-        if debug_jsonl.exists():
-            st.download_button(
-                "Baixar planner_debug.jsonl",
-                debug_jsonl.read_bytes(),
-                file_name="planner_debug.jsonl",
-                mime="application/json",
-            )
-        if debug_summary.exists():
-            st.download_button(
-                "Baixar planner_debug_summary.md",
-                debug_summary.read_bytes(),
-                file_name="planner_debug_summary.md",
-                mime="text/markdown",
-            )
-
-        discarded_df = _prepare_table(opt.get("discarded", []))
-        if not discarded_df.empty:
-            st.markdown("**Propostas descartadas (auditoria de filtros)**")
-            st.dataframe(_df_to_display_units(discarded_df, length_unit, force_unit), width="stretch")
-
-    if result_view == "Frame3DD e downloads":
-        st.subheader("Frame3DD")
-        st.json(frame3dd_result)
-
-        out_file = Path("outputs/frame3dd/ponte_palitos.out")
-        if out_file.exists():
-            st.text_area(
-                "Saída Frame3DD",
-                out_file.read_text(encoding="utf-8", errors="ignore")[:40000],
-                height=350,
-            )
-
-        st.subheader("Downloads")
-
+    else:
+        st.subheader("Arquivos de fabricação e cálculo")
+        st.caption("Logs continuam disponíveis nos arquivos de debug gerados, mas não são renderizados na tela principal.")
         fzp = Path(r.get("focused_zip_path", ""))
         if fzp.exists():
             st.download_button(
@@ -2096,9 +1405,7 @@ with aba_simulacao:
                 fzp.read_bytes(),
                 file_name="pacote_focado_fabricacao_e_calculo.zip",
                 mime="application/zip",
-                help="Pacote menor e mais direto: resumo, memorial, guia de fabricação, listas essenciais e auditorias.",
             )
-
         zp = Path(r.get("zip_path", ""))
         if zp.exists():
             st.download_button(
@@ -2106,53 +1413,20 @@ with aba_simulacao:
                 zp.read_bytes(),
                 file_name="resultados_simulacao_completo.zip",
                 mime="application/zip",
-                help="Pacote completo com todos os CSVs, plots e saídas intermediárias.",
             )
-
+        details_dir = Path("outputs/details")
+        for label, filename, mime in [
+            ("Baixar palitos detalhados", "stick_pieces.csv", "text/csv"),
+            ("Baixar juntas e sobreposições", "glue_joints.csv", "text/csv"),
+            ("Baixar cortes em grau", "miter_cut_instructions.csv", "text/csv"),
+            ("Baixar tutorial de montagem", "assembly_tutorial.md", "text/markdown"),
+        ]:
+            path = details_dir / filename
+            if path.exists():
+                st.download_button(label, path.read_bytes(), file_name=filename, mime=mime)
         _download_text_button(
             "Baixar configuração analisada",
             json.dumps(r.get("cfg", {}), indent=2, ensure_ascii=False),
             "config_used.json",
         )
 
-        _download_text_button(
-            "Baixar configuração solicitada",
-            json.dumps(r.get("input_cfg", {}), indent=2, ensure_ascii=False),
-            "config_requested.json",
-        )
-
-        if opt.get("recommended_config_path"):
-            rec_path = Path(opt["recommended_config_path"])
-            if rec_path.exists():
-                _download_text_button(
-                    "Baixar configuração recomendada",
-                    rec_path.read_text(encoding="utf-8"),
-                    "recommended_config.json",
-                )
-
-        if opt.get("recommended_config_ideal_path"):
-            p = Path(opt["recommended_config_ideal_path"])
-            if p.exists():
-                _download_text_button(
-                    "Baixar versão IDEAL",
-                    p.read_text(encoding="utf-8"),
-                    "recommended_config_ideal.json",
-                )
-
-        if opt.get("recommended_config_min_path"):
-            p = Path(opt["recommended_config_min_path"])
-            if p.exists():
-                _download_text_button(
-                    "Baixar versão MIN",
-                    p.read_text(encoding="utf-8"),
-                    "recommended_config_min.json",
-                )
-
-        if opt.get("recommended_config_max_path"):
-            p = Path(opt["recommended_config_max_path"])
-            if p.exists():
-                _download_text_button(
-                    "Baixar versão MAX",
-                    p.read_text(encoding="utf-8"),
-                    "recommended_config_max.json",
-                )
